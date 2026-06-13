@@ -1,5 +1,5 @@
 {
-  "name": "xposter",
+  "name": "YJAutoPostOnX",
   "version": "4.0.0",
   "description": "Automated posting tool for X.com (Twitter) — CSV-based scheduling with Playwright automation",
   "main": "src/main.js",
@@ -30,8 +30,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.xposter.bot",
-    "productName": "xposter",
+    "appId": "com.yj.autopostonx",
+    "productName": "YJAutoPostOnX",
     "directories": {
       "output": "dist"
     },

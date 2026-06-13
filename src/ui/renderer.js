@@ -55,7 +55,7 @@ function updateModeUI() {
   const mode = modeSelect.value;
   if (mode === 'csv') {
     csvControls.style.display = 'flex';
-    btnMainAction.textContent = '🚀 بدء التشغيل';
+    btnMainAction.textContent = '🚀 Start';
   }
 }
 
@@ -113,7 +113,7 @@ function hideProfileModal() {
 btnConfirmProfile.addEventListener('click', () => {
   const val = profileModalInput.value.trim();
   if (!val) {
-    profileModalError.textContent = '❌ الرجاء إدخال اسم';
+    profileModalError.textContent = '❌ Please enter a name';
     profileModalError.classList.remove('hidden');
     return;
   }
@@ -136,15 +136,15 @@ profileModalInput.addEventListener('keydown', (e) => {
 // ── Profile Actions ───────────────────────────────────────────────────
 
 btnAddProfile.addEventListener('click', () => {
-  showProfileModal('➕ إضافة بروفايل جديد', '', async (name) => {
+  showProfileModal('➕ Add New Profile', '', async (name) => {
     const result = await window.api.createProfile(name);
     if (result.success) {
-      addLog(`✅ تم إنشاء البروفايل: ${result.profile.name}`, 'success');
+      addLog(`✅ Profile created: ${result.profile.name}`, 'success');
       await loadProfiles();
       profileSelect.value = result.profile.name;
       activeProfileName.textContent = result.profile.name;
     } else {
-      addLog(`❌ فشل إنشاء البروفايل: ${result.error}`, 'error');
+      addLog(`❌ Failed to create profile: ${result.error}`, 'error');
     }
   });
 });
@@ -152,37 +152,37 @@ btnAddProfile.addEventListener('click', () => {
 btnDeleteProfile.addEventListener('click', async () => {
   const selected = profileSelect.value;
   if (selected === 'Default') {
-    addLog('⚠️ لا يمكن حذف البروفايل الافتراضي', 'warning');
+    addLog('⚠️ Cannot delete the Default profile', 'warning');
     return;
   }
-  if (!confirm(`هل أنت متأكد من حذف البروفايل "${selected}"؟`)) return;
+  if (!confirm(`Are you sure you want to delete profile "${selected}"?`)) return;
   const result = await window.api.deleteProfile(selected);
   if (result.success) {
-    addLog(`🗑️ تم حذف البروفايل: ${selected}`, 'warning');
+    addLog(`🗑️ Profile deleted: ${selected}`, 'warning');
     await loadProfiles();
     profileSelect.value = 'Default';
     activeProfileName.textContent = 'Default';
   } else {
-    addLog(`❌ فشل حذف البروفايل: ${result.error}`, 'error');
+    addLog(`❌ Failed to delete profile: ${result.error}`, 'error');
   }
 });
 
 btnRenameProfile.addEventListener('click', () => {
   const selected = profileSelect.value;
   if (selected === 'Default') {
-    addLog('⚠️ لا يمكن تعديل اسم البروفايل الافتراضي', 'warning');
+    addLog('⚠️ Cannot rename the Default profile', 'warning');
     return;
   }
-  showProfileModal(`✏️ تعديل اسم "${selected}"`, selected, async (newName) => {
+  showProfileModal(`✏️ Rename "${selected}"`, selected, async (newName) => {
     if (newName === selected) return;
     const result = await window.api.renameProfile(selected, newName);
     if (result.success) {
-      addLog(`✏️ تم تعديل اسم البروفايل: ${selected} → ${result.profile.name}`, 'success');
+      addLog(`✏️ Profile renamed: ${selected} → ${result.profile.name}`, 'success');
       await loadProfiles();
       profileSelect.value = result.profile.name;
       activeProfileName.textContent = result.profile.name;
     } else {
-      addLog(`❌ فشل تعديل الاسم: ${result.error}`, 'error');
+      addLog(`❌ Failed to rename: ${result.error}`, 'error');
     }
   });
 });
@@ -190,7 +190,7 @@ btnRenameProfile.addEventListener('click', () => {
 profileSelect.addEventListener('change', () => {
   const selected = profileSelect.value;
   activeProfileName.textContent = selected;
-  addLog(`👤 تم التبديل إلى البروفايل: ${selected}`, 'info');
+  addLog(`👤 Switched to profile: ${selected}`, 'info');
   // Load queue for the new profile
   loadQueue(selected);
 });
@@ -239,7 +239,7 @@ btnSelectFolder.addEventListener('click', async () => {
 btnAddPosts.addEventListener('click', async () => {
   if (btnAddPosts.disabled) return;
   btnAddPosts.disabled = true;
-  btnAddPosts.textContent = 'جاري الفتح والفلترة...';
+  btnAddPosts.textContent = 'Opening & filtering...';
 
   const filePath = await window.api.selectCSV();
   if (filePath) {
@@ -248,7 +248,7 @@ btnAddPosts.addEventListener('click', async () => {
       const parseResult = await window.api.parseCSV(filePath);
       const addResult = await window.api.addPosts(parseResult.posts, profileSelect.value);
       await loadQueue(profileSelect.value);
-      const logMsg = `Import Stats -> Added: ${parseResult.added} | Skipped (Length): ${parseResult.skippedLength} | Skipped (No Link): ${parseResult.skippedLink} | Skipped (Duplicates): ${addResult.skippedDuplicate}`;
+      const logMsg = `Import Stats -> Added: ${parseResult.added} | Skipped (Length): ${parseResult.skippedLength} | Skipped (No Media): ${parseResult.skippedLink} | Skipped (Duplicates): ${addResult.skippedDuplicate}`;
       addLog(logMsg, 'success');
     } catch (err) {
       addLog('Error parsing CSV: ' + err.message, 'error');
@@ -256,7 +256,7 @@ btnAddPosts.addEventListener('click', async () => {
   }
 
   btnAddPosts.disabled = false;
-  btnAddPosts.textContent = 'استيراد CSV';
+  btnAddPosts.textContent = 'Import CSV';
 });
 
 btnManageQueue.addEventListener('click', () => {
@@ -269,7 +269,7 @@ btnLogin.addEventListener('click', async () => {
   
   const profileName = profileSelect.value;
   btnLogin.disabled = true;
-  btnLogin.textContent = 'جاري الفتح...';
+  btnLogin.textContent = 'Opening...';
   
   try {
     const result = await window.api.openProfileForLogin(profileName);
@@ -281,7 +281,7 @@ btnLogin.addEventListener('click', async () => {
     addLog('Login failed: ' + err.message, 'error');
   } finally {
     btnLogin.disabled = false;
-    btnLogin.textContent = '👤 إدارة الحساب';
+    btnLogin.textContent = '👤 Login / Account';
   }
 });
 
@@ -319,11 +319,11 @@ btnMainAction.addEventListener('click', () => {
   if (!state.isRunning) {
     // START ACTION
     if (state.queue.length === 0) {
-      addLog('⚠️ لا توجد منشورات في القائمة! استورد CSV أولاً', 'error');
+      addLog('⚠️ Queue is empty! Import CSV first', 'error');
       return;
     }
     if (!state.outputFolder) {
-      addLog('⚠️ الرجاء اختيار مجلد المخرجات!', 'error');
+      addLog('⚠️ Please select an output folder!', 'error');
       return;
     }
 
@@ -342,12 +342,12 @@ btnMainAction.addEventListener('click', () => {
 
     window.api.startPosting(config).then(result => {
       if (!result.success) {
-        addLog('فشل التشغيل: ' + (result.error || 'خطأ غير معروف'), 'error');
+        addLog('Start failed: ' + (result.error || 'Unknown error'), 'error');
         state.isRunning = false;
         updateActionBtnUI();
       }
     }).catch(err => {
-      addLog('خطأ في التشغيل: ' + err.message, 'error');
+      addLog('Operation error: ' + err.message, 'error');
       state.isRunning = false;
       updateActionBtnUI();
     }).finally(() => {
@@ -356,18 +356,18 @@ btnMainAction.addEventListener('click', () => {
   } else {
     // STOP ACTION
     window.api.stopAutomation();
-    addLog('🛑 جاري إرسال إشارة الإيقاف...', 'warning');
+    addLog('🛑 Sending stop signal...', 'warning');
   }
 });
 
 function updateActionBtnUI() {
   if (state.isRunning) {
-    btnMainAction.textContent = '⏹️ إيقاف';
+    btnMainAction.textContent = '⏹️ Stop';
     btnMainAction.classList.add('running');
     btnMainAction.disabled = false;
   } else {
     btnMainAction.classList.remove('running');
-    btnMainAction.textContent = '🚀 بدء التشغيل';
+    btnMainAction.textContent = '🚀 Start';
     btnMainAction.disabled = false;
   }
 }
@@ -479,7 +479,7 @@ statusListenerCleanup = window.api.onStatusUpdate((status) => {
     if (failedCountEl) failedCountEl.textContent = status.stats.failed || 0;
   }
 
-  if (status.type === 'error' || status.message === 'Task completed' || status.message === 'Automation stopped by user' || status.message?.includes('اكتمل') || status.message?.includes('تم إيقاف')) {
+  if (status.type === 'error' || status.message === 'Task completed' || status.message === 'Automation stopped by user') {
     state.isRunning = false;
     updateActionBtnUI();
     btnMainAction.disabled = false;
@@ -489,7 +489,7 @@ statusListenerCleanup = window.api.onStatusUpdate((status) => {
 function addLog(message, type) {
   const entry = document.createElement('div');
   entry.className = `log-entry ${type}`;
-  const time = new Date().toLocaleTimeString('ar-EG', { hour12: false });
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false });
   entry.textContent = `[${time}] ${message}`;
   logContainer.appendChild(entry);
 

@@ -1,4 +1,4 @@
-# X-Poster Enterprise 🚀
+# YJAutoPostOnX 🚀
 
 **Automated posting tool for X.com (Twitter)** — CSV-based scheduling with Playwright browser automation.
 
@@ -34,11 +34,8 @@ Post tweets automatically from a CSV file with built-in anti-detection, media up
 ### 1. Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/yjlvfe/xposter.git
-cd xposter
-
-# Install dependencies
+git clone https://github.com/yjlvfe/YJAutoPostOnX.git
+cd YJAutoPostOnX
 npm install
 ```
 
@@ -69,11 +66,11 @@ npm start
 ### First-Time Setup
 
 1. **Launch the app:** `npm start`
-2. **Log in to X:** Click "👤 إدارة الحساب" to open a browser window and log in to your X.com account
+2. **Log in to X:** Click "Login / Account" to open a browser window and log in to your X.com account
 3. **Select output folder:** Choose where to save logs
-4. **Import CSV:** Click "📂 استيراد CSV" and select your post file
+4. **Import CSV:** Click "Import CSV" and select your post file
 5. **Set speed:** Configure minutes between each post
-6. **Click "🚀 بدء التشغيل"** to start posting
+6. **Click "Start"** to begin posting
 
 ### Managing Multiple Accounts
 
@@ -89,14 +86,14 @@ Use spintax `{option1|option2|option3}` in your CSV posts:
 {I love|I enjoy|I'm passionate about} {coding|building|creating} {amazing|awesome|great} things!
 ```
 
-The system will randomly pick one option from each `{...}` group every time it posts.
+The system randomly picks one option from each `{...}` group every time it posts.
 
 ---
 
 ## 🏗️ Project Structure
 
 ```
-xposter/
+YJAutoPostOnX/
 ├── src/
 │   ├── main.js                    # Electron main process
 │   ├── preload.js                 # Context bridge (IPC API)
@@ -108,9 +105,9 @@ xposter/
 │       ├── xPoster.js             # Core posting engine
 │       ├── browserManager.js      # Browser profile management
 │       ├── queueManager.js        # Post queue persistence
-│       ├── reportEngine.js        # Reporting & logging
-│       └── linkService.js         # Link handling
+│       └── reportEngine.js        # Reporting & logging
 ├── package.json
+├── LICENSE
 └── README.md
 ```
 
@@ -134,7 +131,7 @@ Settings are saved to `~/.config/x-poster-bot-profile/config.json`:
 # Build AppImage for Linux
 npm run build:linux
 
-# Output: dist/xposter-*.AppImage
+# Output: dist/YJAutoPostOnX-*.AppImage
 ```
 
 ---
@@ -164,7 +161,7 @@ Text,Media
 
 ## 📄 License
 
-ISC
+MIT
 
 ---
 

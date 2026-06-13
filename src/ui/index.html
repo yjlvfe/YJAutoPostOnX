@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html dir="rtl" lang="ar">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>X-Poster Enterprise</title>
+  <title>YJAutoPostOnX</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,102 +12,102 @@
 <body>
   <div class="container">
     <header>
-      <h1>X-Poster <span class="accent">Enterprise</span></h1>
-      <p class="subtitle">نظام الأتمتة المتقدم لإدارة المحتوى على X</p>
+      <h1>YJAutoPostOnX <span class="accent">Enterprise</span></h1>
+      <p class="subtitle">Advanced X.com Content Automation System</p>
     </header>
 
     <div class="grid-bento">
 
-      <!-- ===== TOP-LEFT: إعدادات الجلسة ===== -->
+      <!-- ===== TOP-LEFT: Session Settings ===== -->
       <div class="card card-settings">
         <div class="card-title">
           <span class="dot"></span>
-          <h2>إعدادات الجلسة</h2>
+          <h2>Session Settings</h2>
         </div>
         <div class="card-body">
           <div class="field">
-            <label>سرعة النشر (دقائق)</label>
+            <label>Post Speed (minutes)</label>
             <input type="number" id="speed" value="5" min="1">
           </div>
           <div class="field">
-            <label>الحد الأقصى للمنشورات</label>
+            <label>Max Posts</label>
             <input type="number" id="maxPosts" value="9999" min="1">
           </div>
 
           <div class="field">
-            <label>مسار المخرجات</label>
-            <button id="btn-select-folder" class="btn-secondary" style="width:100%;">📂 اختيار المجلد</button>
-            <div id="output-folder-path" class="path-display">لم يتم تحديد مسار</div>
+            <label>Output Folder</label>
+            <button id="btn-select-folder" class="btn-secondary" style="width:100%;">📂 Choose Folder</button>
+            <div id="output-folder-path" class="path-display">No folder selected</div>
           </div>
         </div>
       </div>
 
-      <!-- ===== TOP-RIGHT: لوحة التحكم ===== -->
+      <!-- ===== TOP-RIGHT: Control Panel ===== -->
       <div class="card card-controls">
         <div class="card-title">
           <span class="dot"></span>
-          <h2>لوحة التحكم</h2>
+          <h2>Control Panel</h2>
         </div>
         <div class="card-body">
 
           <!-- ===== PROFILES SECTION ===== -->
           <div class="field profiles-section">
-            <label>👤 إدارة البروفايلات</label>
+            <label>👤 Profile Management</label>
             <div class="profile-select-row">
               <select id="profile-select" class="profile-select">
                 <option value="Default">Default</option>
               </select>
               <div class="profile-actions">
-                <button id="btn-add-profile" class="btn-icon" title="إضافة بروفايل جديد">➕</button>
-                <button id="btn-rename-profile" class="btn-icon" title="تعديل اسم البروفايل">✏️</button>
-                <button id="btn-delete-profile" class="btn-icon" title="حذف البروفايل الحالي">🗑️</button>
+                <button id="btn-add-profile" class="btn-icon" title="Add new profile">➕</button>
+                <button id="btn-rename-profile" class="btn-icon" title="Rename profile">✏️</button>
+                <button id="btn-delete-profile" class="btn-icon" title="Delete profile">🗑️</button>
               </div>
             </div>
-            <div id="profile-helper" class="profile-helper">البروفايل النشط: <span id="active-profile-name">Default</span></div>
+            <div id="profile-helper" class="profile-helper">Active profile: <span id="active-profile-name">Default</span></div>
           </div>
 
           <div class="field">
-            <label>وضع التشغيل</label>
+            <label>Mode</label>
             <select id="mode-select">
-              <option value="csv">📂 استيراد CSV</option>
+              <option value="csv">📂 CSV Import</option>
             </select>
           </div>
 
           <div id="csv-controls" class="csv-row">
-            <button id="btn-add-posts" class="btn-secondary csv-btn">📂 استيراد CSV</button>
-            <button id="btn-manage-queue" class="btn-secondary csv-btn">📋 إدارة القائمة</button>
+            <button id="btn-add-posts" class="btn-secondary csv-btn">📂 Import CSV</button>
+            <button id="btn-manage-queue" class="btn-secondary csv-btn">📋 Manage Queue</button>
           </div>
 
-          <button id="btn-main-action" class="btn-start">🚀 بدء التشغيل</button>
+          <button id="btn-main-action" class="btn-start">🚀 Start</button>
 
-          <button id="btn-login" class="btn-account">👤 إدارة الحساب</button>
+          <button id="btn-login" class="btn-account">👤 Login / Account</button>
 
           <div class="counters">
             <div class="counter-item c-success">
               <span class="counter-num" id="success-count">0</span>
-              <span class="counter-lbl">نجاح</span>
+              <span class="counter-lbl">Success</span>
             </div>
             <div class="counter-item c-fail">
               <span class="counter-num" id="failed-count">0</span>
-              <span class="counter-lbl">فشل</span>
+              <span class="counter-lbl">Failed</span>
             </div>
             <div class="counter-item c-wait">
               <span class="counter-num" id="queue-count">0</span>
-              <span class="counter-lbl">انتظار</span>
+              <span class="counter-lbl">Queue</span>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- ===== BOTTOM: مراقبة النشاط (Full Width) ===== -->
+      <!-- ===== BOTTOM: Activity Monitor (Full Width) ===== -->
       <div class="card card-activity">
         <div class="card-title">
           <span class="dot"></span>
-          <h2>مراقبة النشاط</h2>
+          <h2>Activity Monitor</h2>
           <button id="btn-clear-logs" class="btn-clear">🗑️ Clear</button>
         </div>
         <div class="card-body">
-          <div id="live-status" class="status-bar">النظام جاهز للعمل</div>
+          <div id="live-status" class="status-bar">System ready</div>
           <div id="countdown-timer" class="countdown hidden">00:00</div>
           <div class="log-wrap" id="log-container"></div>
         </div>
@@ -120,23 +120,23 @@
   <div id="queue-modal" class="overlay">
     <div class="modal">
       <div class="modal-head">
-        <h2>📋 إدارة قائمة الانتظار</h2>
-        <button id="btn-close-modal" class="btn-secondary">إغلاق</button>
+        <h2>📋 Queue Manager</h2>
+        <button id="btn-close-modal" class="btn-secondary">Close</button>
       </div>
       <div class="modal-body">
         <table class="qtable">
           <thead>
             <tr>
               <th style="width:40px;"><input type="checkbox" id="select-all"></th>
-              <th>المحتوى</th>
-              <th style="width:80px;text-align:center;">تحكم</th>
+              <th>Content</th>
+              <th style="width:80px;text-align:center;">Action</th>
             </tr>
           </thead>
           <tbody id="queue-table-body"></tbody>
         </table>
       </div>
       <div class="modal-foot">
-        <button id="btn-delete-selected" class="btn-danger">🗑️ حذف المحدد</button>
+        <button id="btn-delete-selected" class="btn-danger">🗑️ Delete Selected</button>
       </div>
     </div>
   </div>
@@ -145,16 +145,16 @@
   <div id="profile-modal" class="overlay">
     <div class="modal profile-modal-box">
       <div class="modal-head">
-        <h2 id="profile-modal-title">👤 إضافة بروفايل</h2>
-        <button id="btn-close-profile-modal" class="btn-secondary">✕ إلغاء</button>
+        <h2 id="profile-modal-title">👤 Add Profile</h2>
+        <button id="btn-close-profile-modal" class="btn-secondary">✕ Cancel</button>
       </div>
       <div class="modal-body">
-        <p class="profile-modal-hint">أدخل اسمًا جديدًا للبروفايل. يُستخدم هذا الاسم للتمييز بين حسابات X المختلفة.</p>
-        <input type="text" id="profile-modal-input" class="profile-modal-input" placeholder="مثال: حساب_التسويق أو Personal" />
+        <p class="profile-modal-hint">Enter a name for the new profile. Used to distinguish between different X accounts.</p>
+        <input type="text" id="profile-modal-input" class="profile-modal-input" placeholder="e.g. Marketing_Account or Personal" />
         <div id="profile-modal-error" class="profile-modal-error hidden"></div>
       </div>
       <div class="modal-foot">
-        <button id="btn-confirm-profile" class="btn-start profile-modal-btn">✅ تأكيد</button>
+        <button id="btn-confirm-profile" class="btn-start profile-modal-btn">✅ Confirm</button>
       </div>
     </div>
   </div>
