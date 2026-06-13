@@ -1,0 +1,51 @@
+{
+  "name": "xposter",
+  "version": "4.0.0",
+  "description": "Automated posting tool for X.com (Twitter) — CSV-based scheduling with Playwright automation",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:linux": "electron-builder --linux AppImage",
+    "build-deploy": "electron-builder --linux AppImage",
+    "audit": "node -e \"const {runAudit,printReport}=require('./src/security/auditor');printReport(runAudit());\"",
+    "test": "node test/chaos-test.js"
+  },
+  "keywords": [
+    "electron",
+    "automation",
+    "x",
+    "twitter",
+    "ubuntu"
+  ],
+  "author": "Antigravity",
+  "license": "ISC",
+  "dependencies": {
+    "csv-parser": "^3.0.0",
+    "playwright": "^1.43.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.xposter.bot",
+    "productName": "xposter",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!scripts/**/*",
+      "!test/**/*",
+      "!check_login.js",
+      "!login_*.js"
+    ],
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  }
+}

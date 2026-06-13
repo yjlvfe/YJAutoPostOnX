@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>X-Poster Enterprise</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>X-Poster <span class="accent">Enterprise</span></h1>
+      <p class="subtitle">نظام الأتمتة المتقدم لإدارة المحتوى على X</p>
+    </header>
+
+    <div class="grid-bento">
+
+      <!-- ===== TOP-LEFT: إعدادات الجلسة ===== -->
+      <div class="card card-settings">
+        <div class="card-title">
+          <span class="dot"></span>
+          <h2>إعدادات الجلسة</h2>
+        </div>
+        <div class="card-body">
+          <div class="field">
+            <label>سرعة النشر (دقائق)</label>
+            <input type="number" id="speed" value="5" min="1">
+          </div>
+          <div class="field">
+            <label>الحد الأقصى للمنشورات</label>
+            <input type="number" id="maxPosts" value="9999" min="1">
+          </div>
+
+          <div class="field">
+            <label>مسار المخرجات</label>
+            <button id="btn-select-folder" class="btn-secondary" style="width:100%;">📂 اختيار المجلد</button>
+            <div id="output-folder-path" class="path-display">لم يتم تحديد مسار</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== TOP-RIGHT: لوحة التحكم ===== -->
+      <div class="card card-controls">
+        <div class="card-title">
+          <span class="dot"></span>
+          <h2>لوحة التحكم</h2>
+        </div>
+        <div class="card-body">
+
+          <!-- ===== PROFILES SECTION ===== -->
+          <div class="field profiles-section">
+            <label>👤 إدارة البروفايلات</label>
+            <div class="profile-select-row">
+              <select id="profile-select" class="profile-select">
+                <option value="Default">Default</option>
+              </select>
+              <div class="profile-actions">
+                <button id="btn-add-profile" class="btn-icon" title="إضافة بروفايل جديد">➕</button>
+                <button id="btn-rename-profile" class="btn-icon" title="تعديل اسم البروفايل">✏️</button>
+                <button id="btn-delete-profile" class="btn-icon" title="حذف البروفايل الحالي">🗑️</button>
+              </div>
+            </div>
+            <div id="profile-helper" class="profile-helper">البروفايل النشط: <span id="active-profile-name">Default</span></div>
+          </div>
+
+          <div class="field">
+            <label>وضع التشغيل</label>
+            <select id="mode-select">
+              <option value="csv">📂 استيراد CSV</option>
+            </select>
+          </div>
+
+          <div id="csv-controls" class="csv-row">
+            <button id="btn-add-posts" class="btn-secondary csv-btn">📂 استيراد CSV</button>
+            <button id="btn-manage-queue" class="btn-secondary csv-btn">📋 إدارة القائمة</button>
+          </div>
+
+          <button id="btn-main-action" class="btn-start">🚀 بدء التشغيل</button>
+
+          <button id="btn-login" class="btn-account">👤 إدارة الحساب</button>
+
+          <div class="counters">
+            <div class="counter-item c-success">
+              <span class="counter-num" id="success-count">0</span>
+              <span class="counter-lbl">نجاح</span>
+            </div>
+            <div class="counter-item c-fail">
+              <span class="counter-num" id="failed-count">0</span>
+              <span class="counter-lbl">فشل</span>
+            </div>
+            <div class="counter-item c-wait">
+              <span class="counter-num" id="queue-count">0</span>
+              <span class="counter-lbl">انتظار</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== BOTTOM: مراقبة النشاط (Full Width) ===== -->
+      <div class="card card-activity">
+        <div class="card-title">
+          <span class="dot"></span>
+          <h2>مراقبة النشاط</h2>
+          <button id="btn-clear-logs" class="btn-clear">🗑️ Clear</button>
+        </div>
+        <div class="card-body">
+          <div id="live-status" class="status-bar">النظام جاهز للعمل</div>
+          <div id="countdown-timer" class="countdown hidden">00:00</div>
+          <div class="log-wrap" id="log-container"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Queue Modal -->
+  <div id="queue-modal" class="overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>📋 إدارة قائمة الانتظار</h2>
+        <button id="btn-close-modal" class="btn-secondary">إغلاق</button>
+      </div>
+      <div class="modal-body">
+        <table class="qtable">
+          <thead>
+            <tr>
+              <th style="width:40px;"><input type="checkbox" id="select-all"></th>
+              <th>المحتوى</th>
+              <th style="width:80px;text-align:center;">تحكم</th>
+            </tr>
+          </thead>
+          <tbody id="queue-table-body"></tbody>
+        </table>
+      </div>
+      <div class="modal-foot">
+        <button id="btn-delete-selected" class="btn-danger">🗑️ حذف المحدد</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Profile Modal -->
+  <div id="profile-modal" class="overlay">
+    <div class="modal profile-modal-box">
+      <div class="modal-head">
+        <h2 id="profile-modal-title">👤 إضافة بروفايل</h2>
+        <button id="btn-close-profile-modal" class="btn-secondary">✕ إلغاء</button>
+      </div>
+      <div class="modal-body">
+        <p class="profile-modal-hint">أدخل اسمًا جديدًا للبروفايل. يُستخدم هذا الاسم للتمييز بين حسابات X المختلفة.</p>
+        <input type="text" id="profile-modal-input" class="profile-modal-input" placeholder="مثال: حساب_التسويق أو Personal" />
+        <div id="profile-modal-error" class="profile-modal-error hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="btn-confirm-profile" class="btn-start profile-modal-btn">✅ تأكيد</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
