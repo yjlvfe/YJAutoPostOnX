@@ -4,7 +4,7 @@ const os = require('os');
 const { launchBrowser } = require('./browserManager');
 const queueManager = require('./queueManager');
 const { ReportEngine } = require('./reportEngine');
-const { validatePost } = require('../security/validator');
+const rateLimitStore = require('./rateLimitStore');
 
 // 🔧 Platform-aware key helper — returns correct key name for keyboard shortcuts
 // Linux: Ctrl+Enter, macOS: Cmd+Enter, Windows: Ctrl+Enter
@@ -145,12 +145,28 @@ async function confirmPostSubmitted(page) {
 async function start(config, onStatus) {
   const { speed, maxPosts, outputFolder, profile } = config;
   const profileName = profile || 'Default';
+
+  // 🚫 Refuse to start a profile that is still cooling down from a rate limit.
+  const existingCd = rateLimitStore.getCooldown(profileName);
+  if (existingCd) {
+    const remainTxt = rateLimitStore.formatRemaining(existingCd.remainingMs);
+    onStatus({
+      type: 'error',
+      message: `⏳ البروفايل "${profileName}" تحت كول داون — متبقٍّ ${remainTxt}. تم تخطّيه.`,
+      rateLimited: true,
+      profile: profileName,
+      cooldownUntil: existingCd.until,
+    });
+    return { status: 'cooldown', profile: profileName, cooldownUntil: existingCd.until, success: 0, failed: 0 };
+  }
+
   const report = new ReportEngine(getReportDir(profileName));
   report.startRun();
   global.isRateLimited = false; // Ensure clean state at start of each run
   let postedCount = 0;
   let successCount = 0;
   let failedCount = 0;
+  let rateLimitedHit = false;
   const failedPosts = [];
 
   let queue;
@@ -404,15 +420,25 @@ async function start(config, onStatus) {
         
         if (isRateLimitedVal && global.isRunning) {
           global.isRateLimited = true;
-          onStatus({ type: 'error', message: 'Rate limit detected - Sleeping for 15 minutes...' });
-          // Interruptible sleep — checks global.isRunning every second
-          for (let i = 0; i < 15 * 60 && global.isRunning; i++) {
-            await new Promise(r => setTimeout(r, 1000));
-          }
-          global.isRateLimited = false;
-          if (!global.isRunning) break;
-          postedCount--;
-          continue;
+          // Try to read an explicit cooldown duration from the page text
+          // ("try again in 25 minutes" / "بعد 30 دقيقة"); fall back to default.
+          const parsedMs = rateLimitStore.parseCooldownFromText(pageContent);
+          const cd = rateLimitStore.setCooldown(profileName, parsedMs, {
+            source: parsedMs ? 'x' : 'default',
+            note: parsedMs ? 'مدة مأخوذة من رسالة تويتر' : 'مدة افتراضية',
+          });
+          const remainTxt = rateLimitStore.formatRemaining(cd.until - Date.now());
+          onStatus({
+            type: 'error',
+            message: `🚫 البروفايل "${profileName}" ضرب حد تويتر — توقف فوراً. الكول داون: ${remainTxt}`,
+            rateLimited: true,
+            profile: profileName,
+            cooldownUntil: cd.until,
+          });
+          report.logEvent({ level: 'error', event: 'RATE_LIMIT', postId: `post-${postedCount}`, attempt: attempts, message: `Rate limited — cooldown until ${new Date(cd.until).toISOString()}` });
+          // Stop this profile's run IMMEDIATELY (no 15-min sleep, no retry).
+          // The orchestrator (main.js) will move to the next profile.
+          throw new Error('RATE_LIMITED');
         }
       }
 
@@ -562,15 +588,36 @@ async function start(config, onStatus) {
       onStatus({ type: 'info', message: 'Task completed', stats: { success: successCount, failed: failedCount } });
     }
     await report.endRun();
+    return {
+      status: global.isRunning ? 'completed' : 'stopped',
+      profile: profileName,
+      success: successCount,
+      failed: failedCount,
+    };
   } catch (error) {
     if (error.message === 'STOPPED_BY_USER') {
       onStatus({ type: 'warning', message: 'Automation stopped by user', stats: { success: successCount, failed: failedCount } });
-    } else {
-      onStatus({ type: 'error', message: error.message, stats: { success: successCount, failed: failedCount } });
-      report.logEvent({ level: 'error', event: 'RUN_ERROR', postId: null, attempt: 0, message: error.message });
+      await report.endRun();
+      return { status: 'stopped', profile: profileName, success: successCount, failed: failedCount };
     }
+    if (error.message === 'RATE_LIMITED') {
+      // Already reported + cooldown stored inside the loop. Stop this profile
+      // cleanly so the orchestrator can advance to the next profile.
+      rateLimitedHit = true;
+      await report.endRun();
+      const cd = rateLimitStore.getCooldown(profileName);
+      return {
+        status: 'rate_limited',
+        profile: profileName,
+        success: successCount,
+        failed: failedCount,
+        cooldownUntil: cd ? cd.until : null,
+      };
+    }
+    onStatus({ type: 'error', message: error.message, stats: { success: successCount, failed: failedCount } });
+    report.logEvent({ level: 'error', event: 'RUN_ERROR', postId: null, attempt: 0, message: error.message });
     await report.endRun();
-    if (error.message !== 'STOPPED_BY_USER') throw error;
+    throw error;
   } finally {
     try {
       if (context) await context.close();
@@ -617,4 +664,81 @@ async function countdown(ms, onStatus, queueCount, success, failed) {
   return false;
 }
 
-module.exports = { start };
+/**
+ * Multi-profile orchestrator. Runs `start` for each profile in order.
+ * Behaviour per the user's spec:
+ *   1. When a profile hits a rate limit → it stops IMMEDIATELY (handled in
+ *      `start` via RATE_LIMITED) and a cooldown is recorded.
+ *   2. We then advance to the NEXT profile automatically.
+ *   3. Profiles already under an active cooldown are skipped with a notice.
+ *
+ * @param {object} config - { speed, maxPosts, outputFolder, profiles: string[] }
+ * @param {function} onStatus
+ * @returns {Promise<{ results: object[], summary: object }>}
+ */
+async function startMulti(config, onStatus) {
+  const profiles = Array.isArray(config.profiles) && config.profiles.length
+    ? config.profiles
+    : [config.profile || 'Default'];
+
+  const results = [];
+  let totalSuccess = 0, totalFailed = 0, limitedCount = 0, skippedCount = 0;
+
+  for (let i = 0; i < profiles.length; i++) {
+    if (!global.isRunning) {
+      onStatus({ type: 'warning', message: '🛑 تم الإيقاف بواسطة المستخدم.' });
+      break;
+    }
+    const profileName = profiles[i];
+
+    onStatus({
+      type: 'info',
+      message: `▶️ البروفايل (${i + 1}/${profiles.length}): "${profileName}"`,
+      activeProfile: profileName,
+      profileIndex: i + 1,
+      profileTotal: profiles.length,
+    });
+
+    let res;
+    try {
+      res = await start({ ...config, profile: profileName }, onStatus);
+    } catch (err) {
+      // A hard error on one profile shouldn't kill the whole batch.
+      onStatus({ type: 'error', message: `خطأ في "${profileName}": ${err.message}` });
+      res = { status: 'error', profile: profileName, success: 0, failed: 0, error: err.message };
+    }
+    results.push(res);
+    totalSuccess += res.success || 0;
+    totalFailed += res.failed || 0;
+
+    if (res.status === 'rate_limited') {
+      limitedCount++;
+      onStatus({
+        type: 'warning',
+        message: `➡️ "${profileName}" ضرب حد — الانتقال للبروفايل التالي...`,
+      });
+      // global.isRateLimited was set true inside start(); reset before next.
+      global.isRateLimited = false;
+      continue;
+    }
+    if (res.status === 'cooldown') { skippedCount++; continue; }
+    if (res.status === 'stopped') break;
+  }
+
+  const summary = {
+    profilesRun: results.length,
+    totalSuccess,
+    totalFailed,
+    rateLimited: limitedCount,
+    skippedCooldown: skippedCount,
+  };
+  onStatus({
+    type: 'info',
+    message: `✅ انتهى التشغيل المتعدد — نجح ${totalSuccess}، فشل ${totalFailed}، حدود ${limitedCount}، متخطّى ${skippedCount}.`,
+    multiDone: true,
+    summary,
+  });
+  return { results, summary };
+}
+
+module.exports = { start, startMulti };

@@ -27,12 +27,10 @@ os.homedir = () => STRESS_DIR;
 
 // Clear cache for clean imports
 delete require.cache[require.resolve('../src/automation/referralService')];
-delete require.cache[require.resolve('../src/automation/linkService')];
 delete require.cache[require.resolve('../src/security/validator')];
 delete require.cache[require.resolve('../src/security/migrator')];
 
 const referralService = require('../src/automation/referralService');
-const linkService = require('../src/automation/linkService');
 const validator = require('../src/security/validator');
 const migrator = require('../src/security/migrator');
 
@@ -55,7 +53,6 @@ function setup() {
   
   // Clear require cache for fresh state
   delete require.cache[require.resolve('../src/automation/referralService')];
-  delete require.cache[require.resolve('../src/automation/linkService')];
 }
 
 const TEST_LINK = 'https://www.mexc.com/acquisition/custom-sign-up?shareCode=mexc-12UHY5';
@@ -332,32 +329,6 @@ async function runTests() {
   assert(state2.hasLink === true, 'State: hasLink true');
   
   console.log('   ✅ State roundtrip verified\n');
-
-  // ========== TEST 12: LinkService delegation ==========
-  console.log('📋 Test 12: LinkService Delegation');
-  setup();
-  
-  const svc12 = require('../src/automation/referralService');
-  svc12.init();
-  svc12.setEnabled(true);
-  
-  // Setting via linkService should work
-  linkService.setLink(TEST_LINK);
-  assert(linkService.getLink() === TEST_LINK, 'linkService.getLink() works');
-  assert(linkService.hasLink() === true, 'linkService.hasLink() true');
-  assert(linkService.getLinkOrNull() === TEST_LINK, 'linkService.getLinkOrNull() works');
-  assert(linkService.isEnabled() === true, 'linkService.isEnabled() true');
-  
-  // Reset via linkService
-  linkService.reset();
-  assert(linkService.hasLink() === false, 'linkService.reset() works');
-  
-  // Sanitize via linkService
-  svc12.setLink(TEST_LINK);
-  const sanitizedLS = linkService.sanitizePost(`منشور {link}\n\nوصف\n\n#MEXC`);
-  assert(sanitizedLS.text.includes(TEST_LINK), 'linkService.sanitizePost() delegates correctly');
-  
-  console.log('   ✅ LinkService delegation verified\n');
 
   // ========== TEST 13: Extract share code ==========
   console.log('📋 Test 13: Share Code Extraction');

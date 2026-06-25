@@ -1,16 +1,11 @@
 /** 
- * 🔍 Startup Auditor — Validate template health & security
+ * 🔍 Startup Auditor — security & integrity scan
  * ==========================================================
  * Checks:
- *   - Template structure (id, name, category, template)
- *   - {link} placeholder presence
- *   - #MEXC hashtag presence
- *   - All spintax brackets are balanced
- *   - Valid post length range (200-270 chars after expansion)
- *   - Hardcoded URLs in source files
+ *   - Hardcoded referral/URLs in source files (must stay external)
  *   - Cache/counter files for stale data
  *   - Session persistence files
- *   - Config/env files
+ *   - Referral toggle consistency
  * Generates a detailed report.
  */
 
@@ -22,103 +17,6 @@ const referralService = require('../automation/referralService');
 
 const CACHE_DIR = path.join(os.homedir(), '.config', 'x-poster-bot-profile', 'mexc-counters');
 const SESSION_DIR = path.join(os.homedir(), '.config', 'x-poster-profiles');
-
-/**
- * Check spintax brackets are balanced (same number of { and }).
- */
-function spintaxBalanced(text) {
-  let opens = 0, closes = 0;
-  for (const ch of text) {
-    if (ch === '{') opens++;
-    if (ch === '}') closes++;
-  }
-  return opens === closes;
-}
-
-/**
- * Validate a single template object.
- * @param {object} tmpl
- * @param {number} index
- * @returns {string[]} Array of issue strings (empty = healthy)
- */
-function validateTemplate(tmpl, index) {
-  const issues = [];
-
-  // Structure checks
-  if (tmpl.id === undefined || tmpl.id === null) issues.push(`🔸 T${index}: id مفقود`);
-  if (!tmpl.name) issues.push(`🔸 T${tmpl.id ?? index}: الاسم مفقود`);
-  if (!tmpl.category) issues.push(`🔸 T${tmpl.id ?? index}: التصنيف مفقود`);
-  if (!tmpl.template) {
-    issues.push(`🔸 T${tmpl.id ?? index}: القالب فارغ`);
-    return issues;
-  }
-
-  // Spintax balance
-  if (!spintaxBalanced(tmpl.template)) {
-    issues.push(`🔸 T${tmpl.id ?? index}: أقواس spintax غير متوازنة`);
-  }
-
-  // {link} placeholder
-  if (!tmpl.template.includes('{link}')) {
-    issues.push(`🔸 T${tmpl.id ?? index}: لا يحتوي على {link}`);
-  }
-
-  // #MEXC hashtag
-  if (!tmpl.template.includes('#MEXC')) {
-    issues.push(`🔸 T${tmpl.id ?? index}: لا يحتوي على #MEXC`);
-  }
-
-  // Length estimation — replace {link} with ~50 chars, check rough length
-  const withLink = tmpl.template.replace('{link}', 'https://www.mexc.com/acquisition/custom-sign-up?shareCode=MOCK');
-  // Remove spintax — pick first option in each
-  const simple = withLink.replace(/\{[^}]+\}/g, (m) => {
-    const inner = m.slice(1, -1);
-    return inner.split('|')[0] || '';
-  });
-  if (simple.length < 200) issues.push(`🔸 T${tmpl.id ?? index}: أقصر من 200 حرف (~${simple.length})`);
-  if (simple.length > 270) issues.push(`🔸 T${tmpl.id ?? index}: أطول من 270 حرف (~${simple.length})`);
-
-  return issues;
-}
-
-/**
- * Validate all templates and return health report.
- * @returns {{ healthy: number, unhealthy: number, issues: string[], templateCount: number, stats: object }}
- */
-function validateTemplates() {
-  let templates;
-  try {
-    templates = require('../automation/mexcTemplates');
-    if (!Array.isArray(templates)) {
-      return { healthy: 0, unhealthy: 0, issues: ['❌ mexcTemplates.js لا يصدر مصفوفة'], templateCount: 0, stats: {} };
-    }
-  } catch (e) {
-    return { healthy: 0, unhealthy: 0, issues: [`❌ فشل تحميل القوالب: ${e.message}`], templateCount: 0, stats: {} };
-  }
-
-  const allIssues = [];
-  let healthy = 0, unhealthy = 0;
-
-  for (let i = 0; i < templates.length; i++) {
-    const issues = validateTemplate(templates[i], i);
-    if (issues.length === 0) {
-      healthy++;
-    } else {
-      unhealthy++;
-      allIssues.push(...issues);
-    }
-  }
-
-  return {
-    healthy,
-    unhealthy,
-    issues: allIssues,
-    templateCount: templates.length,
-    stats: {
-      categories: [...new Set(templates.filter(t => t.category).map(t => t.category))].length,
-    },
-  };
-}
 
 /**
  * Scan a text file for URLs.
@@ -193,24 +91,17 @@ function runAudit() {
   };
 
   // ════════════════════════════════════════
-  // 1. Template Health Check (NEW)
+  // 1. Generation mode (AI engine — no static templates)
   // ════════════════════════════════════════
-  const tpl = validateTemplates();
-  report.info.push(`📦 القوالب: ${tpl.templateCount} قالب (${tpl.healthy} سليم، ${tpl.unhealthy}有问题)`);
-  if (tpl.stats.categories) report.info.push(`🏷️ التصنيفات: ${tpl.stats.categories}`);
-
-  if (tpl.issues.length > 0) {
-    report.critical.push(...tpl.issues);
-    report.status = 'FAIL';
-  }
+  report.info.push('🧠 وضع التوليد: ذكاء اصطناعي (لا يعتمد على قوالب ثابتة)');
 
   // ════════════════════════════════════════
   // 2. Hardcoded URL scan in source files
   // ════════════════════════════════════════
   const AUTO_DIR = path.join(__dirname, '..', 'automation');
   const sourceFiles = [
-    'xPoster.js', 'queueManager.js', 'spintaxEngine.js',
-    'linkService.js', 'referralService.js', 'reportEngine.js',
+    'xPoster.js', 'queueManager.js', 'contentEngine.js',
+    'referralService.js', 'reportEngine.js',
   ].map(f => path.join(AUTO_DIR, f));
 
   for (const filePath of sourceFiles) {
@@ -326,4 +217,4 @@ function printReport(report) {
   console.log('═══════════════════════════════════════════\n');
 }
 
-module.exports = { runAudit, printReport, scanFileForUrls, validateTemplates };
+module.exports = { runAudit, printReport, scanFileForUrls };

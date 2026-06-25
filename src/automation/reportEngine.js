@@ -183,7 +183,7 @@ class ReportEngine {
     lines.push(`Unconfirmed: ${unconfirmed}`);
     lines.push(`Retries: ${retried}`);
     lines.push(`Dead-Letter: ${deadLetter}`);
-    const rate = total > 0 ? ((success / total) * 100).toFixed(1) : '0.0';
+    const rate = total > 0 ? ((success / total) * 100).toFixed(2) : '0.00';
     lines.push(`Success Rate: ${rate}%`);
     lines.push('');
     lines.push('Top Failures:');

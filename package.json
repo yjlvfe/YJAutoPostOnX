@@ -1,6 +1,6 @@
 {
   "name": "YJAutoPostOnX",
-  "version": "4.0.0",
+  "version": "4.3.0",
   "description": "Automated posting tool for X.com (Twitter) — CSV-based scheduling with Playwright automation",
   "main": "src/main.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "build:linux": "electron-builder --linux AppImage",
     "build-deploy": "electron-builder --linux AppImage",
     "audit": "node -e \"const {runAudit,printReport}=require('./src/security/auditor');printReport(runAudit());\"",
-    "test": "node test/chaos-test.js"
+    "test": "node test/referral-toggle.test.js && node test/e2e-generation.test.js && node test/reportEngine.test.js && node test/session-manager.test.js && node test/full-ui.test.js"
   },
   "keywords": [
     "electron",
