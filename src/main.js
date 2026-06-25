@@ -433,7 +433,7 @@ ipcMain.handle('delete-profile', async (event, profileName) => {
     if (!profileName || profileName === 'Default') {
       return { success: false, error: 'لا يمكن حذف البروفايل الافتراضي' };
     }
-    const safeName = profileName.trim().replace(/[/<>:"\\|?*]/g, '');
+    const safeName = profileName.trim().replace(/[/<>:"\\|?*.]/g, '');
     if (!safeName) return { success: false, error: 'اسم البروفايل غير صالح' };
     const profilePath = path.resolve(PROFILES_DIR, safeName);
     if (!profilePath.startsWith(path.resolve(PROFILES_DIR) + path.sep)) {
@@ -451,8 +451,8 @@ ipcMain.handle('rename-profile', async (event, oldName, newName) => {
     if (!oldName || oldName === 'Default') {
       return { success: false, error: 'لا يمكن تعديل البروفايل الافتراضي' };
     }
-    const safeOld = oldName.trim().replace(/[/<>:"\\|?*]/g, '');
-    const safeName = newName.trim().replace(/[/<>:"\\|?*]/g, '');
+    const safeOld = oldName.trim().replace(/[/<>:"\\|?*.]/g, '');
+    const safeName = newName.trim().replace(/[/<>:"\\|?*.]/g, '');
     if (!safeOld || !safeName) return { success: false, error: 'الاسم غير صالح' };
     const profilesBase = path.resolve(PROFILES_DIR) + path.sep;
     const oldPath = path.resolve(PROFILES_DIR, safeOld);
