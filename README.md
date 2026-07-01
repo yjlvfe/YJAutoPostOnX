@@ -1,27 +1,26 @@
 # YJAutoPostOnX 🚀
 
-**Automated posting tool for X.com (Twitter)** — CSV-based scheduling with Playwright browser automation.
-
-Post tweets automatically from a CSV file with built-in anti-detection, media upload, and multi-profile support.
+**أداة نشر تلقائي على X.com (Twitter)** — تطبيق Electron بسحب AI لإنشاء محتوى عربي كريبتو، جدولة ذكية، ودعم بروفايلات متعددة.
 
 ---
 
-## ✨ Features
+## ✨ المميزات
 
-- 📂 **CSV Import** — Import posts from CSV files (text + optional media paths)
-- 🖼️ **Media Upload** — Auto-detect media column in CSV and upload images/videos
-- 👤 **Multi-Profile** — Manage multiple X.com accounts with separate browser profiles
-- ⏱️ **Scheduled Posting** — Set speed (minutes between posts) and max post count
-- 🔄 **Smart Queue** — Persistent queue with dead letter handling and retry logic
-- 🛡️ **Anti-Detection** — Human-like behavior: random delays, mouse movements, scrolling
-- 📊 **Live Logs** — Real-time status updates, countdown timer, success/fail counters
-- 📝 **CSV Output** — Auto-generated output logs with timestamps and post URLs
-- 🔄 **Auto Retry** — 3 retry attempts with network recovery on failure
-- 🧩 **Spintax Support** — `{option1|option2}` syntax for post variation in CSV
+- 🧠 **محرك AI** — إنشاء تغريدات عربي كريبتو بأي مزود OpenAI-compatible
+- 👤 **بروفايلات متعددة** — إدارة حسابات X متعددة بجلسات متصفح منفصلة
+- 🔄 **جدولة ذكية** — نشر تلقائي مع تحكم بالسرعة وحدود الطلبات
+- 🛡️ **مكافحة الكشف** — سلوك بشري: تأخيرات عشوائية، حركة فأرة، تمرير
+- 🔒 **تدقيق أمني** — فحص تلقائي للإعدادات و API keys
+- 📊 **تقارير حية** — حالة فورية، عد تنازلي، عدادات نجاح/فشل
+- 🔄 **إعادة محاولة** — 3 محاولات مع استعادة الشبكة
+- 📝 **إدارة الجلسات** — جلسات AI مسطحة stateless بدون نمو thread متزايد
+- 🎨 **مولد محتوى** — محتوى عربي تعبوي مع روابط إحالة MEXC
+- ⏱️ **Rate Limit** — توقف تلقائي عند ضرب الحد + انتقال للبروفايل التالي + كولداون
+- 🧩 **Spintax** — `{خيار1|خيار2}` لتنويع التغريدات
 
 ---
 
-## 📋 Requirements
+## 📋 المتطلبات
 
 - **OS:** Linux (Ubuntu 22.04+), macOS, Windows
 - **Node.js:** v18+
@@ -29,83 +28,58 @@ Post tweets automatically from a CSV file with built-in anti-detection, media up
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Install
+## 🚀 التشغيل
 
 ```bash
 git clone https://github.com/yjlvfe/YJAutoPostOnX.git
 cd YJAutoPostOnX
 npm install
-```
-
-### 2. Prepare Your CSV
-
-Create a CSV file with your posts:
-
-```csv
-Text,Media
-"Check out this amazing project!",/path/to/image1.jpg
-"This is my second post! 🚀",
-"{Option A|Option B|Option C} for spintax variety!",
-```
-
-- **Column 1:** Post text (max 270 characters)
-- **Column 2 (optional):** Path to media file (image/video)
-
-### 3. Run
-
-```bash
 npm start
 ```
 
----
+### البناء
 
-## 🎯 How to Use
+```bash
+# AppImage للينكس
+npm run build:linux
 
-### First-Time Setup
-
-1. **Launch the app:** `npm start`
-2. **Log in to X:** Click "Login / Account" to open a browser window and log in to your X.com account
-3. **Select output folder:** Choose where to save logs
-4. **Import CSV:** Click "Import CSV" and select your post file
-5. **Set speed:** Configure minutes between each post
-6. **Click "Start"** to begin posting
-
-### Managing Multiple Accounts
-
-1. Click "➕" to create a new profile
-2. Switch profiles using the dropdown
-3. Each profile has its own browser session and login state
-
-### Customizing Templates (Spintax)
-
-Use spintax `{option1|option2|option3}` in your CSV posts:
-
-```
-{I love|I enjoy|I'm passionate about} {coding|building|creating} {amazing|awesome|great} things!
+# النتيجة: dist/YJAutoPostOnX-*.AppImage
 ```
 
-The system randomly picks one option from each `{...}` group every time it posts.
+### الاختبار
+
+```bash
+npm test          # 87 اختبار
+npm run audit     # تدقيق أمني
+```
 
 ---
 
-## 🏗️ Project Structure
+## 🏗️ هيكل المشروع
 
 ```
 YJAutoPostOnX/
 ├── src/
-│   ├── main.js                    # Electron main process
-│   ├── preload.js                 # Context bridge (IPC API)
-│   ├── ui/
-│   │   ├── index.html             # UI layout
-│   │   ├── renderer.js            # UI logic
-│   │   └── styles.css             # Styles
-│   └── automation/
-│       ├── xPoster.js             # Core posting engine
-│       ├── browserManager.js      # Browser profile management
-│       ├── queueManager.js        # Post queue persistence
-│       └── reportEngine.js        # Reporting & logging
+│   ├── main.js                    # Electron main process + IPC
+│   ├── preload.js                 # Context bridge
+│   ├── automation/
+│   │   ├── xPoster.js             # محرك النشر الأساسي (Playwright)
+│   │   ├── sessionManager.js      # إدارة جلسات AI
+│   │   ├── contentEngine.js       # محرك توليد المحتوى AI
+│   │   ├── browserManager.js      # إدارة بروفايلات المتصفح
+│   │   ├── queueManager.js        # طابور النشر المستمر
+│   │   ├── rateLimitStore.js      # حدود الطلبات + كولداون
+│   │   ├── referralService.js     # خدمة روابط الإحالة
+│   │   └── reportEngine.js        # التقارير و السجلات
+│   ├── security/
+│   │   ├── auditor.js             # تدقيق أمني
+│   │   ├── validator.js           # فحص المدخلات
+│   │   └── migrator.js            # ترحيل الإعدادات
+│   └── ui/
+│       ├── index.html             # واجهة المستخدم
+│       ├── renderer.js            # منطق الواجهة
+│       └── styles.css             # الأنماط
+├── test/                          # اختبارات
 ├── package.json
 ├── LICENSE
 └── README.md
@@ -113,58 +87,27 @@ YJAutoPostOnX/
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ الإعدادات
 
-Settings are saved to `~/.config/x-poster-bot-profile/config.json`:
+يتم حفظ الإعدادات تلقائياً في `~/.config/x-poster-bot-profile/config.json`:
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `speed` | Minutes between posts | 5 |
-| `maxPosts` | Maximum posts per session | 9999 |
-| `outputFolder` | Directory for log files | (user-selected) |
-
----
-
-## 🛠️ Building from Source
-
-```bash
-# Build AppImage for Linux
-npm run build:linux
-
-# Output: dist/YJAutoPostOnX-*.AppImage
-```
+| الإعداد | الوصف | الافتراضي |
+|---------|-------|-----------|
+| `speed` | دقائق بين كل تغريدة | 5 |
+| `maxPosts` | أقصى عدد بالنسبة للجلسة | 9999 |
+| `outputFolder` | مجلد السجلات | (اختيار المستخدم) |
+| `aiBaseUrl` | رابط API الذكاء الاصطناعي | — |
+| `aiApiKey` | مفتاح API | — |
+| `aiModel` | نموذج AI | — |
 
 ---
 
-## 📝 CSV Format Details
+## 📄 الرخصة
 
-```
-Text,Media
-"Your post text here (max 270 chars)",/absolute/path/to/image.jpg
-```
-
-- **Encoding:** UTF-8
-- **Headers:** First row is ignored (use `Text,Media` or any header)
-- **Text column:** Column A — the tweet content
-- **Media column:** Auto-detected as any column with a file path ending in common image/video extensions (jpg, png, gif, mp4, etc.)
-- **Character limit:** Posts over 270 characters are automatically skipped
+MIT License — انظر ملف [LICENSE](LICENSE)
 
 ---
 
-## 🔒 Security
+## 🤝 المؤلف
 
-- Browser profiles are isolated per X.com account
-- No data is sent to external servers
-- All automation runs locally on your machine
-
----
-
-## 📄 License
-
-MIT
-
----
-
-## 🤝 Contributing
-
-Pull requests are welcome! For major changes, please open an issue first.
+**YJLVFE** — [github.com/yjlvfe](https://github.com/yjlvfe)
