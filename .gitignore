@@ -4,3 +4,5 @@ dist/
 .DS_Store
 *.log
 *.AppImage
+docs/
+test/live-provider-test.js

@@ -20,9 +20,9 @@ function check(name, cond) {
   else { failed++; console.log(`❌ ${name}`); }
 }
 
-// ── Mock provider: verifies flat prompts (thread never grows), constant cost ──
+// ── Mock provider: verifies thread grows, cache from round 2 onward ──
 let maxThreadSeen = 0;
-let flatRequests = 0;   // requests that carried exactly ONE user turn (flat)
+let requestsWithCache = 0;   // requests where cached_tokens > 0
 let coreSeq = 0;
 
 const CORES = [
@@ -46,15 +46,17 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     const parsed = JSON.parse(body);
     const msgs = parsed.messages || [];
-    // Count non-system turns. STATELESS FLAT: this must always be exactly 1.
+    // GROWING THREAD: thread grows by 2 (user+assistant) each round.
+    // Cache kicks in when thread has more than 1 user+assistant pair
+    // (i.e. 4+ messages = at least 2 rounds of context).
     const threadTurns = msgs.filter(m => m.role !== 'system').length;
     maxThreadSeen = Math.max(maxThreadSeen, threadTurns);
 
     const userTurns = msgs.filter(m => m.role === 'user').length;
-    if (userTurns === 1) flatRequests++;
-    // IYH reports 0% cache for every model (proven by live testing), so the
-    // mock reflects reality: no cached tokens, ever.
-    const cached = 0;
+    // Simulate prompt cache on rounds ≥ 2: cached_tokens > 0 when there
+    // are existing assistant replies that providers can prefix-cache.
+    const cached = userTurns >= 2 ? 500 : 0;
+    if (cached > 0) requestsWithCache++;
 
     // Return distinct cores each call so dedup logic has something to chew on.
     const userMsg = (msgs.find(m => m.role === 'user' && msgs.indexOf(m) === msgs.length - 1) || {}).content || '';
@@ -102,8 +104,8 @@ function unitTests() {
   const ctx = E.buildAcceptedContext(['هذا منشور طويل جداً عن إدارة المخاطر في التداول والسوق'], 12, 4);
   check('accepted context is a short snippet', ctx.includes('•') && ctx.length < 80);
 
-  // GenerationSession serialization round-trips. STATELESS FLAT (v4.3.0): the
-  // thread is intentionally NOT persisted/restored — it always starts empty.
+  // GenerationSession serialization round-trips. GROWING THREAD (v4.4.0):
+  // the thread IS persisted and restored for prompt cache continuity.
   const gs = new GenerationSession(3, 'SYS');
   gs.messages.push({ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' });
   gs.acceptedBodies.push('body1');
@@ -113,7 +115,7 @@ function unitTests() {
   check('session serializes + restores num', restored.num === 3);
   check('session restores rounds', restored.roundsCompleted === 2);
   check('session restores acceptedBodies (dedup memory)', restored.acceptedBodies.length === 1);
-  check('thread NOT restored — stateless flat', restored.messages.length === 0 && (json.messages || []).length === 0);
+  check('thread persisted + restored for cache continuity', restored.messages.length === 2 && (json.messages || []).length === 2);
 }
 
 server.listen(0, async () => {
@@ -124,14 +126,16 @@ server.listen(0, async () => {
   unitTests();
 
   // ── Integration: run SessionManager against the mock server ──
-  // STATELESS FLAT (v4.3.0): mirrors main.js — sends ONLY the static system
-  // block + this round's single user turn. No growing thread, no commit back
-  // onto session.messages. Dedup memory lives in acceptedBodies/exactKeys.
+  // GROWING THREAD (v4.4.0): mirrors main.js — sends the full conversation
+  // thread (session.messages + this round's user turn), then commits both
+  // the user turn and the assistant reply back onto session.messages so the
+  // next round re-serves the cached prefix.
   async function callAi({ session, angles, acceptedContext, chunk }) {
     const qty = chunk || (angles ? angles.length : 1);
     const system = session.system;
     const user = E.buildRoundUser({ quantity: qty, angles, acceptedContext, inspirationSummary: '' });
-    const messages = [{ role: 'user', content: user }];
+    const thread = (session.messages && session.messages.length > 0) ? session.messages : [];
+    const messages = [...thread, { role: 'user', content: user }];
     const resp = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test' },
@@ -140,7 +144,10 @@ server.listen(0, async () => {
     const data = await resp.json();
     const raw = data.choices[0].message.content;
     const u = data.usage || {};
-    // NO thread commit — session.messages stays empty by design.
+    // Commit onto persistent thread (mirrors main.js callAi behavior)
+    session.messages.push({ role: 'user', content: user });
+    session.messages.push({ role: 'assistant', content: raw });
+    if (session.messages.length > 16) session.messages = session.messages.slice(-16);
     return {
       cores: JSON.parse(raw),
       usage: { input: u.prompt_tokens || 0, output: u.completion_tokens || 0, cacheWrite: 0, cacheRead: u.prompt_tokens_details?.cached_tokens || 0 },
@@ -210,9 +217,10 @@ server.listen(0, async () => {
   // ── Assertions ──
   check('reached target', accepted.length >= target);
   check('created 3 sessions', manager.sessions.length === 3);
-  check('thread never grows — flat 1 user turn per round', maxThreadSeen === 1);
-  check('every request was flat (single user turn)', flatRequests > 0);
+  check('thread grows (not flat)', maxThreadSeen > 2);
+  check('cache hit from round 2 onward', requestsWithCache > 0);
   const totals = manager.totals();
+  check('cacheRead > 0 from round 2 onward', totals.cacheRead > 0);
   check('status emitted to UI', statusEmitted > 0);
   check('persisted snapshot saved', persisted.length === 3);
 
@@ -234,6 +242,7 @@ server.listen(0, async () => {
   });
   mgr2.loadSessions(persisted);
   check('resume restores 3 sessions with same numbers', mgr2.sessions.length === 3 && mgr2.sessions[0].num === 1 && mgr2.sessions[2].num === 3);
+  check('resume restores thread messages for cache continuity', mgr2.sessions[0].messages.length > 0);
 
   // ── Session-count lower/raise reconciliation ──
   mgr2._reconcileSessionCount(2);

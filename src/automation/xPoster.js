@@ -6,9 +6,9 @@ const queueManager = require('./queueManager');
 const { ReportEngine } = require('./reportEngine');
 const rateLimitStore = require('./rateLimitStore');
 
-// 🔧 Platform-aware key helper — returns correct key name for keyboard shortcuts
-// Linux: Ctrl+Enter, macOS: Cmd+Enter, Windows: Ctrl+Enter
-const PLATFORM_KEY = process.platform === 'darwin' ? 'Meta' : 'Control';
+// 🔧 Platform-aware key label — shown in status messages (Ctrl+Enter / ⌘+Enter).
+// Note: Playwright's 'ControlOrMeta' virtual key handles the actual shortcut,
+// so we only need the display label here.
 const PLATFORM_KEY_LABEL = process.platform === 'darwin' ? '⌘' : 'Ctrl';
 
 function parseSpintax(text) {
@@ -47,6 +47,14 @@ async function waitForFunctionInterruptible(page, pageFn, timeoutMs) {
   return null;
 }
 
+// ⚡ C5/M5: escape a CSV field — wraps in double quotes and doubles
+// any embedded double-quotes, per RFC 4180. Prevents column injection
+// when errorMsg / postUrl / postText contain commas, quotes, or newlines.
+function escCsv(value) {
+  const s = (value == null ? '' : String(value));
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
 function getReportDir(profileName) {
   const name = profileName || 'Default';
   if (name === 'Default') {
@@ -83,68 +91,19 @@ async function getTweetUrlFromDOM(page) {
   } catch { return null; }
 }
 
-/**
- * High-accuracy post confirmation with extended timeouts for weak networks.
- * Uses 3 escalating strategies:
- *   1. Toast/snackbar polling (up to 15s)
- *   2. Tweet-button disappearance + DOM url extraction (up to 12s)
- *   3. Page URL change detection
- */
-async function confirmPostSubmitted(page) {
-  // Strategy 1 — Toast/snackbar with extended timeout (15s for slow networks)
-  for (const selector of TOAST_SELECTORS) {
-    try {
-      const el = await page.waitForSelector(selector, { timeout: 15000 });
-      if (el) {
-        // Extract URL from anchor inside toast
-        try {
-          const link = await el.$('a');
-          if (link) {
-            let url = await link.getAttribute('href');
-            if (url) {
-              if (!url.startsWith('http')) url = 'https://x.com' + url;
-              return { success: true, url };
-            }
-          }
-        } catch (e) { /* no anchor, still success */ }
-        return { success: true, url: null };
-      }
-    } catch (e) { /* selector absent — move to next */ }
-  }
-
-  // Strategy 2 — Wait for tweet button to disappear (post submitted)
-  // Poll every 1.5s for up to 12s (handles slow page updates)
-  try {
-    for (let i = 0; i < 8; i++) {
-      await new Promise(r => setTimeout(r, 1500));
-      const btnCount = await page.locator('[data-testid="tweetButtonInline"]').count();
-      if (btnCount === 0) {
-        // Post went through — extract tweet URL from DOM
-        let url = await getTweetUrlFromDOM(page);
-        // Fallback: check page URL
-        if (!url) {
-          try {
-            const u = page.url();
-            if (u.includes('/status/')) url = u;
-          } catch (e) {}
-        }
-        return { success: true, url: url || null };
-      }
-    }
-  } catch (e) { /* polling failed */ }
-
-  // Strategy 3 — Final page URL check
-  try {
-    const u = page.url();
-    if (u.includes('/status/')) return { success: true, url: u };
-  } catch (e) {}
-
-  return { success: false, url: null };
-}
-
 async function start(config, onStatus) {
   const { speed, maxPosts, outputFolder, profile } = config;
   const profileName = profile || 'Default';
+
+  // ⚡ M5: validate outputFolder early — create it if missing so the CSV
+  // appendFile calls below never hit ENOENT. Best-effort; a failure here
+  // is reported but doesn't block posting.
+  if (!outputFolder || typeof outputFolder !== 'string' || !outputFolder.trim()) {
+    onStatus({ type: 'warning', message: '⚠️ لم يتم تحديد مجلد الإخراج — ستُتجاوز سجلات CSV.' });
+  } else {
+    try { await fs.mkdir(outputFolder, { recursive: true }); }
+    catch (e) { onStatus({ type: 'warning', message: `تعذّر إنشاء مجلد الإخراج: ${e.message}` }); }
+  }
 
   // 🚫 Refuse to start a profile that is still cooling down from a rate limit.
   const existingCd = rateLimitStore.getCooldown(profileName);
@@ -166,14 +125,22 @@ async function start(config, onStatus) {
   let postedCount = 0;
   let successCount = 0;
   let failedCount = 0;
-  let rateLimitedHit = false;
   const failedPosts = [];
 
   let queue;
   let context = null;
   try {
-    queue = await queueManager.getQueue(profileName);
-    onStatus({ type: 'info', message: 'Starting advanced automation...', queueCount: queue.length });
+    // Shared queue — load only the slice starting from this profile's position
+    const profileQueueData = await queueManager.getProfileQueue(profileName);
+    queue = profileQueueData.posts;
+    const queueStartIndex = profileQueueData.startIndex;
+    onStatus({
+      type: 'info',
+      message: `Starting automation — البروفايل \"${profileName}\" يبدأ من المنشور #${queueStartIndex + 1} (${queue.length} متبقٍّ من ${profileQueueData.total})`,
+      queueCount: queue.length,
+      queueStart: queueStartIndex + 1,
+      queueTotal: profileQueueData.total,
+    });
 
     context = await launchBrowser(profile || 'Default');
 
@@ -444,9 +411,8 @@ async function start(config, onStatus) {
 
       if (postSuccess === true) {
         successCount++;
-        const itemToDelete = typeof rawItem === 'string' ? rawItem : rawItem.text;
-        await queueManager.deletePost(itemToDelete, profileName);
-        queue = await queueManager.getQueue(profileName);
+        await queueManager.advancePosition(profileName);
+        queue = queue.slice(1);
         report.recordPostResult({
           postId: `post-${postedCount}`,
           text: typeof rawItem === 'string' ? rawItem : rawItem.text,
@@ -454,12 +420,10 @@ async function start(config, onStatus) {
           attempts: attempts
         });
       } else if (postSuccess === 'unconfirmed') {
-        // Unconfirmed: move to pending verification instead of assuming success
-        // Preserves data integrity while unblocking the queue
         const itemText = typeof rawItem === 'string' ? rawItem : rawItem.text;
-        await queueManager.deletePost(itemText, profileName);
+        await queueManager.advancePosition(profileName);
+        queue = queue.slice(1);
         await queueManager.addToPending(itemText, profileName);
-        queue = await queueManager.getQueue(profileName);
         onStatus({ type: 'warning', message: 'Post moved to pending verification (unconfirmed status)' });
         report.recordPostResult({
           postId: `post-${postedCount}`,
@@ -485,11 +449,11 @@ async function start(config, onStatus) {
         failedCount++;
         failedPosts.push(postText);
         onStatus({ type: 'error', message: `❌ فشل (${errorType}): ${errorMsg.slice(0, 60)}` });
-        // Remove from queue to prevent infinite retry loop (Zero-Queue-Block)
+        // Advance position to prevent infinite retry loop (Zero-Queue-Block)
         const itemToDelete = typeof rawItem === 'string' ? rawItem : rawItem.text;
-        await queueManager.deletePost(itemToDelete, profileName);
+        await queueManager.advancePosition(profileName);
+        queue = queue.slice(1);
         await queueManager.addDeadLetter(itemToDelete, errorType, errorMsg, profileName);
-        queue = await queueManager.getQueue(profileName);
         report.recordPostResult({
           postId: `post-${postedCount}`,
           text: typeof rawItem === 'string' ? rawItem : rawItem.text,
@@ -500,9 +464,11 @@ async function start(config, onStatus) {
         });
         // Write to error log
         const errTimestamp = new Date().toLocaleString('ar-EG');
-        const errLine = `"${errTimestamp}","${postText.replace(/"/g, '""')}","${errorType}","${errorMsg}"\n`;
+        // ⚡ C5: escape ALL fields via escCsv — errorMsg/postText may contain quotes/newlines
+        const errLine = `${escCsv(errTimestamp)},${escCsv(postText)},${escCsv(errorType)},${escCsv(errorMsg)}\n`;
         const errPath = path.join(outputFolder, `error-log-${new Date().toISOString().split('T')[0]}.csv`);
         try {
+          await fs.mkdir(path.dirname(errPath), { recursive: true });
           try { await fs.access(errPath); } catch { await fs.writeFile(errPath, 'Time,Content,ErrorType,ErrorReason\n'); }
           await fs.appendFile(errPath, errLine);
         } catch (err2) {
@@ -542,9 +508,11 @@ async function start(config, onStatus) {
       if (postSuccess === true || postSuccess === 'unconfirmed') {
         const timestamp = new Date().toLocaleString('ar-EG');
         const status = postSuccess === true ? 'SUCCESS' : 'UNCONFIRMED';
-        const outputLine = `"${timestamp}","${postText.replace(/"/g, '""')}","${postUrl}","${status}"\n`;
+        // ⚡ C5: escape ALL fields via escCsv — postUrl/postText may contain quotes/newlines
+        const outputLine = `${escCsv(timestamp)},${escCsv(postText)},${escCsv(postUrl)},${escCsv(status)}\n`;
         const outputPath = path.join(outputFolder, `x-poster-output-${new Date().toISOString().split('T')[0]}.csv`);
         try {
+          await fs.mkdir(path.dirname(outputPath), { recursive: true });
           try { await fs.access(outputPath); } catch { await fs.writeFile(outputPath, 'Time,Content,Link,Status\n'); }
           await fs.appendFile(outputPath, outputLine);
         } catch (err3) {
@@ -603,7 +571,6 @@ async function start(config, onStatus) {
     if (error.message === 'RATE_LIMITED') {
       // Already reported + cooldown stored inside the loop. Stop this profile
       // cleanly so the orchestrator can advance to the next profile.
-      rateLimitedHit = true;
       await report.endRun();
       const cd = rateLimitStore.getCooldown(profileName);
       return {

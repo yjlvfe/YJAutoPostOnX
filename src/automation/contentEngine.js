@@ -219,7 +219,7 @@ const STOPWORDS = new Set([
   'و', 'يا', 'ما', 'لا', 'كل', 'هذا', 'هذه', 'الذي',
 ]);
 
-function findOverusedWord(text, maxCount = 2) {
+function findOverusedWord(text, maxCount = 3) {
   const tokens = tokenize(text);
   const counts = {};
   for (const tok of tokens) {
@@ -286,12 +286,23 @@ function pickHashtags(count, seed) {
 // 6. ASSEMBLY — combine AI core text + link + hashtags within budget
 // ─────────────────────────────────────────────────────────────────────
 
-const MIN_LEN = 200;   // lower bound relaxed (was 230) — fewer length rejects, still substantial
+const MIN_LEN = 170;   // relaxed floor — deepseek & short-form models often produce ~150-char cores
 const MAX_LEN = 270;   // HARD ceiling — never exceed (X limit)
+
+// Hashtags sorted shortest-first: used as a fallback so a long core with a
+// referral link still gets at least one short hashtag and passes MAX_LEN.
+const HASHTAG_BANK_SHORT_FIRST = [...HASHTAG_BANK].sort((a, b) => a.length - b.length);
 
 /**
  * Assemble a final tweet from an AI-produced core line, a referral link,
- * and hashtags — trying multiple hashtag counts to land inside [230,270].
+ * and hashtags — trying every combination needed to land inside [MIN_LEN, MAX_LEN].
+ *
+ * Strategy (in order):
+ *   1. Try 2, 3, 1, 4 hashtags with random selection (same as before).
+ *   2. If still failing, try every single hashtag from the bank sorted
+ *      shortest-first — guarantees we find the smallest tag that fits.
+ *   3. Last resort: no hashtags (validateTweet will then reject — but that
+ *      gives a clear diagnostic reason instead of a silent null).
  *
  * @param {string} core - The AI body text (no link, no hashtags ideally)
  * @param {string} link - External referral link (may be empty)
@@ -301,8 +312,7 @@ function assembleTweet(core, link) {
   let cleanCore = cleanCoreText(String(core || '').trim());
   if (!cleanCore) return null;
 
-  // G2: every tweet MUST carry an emoji. If the model didn't put one at the
-  // start, prepend a sensible default so the rule is always satisfied.
+  // G2: every tweet MUST carry an emoji.
   if (!hasEmoji(cleanCore)) {
     const e = DEFAULT_EMOJIS[Math.floor(Math.random() * DEFAULT_EMOJIS.length)];
     cleanCore = `${e} ${cleanCore}`;
@@ -310,19 +320,28 @@ function assembleTweet(core, link) {
 
   const linkPart = link && link.trim() ? `\n${link.trim()}` : '';
 
-  // Prefer FEWER hashtags (2-3). Try counts in order of preference; the
-  // first that lands inside [MIN_LEN, MAX_LEN] wins. Ceiling (270) is hard:
-  // any candidate over MAX_LEN is skipped, never truncated into the text.
+  // Pass 1: standard preferred counts (random hashtag selection)
   for (const hcount of [2, 3, 1, 4]) {
     const tags = pickHashtags(hcount);
     const tagPart = '\n' + tags.join(' ');
     const candidate = `${cleanCore}${linkPart}${tagPart}`;
     const len = tweetLength(candidate);
-    if (len >= MIN_LEN && len <= MAX_LEN) {
-      return { text: candidate, length: len };
-    }
+    if (len >= MIN_LEN && len <= MAX_LEN) return { text: candidate, length: len };
   }
-  return null;
+
+  // Pass 2: try every single hashtag from shortest to longest (rescue for long cores)
+  for (const tag of HASHTAG_BANK_SHORT_FIRST) {
+    const candidate = `${cleanCore}${linkPart}\n${tag}`;
+    const len = tweetLength(candidate);
+    if (len >= MIN_LEN && len <= MAX_LEN) return { text: candidate, length: len };
+  }
+
+  // Pass 3: no hashtags — lets validateTweet emit a clear diagnostic reason
+  const bare = `${cleanCore}${linkPart}`;
+  const bareLen = tweetLength(bare);
+  if (bareLen >= MIN_LEN && bareLen <= MAX_LEN) return { text: bare, length: bareLen };
+
+  return null; // core is genuinely unsalvageable (too long even bare, or too short)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -432,8 +451,35 @@ function validateTweet(text, link /* , (history arg intentionally ignored) */) {
 
   const body = bodyOnly(text);
 
+  // 🔥 NEW: Reject English-dominant text (reasoning/thinking leaked as content)
+  const englishWords = body.match(/[a-zA-Z]{3,}/g) || [];
+  const totalWords = body.split(/\s+/).length;
+  if (totalWords > 0 && englishWords.length / totalWords > 0.3) {
+    return { valid: false, reason: 'نص إنجليزي (تفكير الموديل)' };
+  }
+
+  // 🔥 NEW: Reject draft/idea/thinking patterns
+  const draftPatterns = [
+    /^(tweet|post|draft|idea|angle|previous|next|topic|note)s?\s*[:\-]/i,
+    /^we (need|must|should|have to|want to)/i,
+    /^(actually|first|second|third|finally|also|so|ok|okay|right|well|now|here)\s*,/i,
+    /^for (example|instance|trend following|beginners|intermediates|advanced)/i,
+    /^(support\/resistance|beginner mistakes|patience|discipline|analysis|leverage|fomo|dca|volume|liquidity|news impact|platform safety|low fees|market psychology|trading with the trend|risk of high leverage|price depth and liquidity|risks of high leverage)\s*:/i,
+    /^start with/i,
+    /^better to (count|write|read|check|verify)/i,
+    /^we must (use|avoid|include|exclude|ensure)/i,
+    /^now, we need to/i,
+    /^the user (wants|expects|likely|probably)/i,
+    /^i (must|need|should|will|can|could|would)/i,
+  ];
+  for (const pattern of draftPatterns) {
+    if (pattern.test(body.trim())) {
+      return { valid: false, reason: 'فكرة/مسودة (مش تغريدة جاهزة)' };
+    }
+  }
+
   // G2 cleanliness: no stray quotes inside the body.
-  if (/["'“”«»‹›]/.test(body)) return { valid: false, reason: 'يحتوي علامات اقتباس' };
+  if (/["'"«»‹›]/.test(body)) return { valid: false, reason: 'يحتوي علامات اقتباس' };
 
   // G2 cleanliness: no leftover char-counter / numbering artifacts.
   if (/\d+\s*(?:chars?|characters?|حرف)/i.test(body)) {
@@ -450,7 +496,7 @@ function validateTweet(text, link /* , (history arg intentionally ignored) */) {
   const adj = findAdjacentRepeat(body);
   if (adj) return { valid: false, reason: `تكرار متجاور لكلمة "${adj}"` };
 
-  const over = findOverusedWord(body, 2);
+  const over = findOverusedWord(body, 3);
   if (over) return { valid: false, reason: `كلمة "${over}" مكررة أكثر من اللازم` };
 
   // Must contain the link if one was provided
@@ -731,6 +777,65 @@ function selectAngles(n) {
 // 9. PROVIDER AUTO-DETECTION
 // ─────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────
+// 9a. MULTI-FORMAT SUPPORT — model-to-wire-format mapping (v4.5.0)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Static model map for OpenCode Go provider: models that speak Anthropic
+ * wire format even though they're served through an OpenAI-style gateway.
+ * All other OpenCode Go models use OpenAI-compatible format.
+ */
+const OPENCODE_GO_ANTHROPIC_MODELS = [
+  'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
+  'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus',
+  // ⚡ H2: models added — they speak Anthropic wire format on the OpenCode Go gateway
+  'glm-5.2',
+  'kimi-k2.7',
+  'deepseek-v4-pro',
+  'mimo-v2.5',
+];
+
+/**
+ * Determine the wire-format for a given provider + model combination.
+ * Separates the PROVDER (who runs the endpoint) from the FORMAT (which
+ * wire protocol the model speaks) — essential for gateways like OpenCode
+ * Go that serve both Anthropic-format and OpenAI-format models through
+ * the same base URL.
+ *
+ * @param {string} provider  - Provider ID ('openai'|'anthropic'|'gemini'|'opencode-go'|etc.)
+ * @param {string} [modelId] - Model name (e.g. 'claude-sonnet-4', 'deepseek-v4-flash')
+ * @returns {{ format: 'anthropic'|'openai'|'gemini', endpoint: string }}
+ *   format   — 'anthropic' → /v1/messages, 'openai' → /v1/chat/completions
+ *   endpoint — the URL path component (caller constructs full URL)
+ */
+function detectApiFormat(provider, modelId) {
+  const m = (modelId || '').toLowerCase();
+
+  if (provider === 'opencode-go') {
+    const isAnthropic = OPENCODE_GO_ANTHROPIC_MODELS.some(name => m.startsWith(name));
+    return isAnthropic
+      ? { format: 'anthropic', endpoint: '/v1/messages' }
+      : { format: 'openai', endpoint: '/v1/chat/completions' };
+  }
+
+  // Gemini native format (URL-embedded key, contents array)
+  if (provider === 'gemini') {
+    return { format: 'gemini', endpoint: '' };
+  }
+
+  // For all other providers: model family decides
+  const fam = detectModelFamily(modelId);
+  if (fam === 'claude') {
+    return { format: 'anthropic', endpoint: '/v1/messages' };
+  }
+  if (fam === 'gemini') {
+    return { format: 'gemini', endpoint: '' };
+  }
+  // gpt, deepseek, qwen, llama, etc. → OpenAI-compatible
+  return { format: 'openai', endpoint: '/v1/chat/completions' };
+}
+
 /**
  * Detect the API protocol. PER SPEC (G5) the MODEL NAME is authoritative:
  *   - claude-*           → Anthropic format (/v1/messages, anthropic-version)
@@ -746,13 +851,18 @@ function selectAngles(n) {
 function detectProvider(baseUrl, forced, model) {
   if (forced && forced !== 'auto') return forced;
 
+  // Check if URL is OpenCode Go gateway FIRST (before model family check)
+  const url = (baseUrl || '').toLowerCase();
+  if (url.includes('opencode.ai') || url.includes('opencode-go')) {
+    return 'opencode-go';
+  }
+
   // Model family decides the wire format (G5 smart rule).
   const fam = detectModelFamily(model);
   if (fam === 'claude') return 'anthropic';
   if (fam === 'gemini') {
     // Gemini only speaks native protocol on its own host; on a gateway it's
     // served OpenAI-shaped. Use the URL to disambiguate.
-    const url = (baseUrl || '').toLowerCase();
     if (url.includes('generativelanguage') && !url.includes('/openai')) return 'gemini';
     return 'openai';
   }
@@ -785,6 +895,7 @@ function detectModelFamily(model) {
  * "claude · عبر OpenAI API" or "gemini · أصلي". Shown in the UI tag.
  */
 function providerLabel(provider, model) {
+  if (provider === 'opencode-go') return 'OpenCode Go';
   const fam = detectModelFamily(model);
   const proto = provider === 'anthropic' ? 'Anthropic'
     : provider === 'gemini' ? 'Gemini'
@@ -824,6 +935,7 @@ module.exports = {
   syncSessionDedup,
   buildInspirationSummary,
   selectAngles,
+  detectApiFormat,
   detectProvider,
   detectModelFamily,
   providerLabel,

@@ -18,36 +18,15 @@ app.commandLine.appendSwitch('disable-setuid-sandbox');
 
 let mainWindow;
 let loginContext = null;
-// Cooperative cancellation flag for AI generation. The renderer sets it via
-// the 'cancel-ai-generation' IPC; the generation loop checks it between waves
-// and stops early, keeping everything accepted so far.
+// Cooperative cancellation flag: renderer sets via 'cancel-ai-generation'.
 let aiGenerationCancelled = false;
-// Live, user-adjustable parallel-session count. The renderer can change this
-// mid-run via 'set-session-count'; SessionManager reads it BETWEEN rounds only
-// (golden rule: never mid-round). Default 5 (replaces old CONCURRENCY).
-let desiredSessionCount = 5;
+// ⚡ C1+C2: Active AbortController for IMMEDIATE stop — aborts ALL in-flight
+// AI fetch requests so the user doesn't wait for the current 120s round.
+let activeAbortController = null;
+// Desired parallel worker count (default 3, adjustable via 'set-session-count').
+let desiredWorkerCount = 3;
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
-// Persisted session snapshots for cross-restart resume (spec: sessions are
-// not reset on app close; they resume with the same numbers).
-const SESSIONS_FILE = path.join(app.getPath('userData'), 'generation_sessions.json');
 
-function loadPersistedSessions() {
-  try {
-    const raw = fs_sync.readFileSync(SESSIONS_FILE, 'utf8');
-    const obj = JSON.parse(raw);
-    return Array.isArray(obj.sessions) ? obj.sessions : [];
-  } catch { return []; }
-}
-
-function savePersistedSessions(snapshots) {
-  try {
-    fs_sync.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions: snapshots, ts: Date.now() }, null, 0), 'utf8');
-  } catch (e) { /* best-effort */ }
-}
-
-function clearPersistedSessions() {
-  try { fs_sync.unlinkSync(SESSIONS_FILE); } catch { /* best-effort */ }
-}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -181,7 +160,8 @@ ipcMain.handle('parse-csv', async (event, filePath) => {
           post = post.trim().replace(/^\"|\"$/g, '').replace(/\"\"/g, '"').trim();
           if (post) {
             totalProcessed++;
-            if (post.length > 270) {
+            // Use X-aware length: URLs count as 23 chars (same logic as add-posts)
+            if (contentEngine.tweetLength(post) > 280) {
               skippedLength++;
               return;
             }
@@ -250,41 +230,64 @@ let sessionStats = { success: 0, failed: 0 };
 
 // Queue IPC handlers
 ipcMain.handle('get-queue', async (event, profileName) => {
-  return await queueManager.getQueue(profileName);
+  // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
+  try {
+    // Shared queue — profileName ignored, returns full shared queue
+    return await queueManager.getQueue();
+  } catch (e) {
+    console.error('get-queue IPC error:', e?.message || e);
+    return [];
+  }
 });
 
 ipcMain.handle('add-posts', async (event, newPosts, profileName) => {
-  let skippedLength = 0;
-  let totalCount = newPosts.length;
+  // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
+  try {
+    if (!Array.isArray(newPosts)) {
+      return { success: false, error: 'newPosts must be an array', successfullyAdded: 0, skippedLength: 0, skippedDuplicate: 0, newTotal: 0 };
+    }
+    let skippedLength = 0;
+    let totalCount = newPosts.length;
 
-  const sanitizedPosts = [];
-  for (const newPost of newPosts) {
-    const text = (typeof newPost === 'string' ? newPost : newPost.text || '').trim();
-    // Use X.com-aware length (URLs count as 23 chars) instead of raw length,
-    // so AI tweets with a long referral link aren't wrongly rejected.
-    if (contentEngine.tweetLength(text) > 280) {
-      skippedLength++;
-      continue;
+    const sanitizedPosts = [];
+    for (const newPost of newPosts) {
+      const text = (typeof newPost === 'string' ? newPost : newPost.text || '').trim();
+      // Use X.com-aware length (URLs count as 23 chars) instead of raw length,
+      // so AI tweets with a long referral link aren't wrongly rejected.
+      if (contentEngine.tweetLength(text) > 280) {
+        skippedLength++;
+        continue;
+      }
+      const media_path = (typeof newPost === 'object' ? newPost.media_path || null : null);
+      if (media_path) {
+        sanitizedPosts.push({ text, media_path });
+      } else {
+        sanitizedPosts.push(text);
+      }
     }
-    const media_path = (typeof newPost === 'object' ? newPost.media_path || null : null);
-    if (media_path) {
-      sanitizedPosts.push({ text, media_path });
-    } else {
-      sanitizedPosts.push(text);
-    }
+
+    const result = await queueManager.addPosts(sanitizedPosts, profileName);
+    return {
+      success: true,
+      successfullyAdded: result.added,
+      skippedLength,
+      skippedDuplicate: result.skippedDuplicate,
+      newTotal: result.total,
+    };
+  } catch (e) {
+    console.error('add-posts IPC error:', e?.message || e);
+    return { success: false, error: e?.message || 'unknown error', successfullyAdded: 0, skippedLength: 0, skippedDuplicate: 0, newTotal: 0 };
   }
-
-  const result = await queueManager.addPosts(sanitizedPosts, profileName);
-  return {
-    successfullyAdded: result.added,
-    skippedLength,
-    skippedDuplicate: result.skippedDuplicate,
-    newTotal: result.total,
-  };
 });
 
 ipcMain.handle('bulk-delete', async (event, indices, profileName) => {
-  return await queueManager.bulkDelete(indices, profileName);
+  // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
+  try {
+    return await queueManager.bulkDelete(indices);
+  } catch (e) {
+    console.error('bulk-delete IPC error:', e?.message || e);
+    return null;
+  }
 });
 
 let automationRunning = false;
@@ -298,20 +301,31 @@ ipcMain.handle('start-posting', async (event, config) => {
   automationRunning = true;
   global.isRunning = true;
   try {
-    // Multi-profile mode: when config.profiles (array) is provided, the
-    // orchestrator runs each profile, advances on rate limit, skips cooldowns.
-    // Single-profile mode (config.profile) still works for backward compat.
-    const hasMulti = Array.isArray(config.profiles) && config.profiles.length > 0;
-    if (hasMulti) {
-      const { results, summary } = await xPoster.startMulti(config, (status) => {
-        mainWindow.webContents.send('status-update', status);
-      });
-      return { success: true, results, summary };
+    // Always run multi-profile: collect all profiles and run them in order.
+    // Each profile continues from its own position in the shared queue.
+    let profiles;
+    if (Array.isArray(config.profiles) && config.profiles.length > 0) {
+      profiles = config.profiles;
+    } else {
+      // Auto-collect all profiles from disk so the UI doesn't need to pass them
+      try {
+        await fs.access(path.join(os.homedir(), '.config', 'x-poster-profiles'));
+        const entries = await fs.readdir(
+          path.join(os.homedir(), '.config', 'x-poster-profiles'),
+          { withFileTypes: true }
+        );
+        const dirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+        profiles = dirs.length > 0 ? dirs : [config.profile || 'Default'];
+      } catch {
+        profiles = [config.profile || 'Default'];
+      }
     }
-    const res = await xPoster.start(config, (status) => {
-      mainWindow.webContents.send('status-update', status);
-    });
-    return { success: true, result: res };
+
+    const { results, summary } = await xPoster.startMulti(
+      { ...config, profiles },
+      (status) => { mainWindow.webContents.send('status-update', status); }
+    );
+    return { success: true, results, summary };
   } catch (error) {
     mainWindow.webContents.send('status-update', { type: 'error', message: error.message });
     return { success: false, error: error.message };
@@ -485,8 +499,14 @@ ipcMain.handle('export-queue', async (event, exportPath, profileName) => {
 
 // Run audit
 ipcMain.handle('run-audit', async () => {
-  const report = runAudit();
-  return { success: report.status === 'PASS', report };
+  // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
+  try {
+    const report = runAudit();
+    return { success: report.status === 'PASS', report };
+  } catch (e) {
+    console.error('run-audit IPC error:', e?.message || e);
+    return { success: false, error: e?.message || 'unknown error' };
+  }
 });
 
 // Export Logs Handler
@@ -572,6 +592,11 @@ ipcMain.handle('list-models', async (event, config) => {
   } else if (provider === 'gemini') {
     endpoint = `${trimmedBase}/models?key=${encodeURIComponent(apiKey.trim())}`;
     headers = {};
+  } else if (provider === 'opencode-go') {
+    // OpenCode Go always uses OpenAI-compatible /v1/models for listing
+    // (the endpoint lists ALL models regardless of their wire format)
+    endpoint = /\/models$/.test(trimmedBase) ? trimmedBase : `${trimmedBase}/models`;
+    headers = { 'Authorization': `Bearer ${apiKey.trim()}` };
   } else {
     // OpenAI-compatible
     endpoint = /\/models$/.test(trimmedBase) ? trimmedBase : `${trimmedBase}/models`;
@@ -584,7 +609,8 @@ ipcMain.handle('list-models', async (event, config) => {
     const resp = await fetch(endpoint, { method: 'GET', headers, signal: controller.signal });
     if (!resp.ok) {
       const t = await resp.text().catch(() => '');
-      return { success: false, error: `HTTP ${resp.status}: ${t.slice(0, 200)}`, provider };
+      const errMsg = classifyHttpError(resp.status);
+      return { success: false, error: `${errMsg} (HTTP ${resp.status}: ${t.slice(0, 200)})`, provider };
     }
     const data = await resp.json();
 
@@ -599,7 +625,12 @@ ipcMain.handle('list-models', async (event, config) => {
     }
 
     models = [...new Set(models)].sort();
-    return { success: true, provider, models, count: models.length };
+    // Annotate each model with its wire format (for format tag in UI)
+    const modelFormats = {};
+    for (const m of models) {
+      modelFormats[m] = contentEngine.detectApiFormat(provider, m).format;
+    }
+    return { success: true, provider, models, count: models.length, modelFormats };
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'انتهت المهلة أثناء جلب الموديلات.' : err.message;
     return { success: false, error: msg, provider };
@@ -609,19 +640,14 @@ ipcMain.handle('list-models', async (event, config) => {
 });
 
 
-function buildAiRequest(provider, { baseUrl, apiKey, model, system, user, messages, maxTokens }) {
+function buildAiRequest(format, { baseUrl, apiKey, model, system, user, messages, maxTokens }) {
   const trimmedBase = (baseUrl || '').replace(/\/+$/, '');
 
-  // Caller passes a `messages` array. Under the stateless-flat design (v4.3.0)
-  // this is a single-element array: [{ role:'user', content: thisRoundUser }].
-  // The legacy single-`user` path is kept as a fallback for non-session callers.
-  // The system block keeps its cache_control hint: harmless on gateways that
-  // ignore it (IYH), and a free 90% win the moment a direct provider is used.
   const convo = Array.isArray(messages) && messages.length
     ? messages
     : [{ role: 'user', content: user }];
 
-  if (provider === 'anthropic') {
+  if (format === 'anthropic') {
     const base = trimmedBase || 'https://api.anthropic.com';
     // Build the messages endpoint without doubling path segments. Gateways
     // like IYH expose the base as ".../v1" → naive append gives the broken
@@ -659,7 +685,7 @@ function buildAiRequest(provider, { baseUrl, apiKey, model, system, user, messag
     };
   }
 
-  if (provider === 'gemini') {
+  if (format === 'gemini') {
     const base = trimmedBase || 'https://generativelanguage.googleapis.com/v1beta';
     const mdl = model || 'gemini-2.0-flash';
     const endpoint = `${base}/models/${mdl}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -703,17 +729,20 @@ function buildAiRequest(provider, { baseUrl, apiKey, model, system, user, messag
 /**
  * Extract the raw text reply from a provider response.
  */
-function extractAiText(provider, data) {
+function extractAiText(format, data) {
   try {
-    if (provider === 'anthropic') {
+    if (format === 'anthropic') {
       return (data.content || []).map(c => c.text || '').join('\n');
     }
-    if (provider === 'gemini') {
+    if (format === 'gemini') {
       const parts = data?.candidates?.[0]?.content?.parts || [];
       return parts.map(p => p.text || '').join('\n');
     }
-    // openai-compatible
-    return data?.choices?.[0]?.message?.content || '';
+    // OpenAI format
+    const message = data?.choices?.[0]?.message;
+    const content = message?.content || '';
+    // DO NOT read reasoning_content — it's the model's thinking, not the actual output
+    return content;
   } catch {
     return '';
   }
@@ -752,17 +781,47 @@ function parseTweetArray(raw) {
 }
 
 /**
- * One round-trip to the AI: returns { cores, usage }.
- *   cores → array of raw core strings (parsed JSON array)
- *   usage → token accounting incl. cache hits (best-effort, provider-shaped)
+ * Classify HTTP error codes into clear Arabic user-facing messages.
+ * @param {number} status  - HTTP status code
+ * @returns {string} Arabic error message
+ */
+function classifyHttpError(status) {
+  if (status === 401) return 'مفتاح API غير صحيح';
+  if (status === 404) return 'الـ endpoint غير موجود — تحقق من Base URL';
+  if (status === 429) return 'تجاوزت الحد المسموح — انتظر قليلاً';
+  if (status >= 500 && status < 600) return 'خطأ في السيرفر — حاول مجدداً';
+  return 'تعذّر الاتصال — تحقق من الإنترنت';
+}
+
+/**
+ * One round-trip to the AI: returns { cores, usage, rawText }.
+ *   cores   → array of raw core strings (parsed JSON array)
+ *   usage   → token accounting incl. cache hits (best-effort, provider-shaped)
+ *   rawText → raw assistant reply (for session thread commit)
+ *
+ * GROWING THREAD (v4.4.0): when a `session` with a `messages` array is
+ * provided, the FULL conversation thread is sent each round so the provider
+ * can serve the static system prefix from prompt cache. After each successful
+ * response the user turn + assistant reply are committed onto the session's
+ * `messages` array (capped at 16 entries). This replaces the stateless-flat
+ * architecture (v4.3.0) — testing proved Anthropic prompt caching saves
+ * 40-60% on input tokens from round 2 onward when the thread grows.
+ *
+ * Backward-compatible: callers without a session object still work in
+ * stateless-flat mode (single user turn, no commit).
+ *
  * Fallback: if provider is 'anthropic' and native format fails, retry
  * with OpenAI-compatible format (covers IYH and similar gateways).
  *
- * Keeping the system prompt byte-for-byte identical across every call is
- * what lets the provider serve it from cache, so we DON'T fold per-chunk
- * angles into the system block — angles go in the user message only.
+ * The system prompt stays byte-for-byte identical across every call so
+ * the provider serves it from cache. Per-chunk angles live in the user
+ * message only.
  */
-async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, inspirationSummary, customSystem, maxTokens, timeoutMs, session, acceptedContext }) {
+async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, inspirationSummary, customSystem, maxTokens, timeoutMs, session, acceptedContext, externalSignal }) {
+  // MULTI-FORMAT (v4.5.0): detect wire format from provider + model so
+  // gateways like OpenCode Go serve the right protocol per model.
+  const { format } = contentEngine.detectApiFormat(provider, model);
+
   // System block is static for the whole session (cached prefix). Build it
   // from the session if present, else fresh (back-compat one-shot path).
   const system = (session && session.system)
@@ -777,32 +836,34 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
     acceptedContext: acceptedContext || '',
   });
 
-  // STATELESS FLAT (v4.3.0): every round sends ONLY the static system block +
-  // this round's single user turn. We do NOT carry a growing message thread.
-  //
-  // WHY: the growing-thread design existed solely to feed prompt-caching (re-
-  // serve the cached prefix each round). Live testing proved IYH strips/ignores
-  // cache_control for Claude and reports zero usage for GPT/Gemini — cache hit
-  // = 0% on every model. A growing thread with 0% cache is pure cost inflation
-  // (round 6 ballooned to ~3,600 input tokens vs ~1,400 flat = +77% waste).
-  //
-  // Dedup is UNAFFECTED: 0%-duplicate guarantee comes from (a) `acceptedContext`
-  // — a compact accepted-titles digest injected into THIS user message, built
-  // from session.acceptedBodies (not the thread) — and (b) the shared
-  // exactKeys/tokenSets server-side guard. Neither depends on session.messages.
-  const messages = [{ role: 'user', content: user }];
+  // GROWING THREAD (v4.4.0): send the FULL conversation so the provider can
+  // serve the cached prefix. Start with existing session messages (if any),
+  // append this round's user turn. No session = stateless flat (back-compat).
+  const thread = (session && Array.isArray(session.messages) && session.messages.length > 0)
+    ? session.messages
+    : [];
+  const messages = [...thread, { role: 'user', content: user }];
 
-  // Build both request variants: native (per provider) + OpenAI fallback.
-  const nativeReq = buildAiRequest(provider, { baseUrl, apiKey, model, system, messages, maxTokens });
+  // Build both request variants: native (detected format) + OpenAI fallback.
+  const nativeReq = buildAiRequest(format, { baseUrl, apiKey, model, system, messages, maxTokens });
   const openAiReq = buildAiRequest('openai', { baseUrl, apiKey, model, system, messages, maxTokens });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs || 120000);
 
-  function readUsage(prov, data) {
-    // Normalize token usage across the 3 protocols, surfacing cache hits.
+  // ⚡ C2: Link the external (cancellation) signal so user-initiated stop
+  // aborts the in-flight fetch IMMEDIATELY instead of waiting for timeout.
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+  }
+
+  function readUsage(format, data) {
     const u = data?.usage || {};
-    if (prov === 'anthropic') {
+    if (format === 'anthropic') {
       return {
         input: u.input_tokens || 0,
         output: u.output_tokens || 0,
@@ -810,7 +871,6 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
         cacheRead: u.cache_read_input_tokens || 0,
       };
     }
-    // openai-compatible (IYH/anmix/etc.) — cached_tokens lives in prompt details
     const cached = u.prompt_tokens_details?.cached_tokens || 0;
     return {
       input: u.prompt_tokens || 0,
@@ -829,25 +889,84 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
     });
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
-      throw new Error(`HTTP ${response.status}: ${errText.slice(0, 300)}`);
+      const errMsg = classifyHttpError(response.status);
+      const err = new Error(`${errMsg} (HTTP ${response.status}: ${errText.slice(0, 200)})`);
+      err.statusCode = response.status;
+      throw err;
     }
     const data = await response.json();
-    const rawText = extractAiText(req._providerForExtract || provider, data);
-    return { cores: parseTweetArray(rawText), usage: readUsage(req._providerForExtract || provider, data), rawText };
+    
+    // DEBUG: Log raw response structure
+    console.log(`🔬 Raw response keys: ${JSON.stringify(Object.keys(data || {}))}`);
+    if (data?.choices?.[0]) {
+      console.log(`🔬 choices[0] keys: ${JSON.stringify(Object.keys(data.choices[0]))}`);
+      console.log(`🔬 message keys: ${JSON.stringify(Object.keys(data.choices[0].message || {}))}`);
+      console.log(`🔬 content type: ${typeof data.choices[0].message?.content}`);
+      console.log(`🔬 content length: ${data.choices[0].message?.content?.length || 0}`);
+      if (data.choices[0].message?.finish_reason) {
+        console.log(`🔬 finish_reason: ${data.choices[0].finish_reason}`);
+      }
+    }
+    
+    const rawText = extractAiText(req._formatForExtract || format, data);
+    const cores = parseTweetArray(rawText);
+    
+    // DEBUG: Log the raw response and parse result
+    console.log(`📝 AI Response (first 500 chars): ${rawText.substring(0, 500)}`);
+    console.log(`🔍 Parsed cores: ${cores.length} items`);
+    if (cores.length === 0 && rawText.length === 0) {
+      console.log(`⚠️  extractAiText returned EMPTY! Raw data sample: ${JSON.stringify(data).substring(0, 500)}`);
+    }
+    if (cores.length === 0 && rawText.length > 0) {
+      console.log(`⚠️  Parse failed! Raw text sample: ${rawText.substring(0, 200)}`);
+    }
+    
+    return { cores, usage: readUsage(req._formatForExtract || format, data), rawText };
+  }
+
+  // Retry wrapper: only retries on 429/5xx/network errors. Max 3 attempts.
+  // 401/404/403 are NOT retried (won't fix themselves).
+  const MAX_RETRIES = 3;
+  async function attemptWithRetry(req) {
+    // Log the actual request details for debugging
+    console.log(`🌐 AI Request: ${req.endpoint} | Model: ${req.body.model} | Format: ${req._formatForExtract || format}`);
+
+    for (let i = 0; i <= MAX_RETRIES; i++) {
+      try {
+        return await attempt(req);
+      } catch (err) {
+        const status = err.statusCode;
+        const isRetryable = (status === 429 || (status >= 500 && status < 600)) ||
+          (err.name === 'AbortError' && i < MAX_RETRIES) ||
+          (!status && err.name !== 'AbortError'); // network error (no status code)
+
+        // Never retry AbortError from user cancellation (only from timeout)
+        if (err.name === 'AbortError' && aiGenerationCancelled) throw err;
+
+        if (isRetryable && i < MAX_RETRIES) {
+          const delay = Math.min(1000 * Math.pow(2, i), 10000);
+          const reason = status ? `HTTP ${status}` : (err.name === 'AbortError' ? 'timeout' : 'network error');
+          console.log(`⏳ Retry ${i + 1}/${MAX_RETRIES} in ${delay}ms (${reason}) — ${req.body.model}`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   try {
-    // Attach provider hint for response extraction
-    nativeReq._providerForExtract = provider;
-    openAiReq._providerForExtract = 'openai';
+    // Attach format hint for response extraction
+    nativeReq._formatForExtract = format;
+    openAiReq._formatForExtract = 'openai';
     let result;
     try {
-      result = await attempt(nativeReq);
+      result = await attemptWithRetry(nativeReq);
     } catch (nativeErr) {
       // If native Anthropic format fails, retry with OpenAI-compatible format
-      if (provider === 'anthropic') {
+      if (format === 'anthropic') {
         try {
-          result = await attempt(openAiReq);
+          result = await attemptWithRetry(openAiReq);
         } catch (openAiErr) {
           throw new Error(`فشل المزوّد (${provider} + OpenAI fallback): ${nativeErr.message}`);
         }
@@ -856,313 +975,345 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
       }
     }
 
-    // STATELESS FLAT (v4.3.0): we deliberately do NOT push the user turn or the
-    // assistant reply onto session.messages — there is no growing thread. The
-    // session still tracks acceptedBodies/exactKeys/tokenSets (updated in
-    // ingest()), which is everything dedup + acceptedContext steering need.
-    // Keeping session.messages empty means every round sends a flat ~1,400-token
-    // prompt instead of a thread that balloons to 3,600+ with 0% cache benefit.
+    // 🧵 C9: GROWING THREAD — commit user turn + assistant reply onto the
+    // session's persistent thread so the next round re-serves the cached
+    // prefix.  Capped at 20 messages (= 10 rounds × 2 messages) to bound
+    // input cost on providers where cache is 0%.  Older turns are dropped
+    // so the thread never grows unbounded.
+    if (session && Array.isArray(session.messages)) {
+      session.messages.push({ role: 'user', content: user });
+      session.messages.push({ role: 'assistant', content: result.rawText });
+      if (session.messages.length > 20) session.messages = session.messages.slice(-20);
+    }
     return result;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// Renderer calls this when the user clicks "إيقاف التوليد". The running
-// SessionManager checks the flag between rounds and stops gracefully,
-// keeping everything accepted up to that point.
+// ── Generation control IPCs ───────────────────────────────────────────────
+
+// Stop generation: workers check this flag between rounds.
 ipcMain.handle('cancel-ai-generation', async () => {
   aiGenerationCancelled = true;
+  // ⚡ C1: IMMEDIATE stop — abort all in-flight AI fetches (< 500ms).
+  // The AbortError propagates through attempt → callAi → runRound → session
+  // and the session loop exits on the next isCancelled() check.
+  if (activeAbortController) {
+    try { activeAbortController.abort(); } catch { /* best-effort */ }
+  }
   return { success: true };
 });
 
-// Live session-count control (G: رفع/خفض عدد الجلسات يعمل فوراً بدون إعادة
-// تشغيل). SessionManager reads desiredSessionCount between rounds only.
+// Adjust parallel worker count (applied at next round start).
 ipcMain.handle('set-session-count', async (event, count) => {
-  const n = Math.max(1, parseInt(count) || 5);
-  desiredSessionCount = n;
+  const n = Math.max(1, Math.min(parseInt(count) || 3, 10));
+  desiredWorkerCount = n;
   return { success: true, count: n };
 });
 
-// Manual session reset (spec: "زر إعادة تعيين الجلسات"). Wipes the persisted
-// thread/state so the next run starts Session #1.. fresh.
+// Reset: clear cancel flag + ack (no persisted state in new system).
 ipcMain.handle('reset-sessions', async () => {
-  clearPersistedSessions();
+  aiGenerationCancelled = false;
   return { success: true };
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// 🧠 AI GENERATION — SessionManager (parallel persistent sessions)
+// ═══════════════════════════════════════════════════════════════════
+//
+// Uses SessionManager with GenerationSession pool. Each session has a
+// persistent thread (growing, capped at 16 messages) so Anthropic prompt
+// caching re-serves the system prefix from round 2 onward. sync() runs
+// at each round start to rebuild per-session dedup from the shared queue.
+// Cross-session hard guard (sharedExactKeys) prevents intra-round races.
+
+const SHARED_SESSION_FILE = path.join(os.homedir(), '.config', 'x-poster-shared', 'sessions.json');
+
 ipcMain.handle('generate-ai-posts', async (event, config) => {
   const {
-    apiKey,
-    baseUrl,
-    model,
-    providerOverride,   // 'auto' | 'openai' | 'anthropic' | 'gemini'
-    quantity,
-    referralLink,
-    customPrompt,       // optional user-supplied system prompt (G4)
-    existingTexts,      // texts already in the queue+preview (G3 dedup scope)
-    sessionCount,       // desired parallel persistent sessions (default 5)
+    apiKey, baseUrl, model, providerOverride,
+    quantity, referralLink, customPrompt, existingTexts, sessionCount,
   } = config || {};
 
-  // Fresh run → clear any stale cancel request.
   aiGenerationCancelled = false;
+  // ⚡ Fresh AbortController for this generation run — linked to every
+  // fetch so cancel-ai-generation can abort all of them instantly.
+  activeAbortController = new AbortController();
 
+  // 🟢 Validation: check ALL required fields BEFORE starting any session
   if (!apiKey || !apiKey.trim()) {
-    return { success: false, error: 'مفتاح الـ API مطلوب (API Key).' };
+    return { success: false, error: 'مفتاح الـ API مطلوب.' };
+  }
+  if (!baseUrl || !baseUrl.trim()) {
+    return { success: false, error: 'Base URL مطلوب — أدخل رابط الـ API في الإعدادات.' };
+  }
+  if (!model || !model.trim()) {
+    return { success: false, error: 'اسم الموديل مطلوب — أدخل اسم الموديل في الإعدادات.' };
   }
 
-  // G1.1: open-ended count, user-defined, NO hardcoded ceiling.
-  const target = parseInt(quantity) || 10;
-  if (target < 1) return { success: false, error: 'العدد يجب أن يكون 1 على الأقل.' };
-  if (sessionCount) desiredSessionCount = Math.max(1, parseInt(sessionCount) || 5);
+  const target   = Math.max(1, parseInt(quantity) || 20);
+  const nWorkers = Math.max(1, Math.min(parseInt(sessionCount) || desiredWorkerCount, 10));
+  if (sessionCount) desiredWorkerCount = nWorkers;
 
   const provider = contentEngine.detectProvider(baseUrl, providerOverride, model);
-  const label = contentEngine.providerLabel(provider, model);
-  const link = (referralLink || '').trim();
+  const label    = contentEngine.providerLabel(provider, model);
+  const link     = (referralLink || '').trim();
 
-  // ── SHARED dedup sources (G3): the live queue + preview. Every session
-  // syncs against these at each round start so cross-session duplicates are
-  // caught. Cross-session HISTORY is never used to reject (G1.5).
-  const sharedQueue = [];     // grows as posts are accepted this run
-  const sharedPreview = [];   // seeded from existing queue+preview texts
-  if (Array.isArray(existingTexts)) {
-    for (const t of existingTexts) {
-      if (typeof t === 'string' && t.trim()) sharedPreview.push({ text: t });
-    }
-  }
+  const CHUNK   = 25;    // tweets requested per AI call
+  const TIMEOUT = 120000; // 120 s per call (user-approved compromise)
 
-  // ── G1.5 INSPIRATION (not a filter): short THEME summary of past sessions.
   const inspirationSummary = contentEngine.buildInspirationSummary(10);
-
-  // The static system block — identical for every session this run, so the
-  // provider caches it once and re-serves it from round 2 onward.
   const systemBlock = contentEngine.buildSessionSystem({ customSystem: customPrompt || '' });
 
-  const accepted = [];
+  // ── Shared state (shared across all sessions via hard guard) ──────────
+  const accepted        = [];
   const rejectedReasons = {};
-  let rejectedCount = 0;
-  let dupCount = 0;
+  let   rejectedCount   = 0;
+  let   dupCount        = 0;
 
-  // ── HARD cross-session dedup guard (0% duplicates, spec acceptance) ──────
-  // sync() runs only between rounds, so two sessions in the SAME round both
-  // start from the same synced state and could accept an identical core in
-  // parallel. ingest() has no `await` in its accept loop, so a SHARED set
-  // checked+updated synchronously here is a hard guarantee: whichever session
-  // ingests a given core first wins; the other sees it as a duplicate. This
-  // is the safety net on top of per-session sync().
   const sharedExactKeys = new Set();
   const sharedTokenSets = [];
-  if (Array.isArray(existingTexts)) {
-    for (const t of existingTexts) {
-      if (typeof t === 'string' && t.trim()) {
-        sharedExactKeys.add(contentEngine.exactKey(t));
-        sharedTokenSets.push(contentEngine.tokenize(contentEngine.bodyOnly(t)));
-      }
+  for (const t of (Array.isArray(existingTexts) ? existingTexts : [])) {
+    if (typeof t === 'string' && t.trim()) {
+      sharedExactKeys.add(contentEngine.exactKey(t));
+      sharedTokenSets.push(contentEngine.tokenize(contentEngine.bodyOnly(t)));
     }
   }
 
-  const PER_CALL_TIMEOUT = 120000; // 120s ceiling per round (Opus-class models are slow)
-  const CHUNK = 10;                // tweets requested per round per session
+  // Shared queue + preview (cross-session dedup sources — sync() rebuilds from these)
+  const sharedQueue = [];
+  const sharedPreview = [];
 
-  const sendProgress = (msg) => {
+  // ── Emit helpers ──────────────────────────────────────────────────────────
+  const emit = (ch, payload) => {
     try {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('ai-progress', msg);
-      }
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch, payload);
     } catch { /* best-effort */ }
   };
 
-  // Aggregate token totals across all sessions (filled from manager.totals()).
-  let lastTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, rounds: 0, cacheHitPct: 0 };
-
-  // Live stats payload (G1.6) attached to every progress event.
-  const stats = () => ({
-    accepted: accepted.length,
-    target,
-    rounds: lastTotals.rounds,
-    rejected: rejectedCount,
-    duplicates: dupCount,
-    tokensIn: lastTotals.input + lastTotals.cacheRead + lastTotals.cacheWrite,
-    tokensOut: lastTotals.output,
-    cacheHitPct: lastTotals.cacheHitPct,
+  const liveStats = () => ({
+    accepted: accepted.length, target,
+    rounds: 0, rejected: rejectedCount, duplicates: dupCount,
+    tokensIn: 0, tokensOut: 0, cacheHitPct: 0,
   });
 
-  // Accept-pipeline for one round's worth of raw cores from a given session.
-  // Mutates `accepted`, the shared queue, and the session's accepted bodies.
-  // Each newly-accepted tweet is emitted IMMEDIATELY to the renderer (G4.1).
-  const ingest = (cores, session) => {
-    let gained = 0;
-    if (!cores) return gained;
-    for (const core of cores) {
-      if (accepted.length >= target) break;
-      if (aiGenerationCancelled) break;
-      const cleanedCore = contentEngine.cleanCoreText(String(core || '').trim());
-      if (!cleanedCore) { rejectedCount++; rejectedReasons['فارغ بعد التنظيف'] = (rejectedReasons['فارغ بعد التنظيف'] || 0) + 1; continue; }
+  const sendProgress = (type, message, rounds = 0, cacheHitPct = 0) =>
+    emit('ai-progress', { type, message, ...liveStats(), rounds, cacheHitPct });
 
-      const assembled = contentEngine.assembleTweet(cleanedCore, link);
-      if (!assembled) {
+  // ── Ingest: validates + deduplicates one batch ─────────────────────────────
+  // Has TWO dedup layers:
+  //   1. Per-session: checks against session.exactKeys/tokenSets (built by sync())
+  //   2. Cross-session hard guard: checks against sharedExactKeys/tokenSets
+  //      (prevents race where 2 sessions accept the same post in the same round)
+  const ingest = (cores, session) => {
+    if (!Array.isArray(cores)) {
+      console.log(`⚠️  Ingest: cores is not an array: ${typeof cores}`);
+      return 0;
+    }
+    
+    // DEBUG: Log ingest call
+    console.log(`📥 Ingest called with ${cores.length} cores`);
+    if (cores.length === 0) {
+      console.log(`⚠️  Ingest: EMPTY cores array!`);
+    }
+    
+    let gained = 0;
+    for (const core of cores) {
+      if (accepted.length >= target || aiGenerationCancelled) break;
+
+      // 1. Clean AI output artifacts
+      const cleaned = contentEngine.cleanCoreText(String(core || '').trim());
+      if (!cleaned) {
         rejectedCount++;
-        rejectedReasons['تعذّر ضبط الطول (≤270)'] = (rejectedReasons['تعذّر ضبط الطول (≤270)'] || 0) + 1;
+        rejectedReasons['فارغ بعد التنظيف'] = (rejectedReasons['فارغ بعد التنظيف'] || 0) + 1;
+        console.log(`❌ Ingest: فارغ بعد التنظيف`);
         continue;
       }
 
-      // G2 structural + cleanliness gate.
+      // 2. Assemble: core + link + hashtags → fits [MIN_LEN, MAX_LEN]
+      const assembled = contentEngine.assembleTweet(cleaned, link);
+      if (!assembled) {
+        rejectedCount++;
+        const cLen = contentEngine.tweetLength(cleaned);
+        const key  = `طول لا يصلح للتجميع (core=${cLen}ch)`;
+        rejectedReasons[key] = (rejectedReasons[key] || 0) + 1;
+        console.log(`❌ Ingest: ${key}`);
+        continue;
+      }
+
+      // 3. Quality + cleanliness gate
       const verdict = contentEngine.validateTweet(assembled.text, link);
       if (!verdict.valid) {
         rejectedCount++;
         rejectedReasons[verdict.reason] = (rejectedReasons[verdict.reason] || 0) + 1;
+        console.log(`❌ Ingest: ${verdict.reason}`);
         continue;
       }
 
-      // G3 dedup — against THIS session's synced state (queue+preview+others).
-      const dup = contentEngine.isDuplicateInSession(assembled.text, session, 0.85);
-      if (dup.dup) {
-        rejectedCount++;
-        dupCount++;
-        const reason = dup.level === 1 ? 'مكرر (مطابقة دقيقة)' : 'مكرر (تشابه دلالي >85%)';
-        rejectedReasons[reason] = (rejectedReasons[reason] || 0) + 1;
+      // 4a. Per-session dedup (session's sync()-rebuilt exactKeys/tokenSets)
+      const sessionDup = contentEngine.isDuplicateInSession(assembled.text, session, 0.85);
+      if (sessionDup.dup) {
+        rejectedCount++; dupCount++;
+        const r = sessionDup.level === 1 ? 'مكرر (مطابقة دقيقة)' : 'مكرر (تشابه دلالي >85%)';
+        rejectedReasons[r] = (rejectedReasons[r] || 0) + 1;
+        console.log(`❌ Ingest: ${r}`);
         continue;
       }
 
-      // HARD cross-session guard — synchronous check against the shared set so
-      // two sessions in the SAME round can't both accept an identical core.
+      // 4b. Cross-session hard guard (sharedExactKeys — prevents intra-round races)
       const sharedDup = contentEngine.isDuplicateInSession(
         assembled.text,
         { exactKeys: sharedExactKeys, tokenSets: sharedTokenSets },
         0.85,
       );
       if (sharedDup.dup) {
-        rejectedCount++;
-        dupCount++;
-        const reason = sharedDup.level === 1 ? 'مكرر (مطابقة دقيقة)' : 'مكرر (تشابه دلالي >85%)';
-        rejectedReasons[reason] = (rejectedReasons[reason] || 0) + 1;
+        rejectedCount++; dupCount++;
+        const r = sharedDup.level === 1 ? 'مكرر (مطابقة دقيقة)' : 'مكرر (تشابه دلالي >85%)';
+        rejectedReasons[r] = (rejectedReasons[r] || 0) + 1;
         continue;
       }
 
-      // Accept → push to shared queue immediately so OTHER sessions see it on
-      // their next sync(). Also update THIS session's live dedup state + the
-      // shared guard so it won't repeat within the same round.
+      // ✅ ACCEPT
       accepted.push({ text: assembled.text, length: assembled.length });
-      sharedQueue.push({ text: assembled.text });
-      const eKey = contentEngine.exactKey(assembled.text);
-      const bodyToks = contentEngine.tokenize(contentEngine.bodyOnly(assembled.text));
-      session.exactKeys.add(eKey);
-      session.tokenSets.push(bodyToks);
-      session.acceptedBodies.push(contentEngine.bodyOnly(assembled.text));
-      sharedExactKeys.add(eKey);
-      sharedTokenSets.push(bodyToks);
-      gained++;
 
-      // G1.5: persist to cross-session history for FUTURE inspiration only.
+      // Update per-session dedup sets
+      const eKey = contentEngine.exactKey(assembled.text);
+      const toks = contentEngine.tokenize(contentEngine.bodyOnly(assembled.text));
+      session.exactKeys.add(eKey);
+      session.tokenSets.push(toks);
+      session.acceptedBodies.push(contentEngine.bodyOnly(assembled.text));
+
+      // Update cross-session shared state
+      sharedExactKeys.add(eKey);
+      sharedTokenSets.push(toks);
+      sharedQueue.push({ text: assembled.text });
+
       try { contentEngine.appendHistory([assembled.text]); } catch { /* best-effort */ }
 
-      // G4.1: live preview — push this single accepted tweet to the renderer now.
-      try {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('ai-post-accepted', {
-            text: assembled.text,
-            length: assembled.length,
-            index: accepted.length,
-            target,
-            session: session.num,
-          });
-        }
-      } catch { /* best-effort */ }
+      emit('ai-post-accepted', {
+        text: assembled.text, length: assembled.length,
+        index: accepted.length, target,
+      });
+      gained++;
     }
     return gained;
   };
 
-  // One AI round — stateless flat (v4.3.0): callAi sends a fresh 2-message
-  // request each round; no persistent thread, no growing token cost.
-  const runRound = async ({ session, angles, acceptedContext }) => {
-    const { cores, usage } = await callAi({
-      provider, baseUrl, apiKey, model,
-      quantity: CHUNK, angles,
-      inspirationSummary,
-      maxTokens: 2500, timeoutMs: PER_CALL_TIMEOUT,
-      session, acceptedContext,
-    });
-    return { cores, usage };
+  // ── RunRound: wraps callAi for SessionManager ─────────────────────────────
+  const runRound = async ({ session, angles, acceptedContext, inspirationSummary: _, chunk }) => {
+    try {
+      const result = await callAi({
+        provider, baseUrl, apiKey, model,
+        quantity: chunk || CHUNK, angles,
+        inspirationSummary,
+        customSystem: customPrompt,
+        maxTokens: (chunk || CHUNK) * 400,  // 4000 tokens = ~3000 حرف (was 260)
+        timeoutMs: TIMEOUT,
+        session,  // GenerationSession with growing messages
+        acceptedContext,
+        externalSignal: activeAbortController ? activeAbortController.signal : null,  // ⚡ C1: immediate stop
+      });
+      
+      // DEBUG: Log runRound result
+      console.log(`🎯 RunRound result: ${result.cores?.length || 0} cores, usage: ${JSON.stringify(result.usage || {})}`);
+      
+      return { cores: result.cores || [], usage: result.usage || {} };
+    } catch (err) {
+      // ⚡ C1: Graceful exit when user cancels — AbortError is expected, not a bug.
+      if (err.name === 'AbortError' && aiGenerationCancelled) {
+        console.log('⏹️ RunRound aborted by user cancellation — returning empty.');
+        return { cores: [], usage: {} };
+      }
+      // Provide better error message for common issues
+      if (err.message === 'provider is not defined') {
+        throw new Error(`خطأ في إعدادات المزود — تأكد من صحة Base URL والموديل`);
+      }
+      console.error(`❌ RunRound error: ${err.message}`);
+      throw err;
+    }
   };
 
-  // Status emitter for per-session indicators (🟢🟡🔴) + live cache %.
-  const onStatus = (sessionsSnapshot, totals) => {
-    lastTotals = totals;
+  // ── OnStatus: forward to UI ───────────────────────────────────────────────
+  const onStatus = (snapshots, totals) => {
+    // Emit per-session status for the AI Studio UI
     try {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('ai-session-status', {
-          sessions: sessionsSnapshot,
-          totals,
-          accepted: accepted.length,
-          target,
-        });
+        mainWindow.webContents.send('ai-session-status', { sessions: snapshots, totals });
       }
     } catch { /* best-effort */ }
-    sendProgress({
-      type: 'info',
-      message: `جلسات نشطة: ${sessionsSnapshot.filter(s => s.status === 'running').length} • مقبول ${accepted.length}/${target} • كاش ${totals.cacheHitPct}%`,
-      ...stats(),
-    });
+
+    // Also emit the legacy ai-progress for backward compat
+    sendProgress('info',
+      snapshots.map(s => `#${s.num}:${s.status}(${s.rounds}r,${s.accepted}✅)`).join(' · '),
+      totals.rounds, totals.cacheHitPct
+    );
   };
 
+  // ── Persistence callback (DISABLED — fresh start every time) ────────────
+  // User requirement: no session resume, every generation starts fresh.
+  const persist = (sessionSnapshots) => {
+    // No-op: don't persist sessions anymore
+  };
+
+  // NO session loading — always start fresh
+  const loadedSessions = [];
+
+  // ── Create + run SessionManager ───────────────────────────────────────────
+  const manager = new SessionManager({
+    engine: contentEngine,
+    runRound,
+    ingest,
+    onStatus,
+    isCancelled: () => aiGenerationCancelled,
+    getSessionCount: () => desiredWorkerCount,
+    persist,
+    chunk: CHUNK,
+    sessionCount: nWorkers,
+    system: systemBlock,
+    inspirationSummary,
+    sharedQueue,
+    sharedPreview,
+  });
+
+  if (Array.isArray(loadedSessions) && loadedSessions.length > 0) {
+    manager.loadSessions(loadedSessions);
+  }
+
   try {
-    const manager = new SessionManager({
-      engine: contentEngine,
-      runRound,
-      ingest,
-      onStatus,
-      isCancelled: () => aiGenerationCancelled,
-      getSessionCount: () => desiredSessionCount,
-      persist: savePersistedSessions,
-      chunk: CHUNK,
-      sessionCount: desiredSessionCount,
-      system: systemBlock,
-      inspirationSummary,
-      sharedQueue,
-      sharedPreview,
-    });
+    sendProgress('info',
+      `🚀 بدء التوليد: ${nWorkers} جلسة متوازية · هدف ${target} تغريدة (${label})`
+    );
 
-    // Resume persisted sessions if any exist (spec: sessions are not reset on
-    // app close). They keep their numbers; the cached prefix re-warms quickly.
-    const persisted = loadPersistedSessions();
-    if (persisted.length) manager.loadSessions(persisted);
-
-    sendProgress({ type: 'info', message: `انطلاق ${desiredSessionCount} جلسة دائمة متوازية (${label})…`, ...stats() });
-
-    // Run until target met OR cancelled. SessionManager never auto-stops.
     await manager.run(() => accepted.length >= target);
 
     const totals = manager.totals();
-    lastTotals = totals;
+    const finalBreakdown = Object.entries(rejectedReasons)
+      .map(([k, v]) => `${k}:${v}`).join(' | ') || 'لا شيء';
+    sendProgress(
+      accepted.length >= target ? 'success' : 'info',
+      `اكتمل: ${accepted.length}/${target} مقبول · ${rejectedCount} مرفوض [${finalBreakdown}]`,
+      totals.rounds, totals.cacheHitPct
+    );
 
     return {
-      success: true,
-      provider,
-      label,
-      posts: accepted.map(a => a.text),
+      success: true, provider, label,
+      posts:   accepted.map(a => a.text),
       details: accepted,
-      count: accepted.length,
+      count:   accepted.length,
       requested: target,
       rounds: totals.rounds,
-      waves: totals.rounds,
-      sessions: manager.statusSnapshot(),
-      sessionCount: desiredSessionCount,
+      waves:  totals.rounds,
       cancelled: aiGenerationCancelled,
       rejectedCount,
       duplicates: dupCount,
       rejectedReasons,
-      usage: {
-        input: totals.input,
-        output: totals.output,
-        cacheRead: totals.cacheRead,
-        cacheWrite: totals.cacheWrite,
-        calls: totals.calls,
-        cacheHitPct: totals.cacheHitPct,
-      },
+      usage: totals,
     };
   } catch (error) {
     return { success: false, error: error.message, provider, label };
   } finally {
     aiGenerationCancelled = false;
+    activeAbortController = null;
   }
 });

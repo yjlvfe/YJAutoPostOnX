@@ -31,6 +31,13 @@ class ReportEngine {
     fs.mkdir(this.reportDir, { recursive: true }).catch(() => {
       // best-effort; actual I/O errors will be reported on flush
     });
+
+    // ⏲️ C6: periodic flush timer — writes a partial report every 30s
+    // during a run so events survive a crash/force-quit/power-off.
+    this._flushTimer = null;
+    this._flushIntervalMs = 30000;
+    this._eventCount = 0;
+    this._flushEveryNEvents = 10;
   }
 
   // Start a new run: reset buffers and metadata
@@ -44,6 +51,44 @@ class ReportEngine {
     this.performance = { postTimes: [] };
     this.failures = [];
     this.timeline = [];
+
+    // ⏲️ C6: start periodic flush so accumulated events are persisted
+    // mid-run — protects against crash/force-quit losing everything.
+    this._eventCount = 0;
+    this._startPeriodicFlush();
+  }
+
+  // ⏲️ C6: Start the periodic flush timer (called by startRun).
+  _startPeriodicFlush() {
+    this._stopPeriodicFlush();  // never overlap timers
+    this._flushTimer = setInterval(() => {
+      this._flushPeriodic().catch(() => { /* best-effort */ });
+    }, this._flushIntervalMs);
+    // unref so the timer never keeps the process alive on exit
+    if (this._flushTimer && typeof this._flushTimer.unref === 'function') {
+      this._flushTimer.unref();
+    }
+  }
+
+  // ⏲️ C6: Stop the periodic flush timer (called by endRun).
+  _stopPeriodicFlush() {
+    if (this._flushTimer) {
+      clearInterval(this._flushTimer);
+      this._flushTimer = null;
+    }
+  }
+
+  // ⏲️ C6: Write a partial mid-run report (best-effort, non-fatal).
+  async _flushPeriodic() {
+    if (this.stats.totalPosts === 0 && this.timeline.length === 0) return;
+    const reportJson = this.generateReport();
+    const partialId = (this.runId || 'unknown').slice(0, 8);
+    const jsonPath = path.join(this.reportDir, `run-partial-${partialId}.json`);
+    try {
+      await fs.writeFile(jsonPath, JSON.stringify(reportJson, null, 2), 'utf8');
+    } catch {
+      // best-effort — never crash the run over a partial flush
+    }
   }
 
   // Log an event to the in-memory timeline
@@ -62,6 +107,13 @@ class ReportEngine {
     // Only track retries on explicit RETRY events (not final POST_FAIL which is a terminal event)
     if (typeof event === 'string' && event.includes('RETRY') && !event.includes('POST_FAIL')) {
       this.stats.retried = (this.stats.retried || 0) + 1;
+    }
+
+    // ⏲️ C6: count-based flush — every N events, persist a partial report.
+    this._eventCount = (this._eventCount || 0) + 1;
+    if (this._eventCount >= this._flushEveryNEvents && this._flushTimer) {
+      this._eventCount = 0;
+      this._flushPeriodic().catch(() => { /* best-effort */ });
     }
   }
 
@@ -227,6 +279,10 @@ class ReportEngine {
 
   async endRun() {
     this.endTime = new Date().toISOString();
+    // ⏲️ C6: stop the periodic timer + do one final partial flush
+    // (then the full report is written by flushAll below).
+    this._stopPeriodicFlush();
+    await this._flushPeriodic().catch(() => { /* best-effort */ });
     return this.flushAll();
   }
 }

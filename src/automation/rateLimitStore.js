@@ -74,6 +74,14 @@ function getCooldown(profileName) {
   const store = _read();
   const entry = store[name];
   if (!entry) return null;
+  // ⚡ L1: guard against a corrupt file — if entry.until is non-numeric,
+  // `remainingMs` becomes NaN and `NaN <= 0` is false, so the profile
+  // would be treated as cooling-down FOREVER. Prune bogus entries.
+  if (typeof entry.until !== 'number' || !Number.isFinite(entry.until)) {
+    delete store[name];
+    _write(store);
+    return null;
+  }
   const remainingMs = entry.until - Date.now();
   if (remainingMs <= 0) {
     // expired — prune it

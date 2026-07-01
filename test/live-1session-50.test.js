@@ -83,16 +83,16 @@ let syncOrderViolation = false; // sync() must NOT fire during live AI generatio
 let fetchInFlight = false;      // true only while the AI request is in the air
 
 async function callAi({ session, angles, acceptedContext }) {
-  // STATELESS FLAT (v4.3.0): thread must NEVER grow — every round sends only
-  // the static system block + this round's single user turn. We assert the
-  // thread stays empty (length 0) before and after each call.
+  // GROWING THREAD (v4.4.0): send the full conversation thread so providers
+  // can serve the system prefix from cache. After response, commit the turn.
   if (firstThreadRef === null) firstThreadRef = session.messages;
   else if (session.messages !== firstThreadRef) threadRefStable = false;
 
   const threadLenBefore = session.messages.length;
   const system = session.system;
   const user = E.buildRoundUser({ quantity: CHUNK, angles, acceptedContext, inspirationSummary: '' });
-  const messages = [{ role: 'user', content: user }];
+  const thread = (session.messages.length > 0) ? session.messages : [];
+  const messages = [...thread, { role: 'user', content: user }];
   const req = buildReq(provider, { system, messages, maxTokens: 3000 });
 
   const controller = new AbortController();
@@ -104,7 +104,10 @@ async function callAi({ session, angles, acceptedContext }) {
     if (!r.ok) { const tx = await r.text().catch(() => ''); throw new Error(`HTTP ${r.status}: ${tx.slice(0, 200)}`); }
     const data = await r.json();
     const raw = extractText(provider, data);
-    // NO thread commit — session.messages stays empty by design.
+    // Commit onto persistent thread (mirrors main.js callAi behavior)
+    session.messages.push({ role: 'user', content: user });
+    session.messages.push({ role: 'assistant', content: raw });
+    if (session.messages.length > 16) session.messages = session.messages.slice(-16);
     const usage = readUsage(provider, data);
     const cores = parseArr(raw);
     // start a new round record
@@ -199,12 +202,12 @@ async function callAi({ session, angles, acceptedContext }) {
   console.log(`api calls       : ${totals.calls}`);
   console.log(`sync() calls    : ${syncCalls}`);
   console.log(`thread stable   : ${threadRefStable}  (same session object across all rounds)`);
-  console.log(`thread length   : ${rounds.map(r => `${r.threadLenBefore}→${r.threadLenAfter}`).join('  ')}  (FLAT — must stay 0→0)`);
+  console.log(`thread length   : ${rounds.map(r => `${r.threadLenBefore}→${r.threadLenAfter}`).join('  ')}  (GROWING — grows by 2 each round)`);
   const inSeq = rounds.map(r => r.inTokens);
-  const inMin = Math.min(...inSeq), inMax = Math.max(...inSeq);
-  const drift = inMin > 0 ? (((inMax - inMin) / inMin) * 100).toFixed(1) : '0.0';
-  console.log(`IN tokens/round : ${inSeq.join('  ')}  (flat = no upward drift)`);
-  console.log(`IN token drift  : ${drift}%  (min ${inMin} → max ${inMax}; near-0 proves flat, not growing)`);
+  const promptSeq = rounds.map(r => r.promptIn);
+  const cacheSeq = rounds.map(r => r.cacheRead);
+  console.log(`prompt IN/round : ${promptSeq.join('  ')}  (should drop after round 1 with cache)`);
+  console.log(`cacheRead/round : ${cacheSeq.join('  ')}  (should rise from round 2 with cache)`);
   console.log(`unique posts    : ${uniq}/${bodies.length}  (0 dup = ${uniq === bodies.length})`);
   console.log(`cacheRead total : ${totals.cacheRead}`);
   console.log(`cache hit %     : ${totals.cacheHitPct}%  (0% expected via IYH — provider limitation)`);

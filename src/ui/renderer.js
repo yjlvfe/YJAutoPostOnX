@@ -44,6 +44,21 @@ const mQueue = $('m-queue');
 const mSuccess = $('m-success');
 const mSpeed = $('m-speed');
 
+// ── +/- number buttons ──────────────────────────────────────────────────────
+document.querySelectorAll('.num-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const targetId = btn.dataset.target;
+    const min = parseInt(btn.dataset.min ?? '1');
+    const input = $(targetId);
+    if (!input) return;
+    let val = parseInt(input.value) || 1;
+    if (btn.classList.contains('num-up')) val++;
+    else val = Math.max(min, val - 1);
+    input.value = val;
+    input.dispatchEvent(new Event('change'));
+  });
+});
+
 // ═══════════ NAVIGATION ═══════════
 function switchView(view) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -74,18 +89,24 @@ $('btn-clear-logs').addEventListener('click', () => {
 
 function setStatus(message, kind) {
   liveStatusEl.textContent = message;
-  statusPulse.className = 'pulse' + (kind === 'busy' ? ' busy' : kind === 'err' ? ' err' : '');
+  // ⚡ H6: handle 'idle' / '' (neutral) explicitly — strip busy/err so
+  // the pulse dot colours correctly instead of inheriting a stale state.
+  if (kind === 'busy') statusPulse.className = 'pulse busy';
+  else if (kind === 'err') statusPulse.className = 'pulse err';
+  else statusPulse.className = 'pulse';
 }
 
 // ═══════════ SETTINGS PERSISTENCE ═══════════
 function applySettings(s) {
   if (!s) return;
+  // Basic settings (Dashboard)
   if (s.speed) { speedInput.value = s.speed; mSpeed.textContent = s.speed; }
   if (s.maxPosts) maxPostsInput.value = s.maxPosts;
   if (s.outputFolder) {
     state.outputFolder = s.outputFolder;
     folderPathDisplay.textContent = s.outputFolder;
   }
+  // AI Studio: Load saved settings (user requested restore)
   if (s.aiBaseUrl) $('ai-base-url').value = s.aiBaseUrl;
   if (s.aiApiKey) $('ai-api-key').value = s.aiApiKey;
   if (s.aiModel) $('ai-model').value = s.aiModel;
@@ -122,6 +143,25 @@ $('btn-save-ai-settings').addEventListener('click', () => {
   addLog('تم حفظ إعدادات الذكاء الاصطناعي', 'success');
 });
 
+// Reset AI settings button
+$('btn-reset-ai-settings').addEventListener('click', () => {
+  if (!confirm('هل تريد إعادة تعيين جميع إعدادات الذكاء الاصطناعي؟')) return;
+  $('ai-base-url').value = '';
+  $('ai-api-key').value = '';
+  $('ai-model').value = '';
+  $('ai-provider-override').value = '';
+  if ($('ai-prompt')) $('ai-prompt').value = '';
+  window.api.saveSettings({
+    aiBaseUrl: '',
+    aiApiKey: '',
+    aiModel: '',
+    aiProviderOverride: '',
+    aiPrompt: '',
+  });
+  updateProviderTag();
+  addLog('تم إعادة تعيين إعدادات الذكاء الاصطناعي', 'info');
+});
+
 // toggle key visibility
 $('btn-toggle-key').addEventListener('click', () => {
   const input = $('ai-api-key');
@@ -154,7 +194,32 @@ function detectModelFamily(model) {
   if (m.includes('grok')) return 'grok';
   return 'other';
 }
+// OpenCode Go static model map (must match contentEngine.js exactly)
+const OPENCODE_GO_ANTHROPIC_MODELS_R = [
+  'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
+  'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus',
+  // ⚡ H2: models added — must match contentEngine.js exactly
+  'glm-5.2',
+  'kimi-k2.7',
+  'deepseek-v4-pro',
+  'mimo-v2.5',
+];
+
+// Mirror of contentEngine.detectApiFormat — determines wire format from provider+model
+function detectApiFormat(provider, modelId) {
+  const m = (modelId || '').toLowerCase();
+  if (provider === 'opencode-go') {
+    const isAnthropic = OPENCODE_GO_ANTHROPIC_MODELS_R.some(name => m.startsWith(name));
+    return isAnthropic ? 'anthropic' : 'openai';
+  }
+  const fam = detectModelFamily(modelId);
+  if (fam === 'claude') return 'anthropic';
+  if (fam === 'gemini') return 'gemini';
+  return 'openai';
+}
+
 function providerLabel(provider, model) {
+  if (provider === 'opencode-go') return 'OpenCode Go';
   const fam = detectModelFamily(model);
   const proto = provider === 'anthropic' ? 'Anthropic' : provider === 'gemini' ? 'Gemini' : 'OpenAI';
   if (fam === 'unknown' || fam === 'other') return proto;
@@ -164,9 +229,22 @@ function updateProviderTag() {
   const base = $('ai-base-url').value.trim();
   const forced = $('ai-provider-override').value;
   const model = ($('ai-model') && $('ai-model').value.trim()) || '';
-  if (!base && forced === 'auto') { $('ai-provider-tag').textContent = '—'; return; }
+  // ⚡ H1: don't bail just because base URL is empty — if the user
+  // already typed a model name we can still show its detected provider.
+  if (!base && forced === 'auto' && !model) { $('ai-provider-tag').textContent = '—'; return; }
   const p = detectProvider(base, forced, model);
-  $('ai-provider-tag').textContent = providerLabel(p, model);
+
+  // Check modelFormats map first (from list-models response), then compute locally
+  const modelFormats = window._modelFormats || {};
+  let wireFmt = modelFormats[model] || null;
+  if (!wireFmt && model) wireFmt = detectApiFormat(p, model);
+
+  let label = providerLabel(p, model);
+  if (wireFmt) {
+    const fmtTag = wireFmt === 'anthropic' ? 'Anthropic' : wireFmt === 'gemini' ? 'Gemini' : 'OpenAI-Compatible';
+    label += ` [${fmtTag}]`;
+  }
+  $('ai-provider-tag').textContent = label;
 }
 $('ai-base-url').addEventListener('input', updateProviderTag);
 $('ai-provider-override').addEventListener('change', updateProviderTag);
@@ -215,10 +293,13 @@ $('btn-fetch-models').addEventListener('click', async () => {
       datalist.appendChild(dopt);
     });
     select.classList.remove('hidden');
+    // Store format annotations for tag display
+    window._modelFormats = r.modelFormats || {};
     // Preselect current model if it's in the list
     const current = $('ai-model').value.trim();
     if (current && r.models.includes(current)) select.value = current;
     hint.textContent = `✅ وُجد ${r.count} موديل من المزوّد (${r.provider}). اختر واحداً من القائمة.`;
+    updateProviderTag();
   } catch (e) {
     hint.textContent = `❌ خطأ: ${e.message}`;
   } finally {
@@ -227,11 +308,12 @@ $('btn-fetch-models').addEventListener('click', async () => {
   }
 });
 
-// When a model is picked from the dropdown, copy it into the model input
+// When a model is picked from the dropdown, copy it into the model input and update tag
 $('ai-model-select').addEventListener('change', (e) => {
   if (e.target.value) {
     $('ai-model').value = e.target.value;
     window.api.saveSettings({ aiModel: e.target.value });
+    updateProviderTag();
   }
 });
 
@@ -353,13 +435,19 @@ async function refreshCooldownBanner() {
   $('cooldown-text').textContent = `🚫 البروفايل "${profile}" ضرب حد تويتر${srcNote} — ينتهي بعد:`;
   banner.classList.remove('hidden');
 
+  // ⚡ H5: capture the profile at creation time so the deferred
+  // refresh only fires if the user is STILL on the same profile —
+  // prevents the banner for profile A from refreshing onto profile B.
+  const watchedProfile = profile;
   const tick = () => {
     const remaining = until - Date.now();
     if (remaining <= 0) {
       $('cooldown-timer-live').textContent = '00:00';
-      $('cooldown-text').textContent = `✅ انتهى الكول داون للبروفايل "${profile}" — جاهز للنشر.`;
+      $('cooldown-text').textContent = `✅ انتهى الكول داون للبروفايل "${watchedProfile}" — جاهز للنشر.`;
       if (cooldownTicker) { clearInterval(cooldownTicker); cooldownTicker = null; }
-      setTimeout(() => refreshCooldownBanner(), 3000);
+      setTimeout(() => {
+        if (profileSelect.value === watchedProfile) refreshCooldownBanner();
+      }, 3000);
       return;
     }
     $('cooldown-timer-live').textContent = fmtCooldown(remaining);
@@ -443,9 +531,13 @@ function renderQueueTable() {
 }
 
 async function deleteSingle(i) {
-  await window.api.bulkDelete([i], profileSelect.value);
-  await loadQueue();
-  renderQueueTable();
+  // ⚡ H7: capture the profile at call time so a profile switch
+  // between the click and the async completion doesn't delete or
+  // reload the wrong queue.
+  const profile = profileSelect.value;
+  await window.api.bulkDelete([i], profile);
+  await loadQueue(profile);
+  if ($('view-queue').classList.contains('active')) renderQueueTable();
 }
 $('select-all').addEventListener('change', (e) => {
   $('queue-table-body').querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = e.target.checked);
@@ -540,16 +632,50 @@ function updateStats(msg) {
 const SESSION_DOT = { running: '🟢', waiting: '🟡', idle: '🟡', stopped: '🔴', done: '✅' };
 function updateSessionStatus(payload) {
   const row = $('ai-sessions-row');
+  const summary = $('ai-sessions-summary');
+  const summaryText = $('sessions-summary-text');
+  const banner = $('ai-error-banner');
   if (!row || !payload || !Array.isArray(payload.sessions)) return;
   row.classList.remove('hidden');
+  if (summary) summary.classList.remove('hidden');
   row.innerHTML = '';
+  const errors = [];
+  // 📊 M2: aggregate counts for the summary line
+  let active = 0, idle = 0, errored = 0, done = 0;
   for (const s of payload.sessions) {
     const chip = document.createElement('span');
-    chip.style.cssText = 'padding:3px 8px;border-radius:10px;background:rgba(255,255,255,0.06);';
+    const hasError = !!s.lastError;
+    chip.style.cssText = hasError
+      ? 'padding:3px 8px;border-radius:10px;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.4);'
+      : 'padding:3px 8px;border-radius:10px;background:rgba(255,255,255,0.06);';
     const dot = SESSION_DOT[s.status] || '🟡';
     chip.textContent = `${dot} #${s.num} · ${s.rounds}ج · ${s.accepted}✅`;
     chip.title = `Session #${s.num} — ${s.status} — ${s.cacheRead || 0} كاش`;
+    if (hasError) {
+      chip.title += `\n❌ ${s.lastError}`;
+      errors.push(`#${s.num}: ${s.lastError}`);
+      errored++;
+    } else if (s.status === 'running') {
+      active++;
+    } else if (s.status === 'done') {
+      done++;
+    } else {
+      idle++;  // waiting / idle / stopped
+    }
     row.appendChild(chip);
+  }
+  // 📊 M2: update the summary line — 🟢 active · 🟡 idle · 🔴 errored · ✅ done
+  if (summaryText) {
+    summaryText.textContent = `🟢 ${active} نشطة · 🟡 ${idle} خامل · 🔴 ${errored} خطأ · ✅ ${done} منتهية`;
+  }
+  // Show/hide error banner
+  if (banner) {
+    if (errors.length > 0) {
+      banner.classList.remove('hidden');
+      banner.innerHTML = '⚠️ <strong>أخطاء الجلسات:</strong><br>' + errors.join('<br>');
+    } else {
+      banner.classList.add('hidden');
+    }
   }
 }
 
@@ -584,6 +710,11 @@ function appendResult(text) {
   const empty = resultsList.querySelector('.results-empty');
   if (empty) resultsList.innerHTML = '';
   resultsList.appendChild(makeResultItem(text));
+  // ⚡ H3: keep state.generated in sync — appendResult is the single
+  // source of truth for the preview, so the push lives here, not at
+  // every call site. Prevents drift if called from elsewhere.
+  if (!Array.isArray(state.generated)) state.generated = [];
+  if (!state.generated.includes(text)) state.generated.push(text);
   const n = resultsList.querySelectorAll('.result-item').length;
   resultsCount.textContent = `${n} تغريدة`;
   resultsActions.classList.remove('hidden');
@@ -591,10 +722,8 @@ function appendResult(text) {
 
 // Live preview: every tweet the engine accepts shows up immediately.
 window.api.onAiPostAccepted((post) => {
-  if (post && post.text) {
-    state.generated.push(post.text);
-    appendResult(post.text);
-  }
+  // ⚡ H3: push is now handled inside appendResult for single-source-of-truth.
+  if (post && post.text) appendResult(post.text);
 });
 
 // Live per-session status (🟢🟡🔴) + cache % between rounds.
@@ -626,7 +755,7 @@ async function runGeneration() {
   const model = $('ai-model').value.trim();
   const providerOverride = $('ai-provider-override').value;
   const referralLink = $('referral-link').value.trim();
-  const quantity = parseInt($('ai-quantity').value) || 10;
+  const quantity = parseInt($('ai-quantity').value) || 20;
   const sessionCount = parseInt(($('ai-session-count') && $('ai-session-count').value) || '5') || 5;
   const customPrompt = ($('ai-prompt') && $('ai-prompt').value.trim()) || '';
 
@@ -641,10 +770,15 @@ async function runGeneration() {
   // "🧹 مسح المعاينة". state.generated already holds the existing preview.
   if (!Array.isArray(state.generated)) state.generated = [];
 
-  // G3: send the CURRENT queue + preview as the dedup scope so the engine
-  // only rejects against those, never against cross-session history.
+  // G3 FIX: dedup scope = ONLY the current queue (what will actually be posted).
+  // We intentionally EXCLUDE state.generated (the visual preview) from existingTexts
+  // because: (a) the preview can accumulate hundreds of old tweets across many runs,
+  // causing the Jaccard 85% gate to falsely reject all new candidates that share
+  // the same narrow Arabic crypto vocabulary; (b) the preview is a display buffer,
+  // not a committed-posts list — only the queue matters for true duplicate avoidance.
+  // Using only queueTexts keeps the dedup scope tight and generation always works.
   const queueTexts = (state.queue || []).map(q => q.content || q.text || q).filter(Boolean);
-  const existingTexts = [...state.generated, ...queueTexts];
+  const existingTexts = [...queueTexts];
 
   btnGenerate.disabled = true;
   btnGenerate.classList.add('hidden');
@@ -711,12 +845,22 @@ if (sessionCountInput) {
 }
 
 // 🗑️ إعادة تعيين الجلسات — wipes persisted sessions; next run starts fresh.
+// FIX: also clears the accumulated preview (state.generated) so the next
+// generation run starts with a clean dedup scope and cannot be blocked by
+// old preview tweets that share the same Arabic crypto vocabulary.
 const btnResetSessions = $('btn-reset-sessions');
 if (btnResetSessions) {
   btnResetSessions.addEventListener('click', async () => {
     try { await window.api.resetSessions(); } catch { /* best-effort */ }
+    // Clear the session status chips
     const row = $('ai-sessions-row'); if (row) { row.innerHTML = ''; row.classList.add('hidden'); }
-    addLog('🗑️ أُعيد تعيين الجلسات — التوليد القادم يبدأ من Session #1.', 'info');
+    // Clear the cumulative preview so old results don't pollute the next dedup scope
+    state.generated = [];
+    renderResults([]);
+    // Reset progress bar + text
+    if (aiProgressFill) aiProgressFill.style.width = '0%';
+    if (aiProgressText) aiProgressText.textContent = 'جاهز للتوليد.';
+    addLog('🗑️ أُعيد تعيين الجلسات والمعاينة — التوليد القادم يبدأ من Session #1 بنطاق dedup نظيف.', 'info');
   });
 }
 // 🧹 مسح المعاينة — clears the cumulative preview ONLY on explicit user action.
@@ -730,9 +874,9 @@ $('btn-clear-preview').addEventListener('click', () => {
 $('btn-stop-generate').addEventListener('click', async () => {
   const btnStop = $('btn-stop-generate');
   btnStop.disabled = true;
-  btnStop.textContent = '⏳ يوقف بعد الموجة الحالية…';
+  btnStop.textContent = '⏹️ يوقف فوراً…';
   try { await window.api.cancelAiGeneration(); } catch { /* best-effort */ }
-  addLog('⏹️ طلب الإيقاف — سيتوقف التوليد بعد انتهاء الموجة الجارية.', 'info');
+  addLog('⏹️ طلب الإيقاف الفوري — سيُقطع الطلب الجارية خلال أقل من 500ms.', 'warning');
 });
 
 $('btn-add-to-queue').addEventListener('click', async () => {
@@ -791,7 +935,9 @@ window.api.onStatusUpdate((status) => {
     countdownEl.classList.remove('hidden');
     let c = status.countdown;
     countdownEl.textContent = formatTime(c);
-    if (countdownInterval) clearInterval(countdownInterval);
+    // ⚡ H4: ALWAYS clear the previous interval before creating a new
+    // one — without this, overlapping countdown messages leak timers.
+    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
     countdownInterval = setInterval(() => {
       c--; if (c >= 0) countdownEl.textContent = formatTime(c);
       else { clearInterval(countdownInterval); countdownInterval = null; }

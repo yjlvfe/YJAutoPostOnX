@@ -11,14 +11,24 @@ function resolveProfilePath(profileName) {
 }
 
 function detectChromePath() {
+  // ⚡ C8: expanded candidates — Linux + macOS + Windows so the bundled
+  // Chromium fallback only triggers when NO system Chrome is available.
   const candidates = [
+    // Linux
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
     '/snap/bin/chrome',
     '/opt/google/chrome/chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    // macOS
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    // Windows (common paths)
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   ];
   for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch (e) {}
+    try { if (fs.existsSync(p)) return p; } catch (e) { /* best-effort */ }
   }
   return null;
 }
@@ -37,8 +47,14 @@ function getLaunchOptions(browserName) {
 
   if (browserName === 'chrome') {
     const chromePath = detectChromePath();
-    if (chromePath) opts.executablePath = chromePath;
-    opts.channel = 'chrome';
+    if (chromePath) {
+      // ⚡ C8: system Chrome found — use it explicitly.
+      opts.executablePath = chromePath;
+      opts.channel = 'chrome';
+    }
+    // ⚡ C8: if NO system Chrome is found we intentionally do NOT set
+    // channel='chrome' — Playwright will fall back to its bundled
+    // Chromium instead of crashing with a "channel not found" error.
   }
 
   return opts;
@@ -46,8 +62,17 @@ function getLaunchOptions(browserName) {
 
 async function launchBrowser(profileName) {
   const profilePath = resolveProfilePath(profileName);
-  const context = await chromium.launchPersistentContext(profilePath, getLaunchOptions('chrome'));
-  return context;
+  try {
+    const context = await chromium.launchPersistentContext(profilePath, getLaunchOptions('chrome'));
+    return context;
+  } catch (err) {
+    // ⚡ C8: friendly error instead of a raw Playwright stack trace.
+    const msg = err && err.message ? err.message : String(err);
+    if (msg.includes('channel') || msg.includes('executablePath') || msg.includes('browserType')) {
+      throw new Error('فشل تشغيل المتصفح: لا يوجد Chrome ولا Chromium متاح. ثبّت Chrome أو تأكد من وجود Chromium مع Playwright. التفاصيل: ' + msg);
+    }
+    throw new Error('فشل تشغيل المتصفح: ' + msg);
+  }
 }
 
 async function openProfileForLogin(profileName) {

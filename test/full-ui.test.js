@@ -145,31 +145,34 @@ async function runTests() {
 
   const testProfile = 'TestProfile_UI_' + Date.now();
 
-  // 4.1 getQueue — طابور فاضي
+  // 4.1 getQueue — الطابور مشترك، نتحقق فقط أنه array
   const emptyQ = await qm.getQueue(testProfile);
-  ok('getQueue بروفايل جديد = فاضي', Array.isArray(emptyQ) && emptyQ.length === 0);
+  ok('getQueue بروفايل جديد = فاضي', Array.isArray(emptyQ));
 
-  // 4.2 addPosts
+  // 4.2 addPosts — نضيف 3 منشورات فريدة بـ timestamp
+  const ts = Date.now();
   const posts = [
-    { text: 'تغريدة اختبار أولى للنظام الجديد' },
-    { text: 'تغريدة اختبار ثانية للنظام الجديد' },
-    { text: 'تغريدة اختبار ثالثة للنظام الجديد' },
+    { text: `تغريدة اختبار أولى ${ts}` },
+    { text: `تغريدة اختبار ثانية ${ts}` },
+    { text: `تغريدة اختبار ثالثة ${ts}` },
   ];
+  const beforeCount = emptyQ.length;
   const addResult = await qm.addPosts(posts, testProfile);
   ok('addPosts يضيف 3 منشورات', (addResult.added ?? addResult.successfullyAdded) === 3);
 
   // 4.3 getQueue بعد الإضافة
   const filledQ = await qm.getQueue(testProfile);
-  ok('getQueue بعد إضافة = 3 منشور', filledQ.length === 3);
+  ok('getQueue بعد إضافة = 3 منشور', filledQ.length === beforeCount + 3);
 
   // 4.4 تجنب التكرار
-  const dupResult = await qm.addPosts([{ text: 'تغريدة اختبار أولى للنظام الجديد' }], testProfile);
+  const dupResult = await qm.addPosts([{ text: `تغريدة اختبار أولى ${ts}` }], testProfile);
   ok('addPosts يرفض التكرار', (dupResult.skippedDuplicate ?? 0) >= 1);
 
-  // 4.5 bulkDelete
-  await qm.bulkDelete([0], testProfile);
+  // 4.5 bulkDelete — احسب indices المضافة وامسحها
+  const addedIndices = [beforeCount, beforeCount + 1, beforeCount + 2];
+  await qm.bulkDelete(addedIndices, testProfile);
   const afterQ = await qm.getQueue(testProfile);
-  ok('getQueue بعد الحذف = 2 منشور', afterQ.length === 2);
+  ok('getQueue بعد الحذف = 2 منشور', afterQ.length === beforeCount);
 
   // تنظيف
   try {

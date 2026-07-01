@@ -23,7 +23,10 @@ const path = require('path');
 const os = require('os');
 
 const LINK_PLACEHOLDER = '{link}';
-const URL_RE = /https?:\/\/[^\s\n\r"']+/g;
+// ⚡ C7: factory returns a FRESH regex instance each call so the /g
+// lastIndex footgun (test() advances lastIndex; a false test leaves it
+// polluted for the next call) can never leak state across invocations.
+function makeURLRe() { return /https?:\/\/[^\s\n\r"']+/g; }
 
 function configDir() {
   return path.join(os.homedir(), '.config', 'x-poster-bot-profile');
@@ -176,13 +179,16 @@ function sanitizePost(text) {
       out = out.split(LINK_PLACEHOLDER).join('');
       modified = true;
     }
-    if (URL_RE.test(out)) {
-      out = out.replace(URL_RE, '');
+    const urlRe = makeURLRe();  // ⚡ C7: fresh instance — no lastIndex leak
+    if (urlRe.test(out)) {
+      out = out.replace(makeURLRe(), '');
       modified = true;
       warnings.push('REFERRAL_DISABLED_LINK_STRIPPED: نظام الإحالة معطل — تم حذف الروابط من المنشور.');
     }
     if (modified) {
-      out = out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      // ⚡ L2: also collapse orphaned trailing spaces left by URL removal
+      // and strip leading/trailing whitespace on each line.
+      out = out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
     }
   }
 

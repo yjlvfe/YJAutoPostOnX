@@ -115,11 +115,19 @@
           <div class="run-grid">
             <div class="field">
               <label>السرعة (دقائق بين كل منشور)</label>
-              <input type="number" id="speed" value="5" min="1">
+              <div class="num-input-wrap">
+                <button class="num-btn num-down" data-target="speed" data-min="1">−</button>
+                <input type="number" id="speed" value="5" min="1">
+                <button class="num-btn num-up" data-target="speed" data-min="1">+</button>
+              </div>
             </div>
             <div class="field">
               <label>الحد الأقصى للمنشورات</label>
-              <input type="number" id="maxPosts" value="9999" min="1">
+              <div class="num-input-wrap">
+                <button class="num-btn num-down" data-target="maxPosts" data-min="1">−</button>
+                <input type="number" id="maxPosts" value="9999" min="1">
+                <button class="num-btn num-up" data-target="maxPosts" data-min="1">+</button>
+              </div>
             </div>
             <div class="field">
               <label>مجلد الإخراج (السجلات)</label>
@@ -149,86 +157,107 @@
       <section class="view" id="view-studio">
         <div class="studio-head">
           <h2>🧠 استوديو الذكاء الاصطناعي</h2>
-          <p>توليد تغريدات عربية احترافية — 230 إلى 270 حرفاً، بدون تكرار، مع رابط إحالتك والهاشتاقات تلقائياً.</p>
+          <p>توليد تغريدات احترافية — 230 إلى 270 حرفاً، بدون تكرار، مع رابط إحالتك تلقائياً.</p>
         </div>
 
-        <div class="studio-grid">
-          <!-- LEFT: generation controls -->
-          <div class="studio-panel">
+        <!-- ── ROW 1: controls (3 fields inline) ── -->
+        <div class="studio-controls-row">
+
+          <div class="studio-ctrl-panel">
             <div class="panel-title"><span>🎯</span> إعداد التوليد</div>
 
-            <div class="field">
-              <label>🔗 رابط الإحالة (يُحقن في كل تغريدة)</label>
-              <input type="text" id="referral-link" placeholder="https://www.mexc.com/auth/signup?inviteCode=...">
-              <span class="field-hint">الرابط متغيّر — يُحفظ هنا فقط ولا يُربط بالكود إطلاقاً.</span>
-            </div>
+            <div class="studio-fields-grid">
+              <!-- رابط الإحالة -->
+              <div class="field studio-field-wide">
+                <label>🔗 رابط الإحالة</label>
+                <input type="text" id="referral-link" placeholder="https://www.mexc.com/auth/signup?inviteCode=...">
+                <span class="field-hint">يُحقن تلقائياً في كل تغريدة.</span>
+              </div>
 
-            <div class="field">
-              <label>🔢 عدد التغريدات المطلوبة</label>
-              <input type="number" id="ai-quantity" value="10" min="1">
-              <span class="field-hint">عدد مفتوح — أنت تحدده، بلا حد أقصى. لن يتوقف التوليد إلا عند اكتمال العدد أو ضغط زر الإيقاف.</span>
-            </div>
+              <!-- عدد التغريدات -->
+              <div class="field">
+                <label>🔢 العدد المطلوب</label>
+                <div class="num-input-wrap">
+                  <button class="num-btn num-down" data-target="ai-quantity" data-min="1">−</button>
+                  <input type="number" id="ai-quantity" value="20" min="1">
+                  <button class="num-btn num-up" data-target="ai-quantity" data-min="1">+</button>
+                </div>
+                <span class="field-hint">بلا حد أقصى — يتوقف عند الاكتمال.</span>
+              </div>
 
-            <div class="field">
-              <label>🔄 عدد الجلسات المتوازية</label>
-              <input type="number" id="ai-session-count" value="5" min="1">
-              <span class="field-hint">جلسات دائمة متوازية — كل جلسة محادثة مستمرة (كاش فعّال + لا تكرار بينها). يمكن رفعه/خفضه أثناء التوليد ويُطبَّق بين الجولات. الجلسات تُستأنف بعد إعادة فتح التطبيق.</span>
-              <div style="display:flex;gap:8px;margin-top:6px;">
-                <button id="btn-reset-sessions" type="button" class="btn-ghost" style="font-size:13px;">🗑️ إعادة تعيين الجلسات</button>
-                <span class="field-hint" style="flex:1;">يمسح الجلسات المحفوظة فيبدأ التوليد القادم من Session #1 من جديد.</span>
+              <!-- عدد الجلسات -->
+              <div class="field">
+                <label>🔄 الجلسات المتوازية</label>
+                <div class="num-input-wrap">
+                  <button class="num-btn num-down" data-target="ai-session-count" data-min="1">−</button>
+                  <input type="number" id="ai-session-count" value="5" min="1">
+                  <button class="num-btn num-up" data-target="ai-session-count" data-min="1">+</button>
+                </div>
+                <span class="field-hint">كل جلسة مستقلة — قابل للتغيير أثناء التوليد.</span>
               </div>
             </div>
 
-            <div class="field">
-              <label>📝 البرومبت المخصص (اختياري)</label>
-              <textarea id="ai-prompt" rows="6" placeholder="اترك الحقل فارغاً لاستخدام البرومبت الافتراضي للنظام، أو اكتب برومبتك الخاص هنا…" style="width:100%;resize:vertical;font-family:inherit;"></textarea>
-              <div style="display:flex;gap:8px;margin-top:6px;">
-                <button id="btn-default-prompt" type="button" class="btn-ghost" style="font-size:13px;">📋 الافتراضي</button>
-                <span class="field-hint" style="flex:1;">"الافتراضي" يملأ الحقل بالبرومبت الأصلي لتعدّله. النسخة الأصلية في الكود لا تتغير.</span>
+            <!-- البرومبت — collapsible -->
+            <details class="prompt-details">
+              <summary class="prompt-summary">📝 البرومبت المخصص <span class="prompt-badge">اختياري</span></summary>
+              <div class="prompt-body">
+                <textarea id="ai-prompt" rows="5" placeholder="اترك فارغاً لاستخدام البرومبت الافتراضي، أو اكتب برومبتك هنا…"></textarea>
+                <div class="prompt-actions">
+                  <button id="btn-default-prompt" type="button" class="btn-ghost btn-sm">📋 تحميل الافتراضي</button>
+                  <span class="field-hint">«الافتراضي» يملأ الحقل للتعديل — النسخة الأصلية لا تتغير.</span>
+                </div>
               </div>
-            </div>
+            </details>
 
+            <!-- status + progress -->
             <div class="ai-status-box" id="ai-status-box">
-              <div class="ai-status-row">
-                <span>المزوّد المكتشف:</span>
+              <div class="ai-status-top">
                 <span class="ai-provider-tag" id="ai-provider-tag">—</span>
+                <span class="ai-progress-text" id="ai-progress-text">جاهز للتوليد</span>
+                <button id="btn-reset-sessions" type="button" class="btn-ghost btn-sm">🗑️ إعادة تعيين</button>
               </div>
               <div class="ai-progress-bar"><div class="ai-progress-fill" id="ai-progress-fill"></div></div>
-              <div class="ai-progress-text" id="ai-progress-text">جاهز للتوليد</div>
-              <!-- G1.6 live stats -->
-              <div class="ai-stats-grid hidden" id="ai-stats-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px;font-size:12px;">
-                <div>🔄 الجولات: <b id="stat-rounds">0</b></div>
-                <div>✅ المقبول: <b id="stat-accepted">0</b></div>
-                <div>❌ المرفوض: <b id="stat-rejected">0</b></div>
-                <div>♻️ المكرر: <b id="stat-dups">0</b></div>
-                <div>⬇️ توكنز إدخال: <b id="stat-tin">0</b></div>
-                <div>⬆️ توكنز إخراج: <b id="stat-tout">0</b></div>
-                <div>⚡ الكاش: <b id="stat-cache">0%</b></div>
+              <div class="ai-stats-grid hidden" id="ai-stats-grid">
+                <div class="stat-cell">🔄 <span>الجولات</span> <b id="stat-rounds">0</b></div>
+                <div class="stat-cell">✅ <span>مقبول</span> <b id="stat-accepted">0</b></div>
+                <div class="stat-cell">❌ <span>مرفوض</span> <b id="stat-rejected">0</b></div>
+                <div class="stat-cell">♻️ <span>مكرر</span> <b id="stat-dups">0</b></div>
+                <div class="stat-cell">⬇️ <span>توكنز↓</span> <b id="stat-tin">0</b></div>
+                <div class="stat-cell">⬆️ <span>توكنز↑</span> <b id="stat-tout">0</b></div>
+                <div class="stat-cell">⚡ <span>كاش</span> <b id="stat-cache">0%</b></div>
               </div>
-              <!-- Per-session status indicators (🟢 يعمل | 🟡 انتظار | 🔴 متوقفة) -->
-              <div class="ai-sessions-row hidden" id="ai-sessions-row" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;font-size:12px;"></div>
+              <div class="ai-sessions-summary hidden" id="ai-sessions-summary" style="margin-top:8px;font-size:13px;font-weight:600;color:var(--text-muted,#94a3b8);">
+                <span id="sessions-summary-text">🟢 0 نشطة · 🟡 0 خامل · 🔴 0 خطأ</span>
+              </div>
+              <div class="ai-sessions-row hidden" id="ai-sessions-row"></div>
+              <div id="ai-error-banner" class="hidden" style="margin-top:10px;padding:10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;color:#fca5a5;font-size:13px;line-height:1.6;"></div>
             </div>
 
-            <button id="btn-generate" class="btn-start-big">✨ توليد التغريدات</button>
-            <button id="btn-stop-generate" class="btn-start-big hidden" style="background:linear-gradient(90deg,#e53935,#b71c1c);">⏹️ إيقاف التوليد (احتفظ بالمقبول)</button>
+            <!-- action buttons -->
+            <div class="studio-btn-row">
+              <button id="btn-generate" class="btn-start-big">✨ توليد التغريدات</button>
+              <button id="btn-stop-generate" class="btn-start-big btn-stop hidden">⏹️ إيقاف (احتفظ بالمقبول)</button>
+            </div>
             <p class="studio-warn" id="studio-warn"></p>
           </div>
 
-          <!-- RIGHT: results preview -->
-          <div class="studio-panel results-panel">
-            <div class="panel-title">
-              <span>📝</span> المعاينة
-              <span class="results-count" id="results-count">0 تغريدة</span>
-            </div>
-            <div class="results-list" id="results-list">
-              <div class="results-empty">لا توجد نتائج بعد. اضبط الإعدادات واضغط "توليد".</div>
-            </div>
+        </div>
+
+        <!-- ── ROW 2: preview (full width) ── -->
+        <div class="studio-panel studio-preview-panel">
+          <div class="panel-title">
+            <span>📝</span> المعاينة
+            <span class="results-count" id="results-count">0 تغريدة</span>
             <div class="results-actions hidden" id="results-actions">
-              <button id="btn-add-to-queue" class="btn-primary">➕ إضافة الكل للطابور</button>
-              <button id="btn-clear-preview" class="btn-ghost">🧹 مسح المعاينة</button>
+              <button id="btn-add-to-queue" class="btn-primary btn-sm">➕ إضافة للطابور</button>
+              <button id="btn-clear-preview" class="btn-ghost btn-sm">🧹 مسح</button>
             </div>
           </div>
+          <div class="results-list" id="results-list">
+            <div class="results-empty">لا توجد نتائج بعد — اضبط الإعدادات واضغط «توليد».</div>
+          </div>
         </div>
+
       </section>
 
       <!-- ═══════════ VIEW: QUEUE ═══════════ -->
@@ -273,6 +302,17 @@
           </p>
 
           <div class="field">
+            <label>🧭 نوع المزوّد</label>
+            <select id="ai-provider-override">
+              <option value="auto">🔍 اكتشاف تلقائي (موصى به)</option>
+              <option value="openai">OpenAI / متوافق</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="opencode-go">OpenCode Go</option>
+              <option value="gemini">Google Gemini (أصلي)</option>
+            </select>
+          </div>
+
+          <div class="field">
             <label>🌐 Base URL</label>
             <input type="text" id="ai-base-url" placeholder="https://api.openai.com/v1">
             <span class="field-hint">مثال Gemini المتوافق: https://generativelanguage.googleapis.com/v1beta/openai</span>
@@ -299,18 +339,9 @@
             <span class="field-hint" id="ai-model-hint">اكتب Base URL والمفتاح ثم اضغط "فحص" لجلب الموديلات الفعلية.</span>
           </div>
 
-          <div class="field">
-            <label>🧭 نوع المزوّد</label>
-            <select id="ai-provider-override">
-              <option value="auto">🔍 اكتشاف تلقائي (موصى به)</option>
-              <option value="openai">OpenAI / متوافق</option>
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="gemini">Google Gemini (أصلي)</option>
-            </select>
-          </div>
-
           <div class="settings-actions">
             <button id="btn-save-ai-settings" class="btn-primary">💾 حفظ الإعدادات</button>
+            <button id="btn-reset-ai-settings" class="btn-secondary" style="margin-right: 10px;">🔄 إعادة تعيين</button>
             <span class="save-ok hidden" id="save-ok">✅ تم الحفظ</span>
           </div>
         </div>

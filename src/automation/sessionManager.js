@@ -50,10 +50,10 @@ class GenerationSession {
     return {
       num: this.num,
       system: this.system,
-      // STATELESS FLAT (v4.3.0): we no longer persist a message thread — there
-      // is no growing conversation. acceptedBodies is all the next run needs to
-      // rebuild dedup state + acceptedContext steering.
-      messages: [],
+      // GROWING THREAD (v4.4.0): persist the last 16 messages so the
+      // conversation thread survives app restarts. The thread is what feeds
+      // Anthropic's prompt cache (cached prefix is re-served from round 2).
+      messages: this.messages.slice(-16),
       acceptedBodies: this.acceptedBodies.slice(-60),
       roundsCompleted: this.roundsCompleted,
       usage: this.usage,
@@ -63,9 +63,9 @@ class GenerationSession {
   /** Rehydrate from a persisted snapshot. */
   static fromJSON(obj, fallbackSystem) {
     const s = new GenerationSession(obj.num, obj.system || fallbackSystem);
-    // STATELESS FLAT (v4.3.0): always start with an empty thread, even if an
-    // old snapshot carried a bloated `messages` array — never replay it.
-    s.messages = [];
+    // GROWING THREAD (v4.4.0): restore the persisted thread so prompt cache
+    // continuity is maintained across restarts.
+    s.messages = Array.isArray(obj.messages) ? obj.messages.slice(-16) : [];
     s.acceptedBodies = Array.isArray(obj.acceptedBodies) ? obj.acceptedBodies : [];
     s.roundsCompleted = Number(obj.roundsCompleted) || 0;
     if (obj.usage) s.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, ...obj.usage };
@@ -152,6 +152,7 @@ class SessionManager {
       rounds: s.roundsCompleted,
       accepted: s.acceptedBodies.length,
       cacheRead: s.usage.cacheRead,
+      lastError: s._lastError || null,
     }));
   }
 
@@ -175,6 +176,10 @@ class SessionManager {
     //    cross-session inspiration themes).
     const acceptedContext = this.engine.buildAcceptedContext(session.acceptedBodies);
     const angles = this.engine.selectAngles(this.chunk);
+
+    // Clear stale error before starting; if this round fails, _lastError is
+    // set again so the UI always shows FRESH errors, never stale ones.
+    delete session._lastError;
 
     // 3. Send the AI turn inside the SAME persistent thread and wait.
     session.status = STATUS.RUNNING;
@@ -218,31 +223,72 @@ class SessionManager {
    * @param {function} getTargetMet - () => boolean  (e.g. accepted >= target)
    */
   async run(getTargetMet) {
-    this._reconcileSessionCount(this.getSessionCount());
+    try { this._reconcileSessionCount(this.getSessionCount()); } catch (err) {
+      console.error('Initial reconcile failed:', err.message);
+    }
 
     // Each active session runs an independent round-loop. They share the
     // queue/preview; sync() at each round start propagates accepted posts.
+    // CRITICAL: every step inside the loop is individually try/catch-wrapped
+    // so one failure never crashes the session or its siblings.
     const sessionLoop = async (session) => {
-      while (!getTargetMet() && !this.isCancelled()) {
-        const liveCount = this.getSessionCount();
-        // Golden rule: count changes apply BETWEEN rounds only.
-        this._reconcileSessionCount(liveCount);
-        if (session.num > liveCount) {
-          // This session was switched off — park it (kept for resume).
-          session.status = STATUS.STOPPED;
-          this._emitStatus();
-          return;
+      try {
+        while (!getTargetMet() && !this.isCancelled()) {
+          try {
+            const liveCount = this.getSessionCount();
+            // Golden rule: count changes apply BETWEEN rounds only.
+            try { this._reconcileSessionCount(liveCount); } catch (err) {
+              console.error(`Session #${session.num} reconcile failed:`, err.message);
+              session._lastError = `reconcile: ${err.message}`;
+              this._emitStatus();
+            }
+            if (session.num > liveCount) {
+              // This session was switched off — park it (kept for resume).
+              session.status = STATUS.STOPPED;
+              this._emitStatus();
+              return;
+            }
+            await this._runSessionRound(session);
+            // Persist after each round so an app close mid-run is resumable.
+            try {
+              this.persist(this.sessions.map(s => s.toJSON()));
+            } catch (err) {
+              console.error(`Session #${session.num} persist failed:`, err.message);
+            }
+          } catch (err) {
+            // Catch-all for any unexpected error in a single round iteration.
+            // Log it, mark the session, and continue the loop (don't crash).
+            console.error(`Session #${session.num} round error:`, err.message);
+            session._lastError = err.message;
+            this._emitStatus();
+            // Brief pause before retrying to avoid tight error loops
+            await new Promise(r => setTimeout(r, 2000));
+          }
         }
-        await this._runSessionRound(session);
-        // Persist after each round so an app close mid-run is resumable.
-        try { this.persist(this.sessions.map(s => s.toJSON())); } catch { /* best-effort */ }
+        session.status = getTargetMet() ? STATUS.DONE : STATUS.WAITING;
+        this._emitStatus();
+      } catch (err) {
+        // Outer catch: if anything throws outside the while (e.g. getTargetMet),
+        // mark session stopped and return gracefully instead of crashing.
+        console.error(`Session #${session.num} fatal:`, err.message);
+        session.status = STATUS.STOPPED;
+        session._lastError = err.message;
+        this._emitStatus();
       }
-      session.status = getTargetMet() ? STATUS.DONE : STATUS.WAITING;
-      this._emitStatus();
     };
 
     const active = this.sessions.slice(0, this.getSessionCount());
-    await Promise.all(active.map(s => sessionLoop(s)));
+    // Promise.allSettled: one session crashing never takes down the others.
+    const results = await Promise.allSettled(active.map(s => sessionLoop(s)));
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === 'rejected') {
+        const reason = results[i].reason;
+        console.error(`Session #${active[i].num} unhandled rejection:`, reason?.message || reason);
+        active[i].status = STATUS.STOPPED;
+        active[i]._lastError = reason?.message || 'Unhandled rejection';
+        this._emitStatus();
+      }
+    }
 
     // Final persist.
     try { this.persist(this.sessions.map(s => s.toJSON())); } catch { /* best-effort */ }
