@@ -1,3 +1,9 @@
+# Ignore all .md docs except README and LICENSE
+*.md
+!README.md
+!LICENSE
+!LICENSE.md
+
 node_modules/
 dist/
 .env
