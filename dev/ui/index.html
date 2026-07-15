@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; img-src 'self' data:; connect-src 'self';">
+  <title>YJAutoPostOnX</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ═══════════ SIDEBAR ═══════════ -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">𝕏</div>
+        <div class="brand-text">
+          <h1>YJAutoPost</h1>
+          <span>Enterprise Suite</span>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-view="dashboard">
+          <span class="nav-ico">📊</span><span>لوحة التحكم</span>
+        </button>
+        <button class="nav-item" data-view="studio">
+          <span class="nav-ico">🧠</span><span>استوديو الذكاء</span>
+        </button>
+        <button class="nav-item" data-view="queue">
+          <span class="nav-ico">📋</span><span>الطابور</span>
+          <span class="nav-badge" id="nav-queue-badge">0</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <span class="nav-ico">⚙️</span><span>الإعدادات</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="sysstatus">
+          <span class="pulse" id="status-pulse"></span>
+          <span id="live-status">النظام جاهز</span>
+        </div>
+        <div class="profile-mini">
+          <span>👤</span>
+          <select id="profile-select" class="profile-select"></select>
+        </div>
+        <div class="profile-tools">
+          <button id="btn-add-profile" class="btn btn--secondary btn--icon" title="إضافة بروفايل">➕</button>
+          <button id="btn-rename-profile" class="btn btn--secondary btn--icon" title="إعادة تسمية">✏️</button>
+          <button id="btn-delete-profile" class="btn btn--secondary btn--icon" title="حذف">🗑️</button>
+        </div>
+        <button id="btn-login" class="btn btn--primary">🔐 تسجيل الدخول إلى X</button>
+      </div>
+    </aside>
+
+    <!-- ═══════════ MAIN ═══════════ -->
+    <main class="main">
+
+      <!-- ═══════════ VIEW: DASHBOARD ═══════════ -->
+      <section class="view view--scroll active" id="view-dashboard">
+        <div class="hero-card">
+          <h2>أهلاً بك في مركز التحكم 🚀</h2>
+          <p>أنشئ محتوى احترافياً بالذكاء الاصطناعي وانشره تلقائياً على X بضغطة زر.</p>
+          <div class="hero-actions">
+            <button class="btn btn--primary" data-jump="studio">🧠 ابدأ التوليد</button>
+            <button class="btn btn--secondary" id="btn-import-csv-dash">📂 استيراد CSV</button>
+          </div>
+        </div>
+
+        <div class="cards-row">
+          <div class="metric-card">
+            <div class="metric-ico">⚡</div>
+            <div class="metric-body">
+              <span class="metric-num" id="m-queue">0</span>
+              <span class="metric-lbl">في الطابور</span>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-ico metric-ico--success">✅</div>
+            <div class="metric-body">
+              <span class="metric-num" id="m-success">0</span>
+              <span class="metric-lbl">نُشر بنجاح</span>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-ico metric-ico--error">❌</div>
+            <div class="metric-body">
+              <span class="metric-num" id="m-failed">0</span>
+              <span class="metric-lbl">فشل النشر</span>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-ico">⏱️</div>
+            <div class="metric-body">
+              <span class="metric-num" id="m-speed">5</span>
+              <span class="metric-lbl">دقائق بين المنشورات</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>🎮 تشغيل النشر</h3>
+            <div id="countdown-timer" class="countdown hidden">00:00</div>
+          </div>
+          <div class="run-grid">
+            <div class="field">
+              <label>السرعة (دقائق بين كل منشور)</label>
+              <div class="stepper">
+                <button class="stepper-btn" data-step="-1" data-target="speed" data-min="1">−</button>
+                <input type="number" id="speed" value="5" min="1">
+                <button class="stepper-btn" data-step="1" data-target="speed" data-min="1">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>الحد الأقصى للمنشورات</label>
+              <div class="stepper">
+                <button class="stepper-btn" data-step="-1" data-target="maxPosts" data-min="1">−</button>
+                <input type="number" id="maxPosts" value="9999" min="1">
+                <button class="stepper-btn" data-step="1" data-target="maxPosts" data-min="1">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>مجلد الإخراج (السجلات)</label>
+              <button id="btn-select-folder" class="btn btn--secondary">📂 اختر المجلد</button>
+              <div id="output-folder-path" class="path-display">لم يتم الاختيار</div>
+            </div>
+          </div>
+          <div id="cooldown-banner" class="cooldown-banner hidden">
+            <span>⏳</span>
+            <span id="cooldown-text">هذا البروفايل تحت كول داون.</span>
+            <span id="cooldown-timer-live" class="cd-timer">--:--</span>
+            <button id="btn-clear-cooldown" class="btn btn--danger btn--sm" title="إلغاء الكول داون يدوياً">🗑️ إلغاء</button>
+          </div>
+          <button id="btn-main-action" class="btn btn--primary btn--lg">🚀 بدء النشر</button>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>📡 مراقب النشاط</h3>
+            <button id="btn-clear-logs" class="btn btn--secondary btn--sm">🗑️ مسح</button>
+          </div>
+          <div class="log-wrap" id="log-container"></div>
+        </div>
+      </section>
+
+      <!-- ═══════════ VIEW: AI STUDIO ═══════════ -->
+      <section class="view view--scroll" id="view-studio">
+        <div class="page-head">
+          <h2>🧠 استوديو الذكاء الاصطناعي</h2>
+          <p>توليد تغريدات احترافية — 170 إلى 270 حرفاً، بدون تكرار، مع رابط إحالتك تلقائياً.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>🎯 إعداد التوليد</h3></div>
+
+          <div class="studio-fields-grid">
+            <div class="field studio-field-wide">
+              <label>🔗 رابط الإحالة</label>
+              <input type="text" id="referral-link" class="input input--ltr" placeholder="https://www.mexc.com/auth/signup?inviteCode=...">
+              <span class="field-hint">يُحقن تلقائياً في كل تغريدة.</span>
+            </div>
+
+            <div class="field">
+              <label>🔢 العدد المطلوب</label>
+              <div class="stepper">
+                <button class="stepper-btn" data-step="-1" data-target="ai-quantity" data-min="1">−</button>
+                <input type="number" id="ai-quantity" value="20" min="1">
+                <button class="stepper-btn" data-step="1" data-target="ai-quantity" data-min="1">+</button>
+              </div>
+              <span class="field-hint">بلا حد أقصى — يتوقف عند الاكتمال.</span>
+            </div>
+
+            <div class="field">
+              <label>🔄 الجلسات المتوازية</label>
+              <div class="stepper">
+                <button class="stepper-btn" data-step="-1" data-target="ai-session-count" data-min="1">−</button>
+                <input type="number" id="ai-session-count" value="5" min="1">
+                <button class="stepper-btn" data-step="1" data-target="ai-session-count" data-min="1">+</button>
+              </div>
+              <span class="field-hint">كل جلسة مستقلة — قابل للتغيير أثناء التوليد.</span>
+            </div>
+          </div>
+
+          <div class="prompt-mode-toggle" role="radiogroup" aria-label="وضع البرومبت">
+            <label class="prompt-mode-option">
+              <input type="radio" name="prompt-mode" id="prompt-mode-dynamic" value="dynamic" checked>
+              <span>🧠 برومبت ديناميكي <span class="badge badge--success">موصى به</span></span>
+            </label>
+            <label class="prompt-mode-option">
+              <input type="radio" name="prompt-mode" id="prompt-mode-custom" value="custom">
+              <span>🖊️ برومبت مخصص</span>
+            </label>
+          </div>
+          <p class="field-hint" id="dynamic-prompt-hint">
+            النظام يوسّع تلقائياً أكثر من 60 زاوية موضوعية ويستبعد ما تشبّع منها في الطابور الحالي — لا حاجة لكتابة شيء.
+          </p>
+
+          <details class="prompt-details hidden" id="custom-prompt-details">
+            <summary class="prompt-summary">📝 البرومبت المخصص <span class="badge">اختياري</span></summary>
+            <div class="prompt-body">
+              <textarea id="ai-prompt" class="textarea" rows="5" placeholder="اترك فارغاً لاستخدام البرومبت الافتراضي، أو اكتب برومبتك هنا…"></textarea>
+              <div class="prompt-actions">
+                <button id="btn-default-prompt" type="button" class="btn btn--secondary btn--sm">📋 تحميل الافتراضي</button>
+                <span class="field-hint">«الافتراضي» يملأ الحقل للتعديل — النسخة الأصلية لا تتغير.</span>
+              </div>
+            </div>
+          </details>
+
+          <!-- شريط التقدّم: نسبة مئوية + كسر (أُنجز / الهدف) — لا شيء آخر -->
+          <div class="ai-status-box" id="ai-status-box">
+            <div class="gen-head">
+              <span class="gen-pct" id="gen-pct">0%</span>
+              <span class="gen-frac" id="gen-frac">جاهز للتوليد</span>
+              <button id="btn-reset-sessions" type="button" class="btn btn--secondary btn--icon" title="إعادة تعيين الجلسات والمعاينة">🗑️</button>
+            </div>
+            <div class="gen-bar"><div class="gen-bar-fill" id="ai-progress-fill"></div></div>
+            <div id="ai-error-banner" class="error-banner hidden"></div>
+          </div>
+
+          <div class="studio-btn-row">
+            <button id="btn-generate" class="btn btn--primary btn--lg">✨ توليد التغريدات</button>
+            <button id="btn-stop-generate" class="btn btn--danger btn--lg hidden">⏹️ إيقاف (احتفظ بالمقبول)</button>
+          </div>
+          <p class="studio-warn" id="studio-warn"></p>
+        </div>
+
+        <div class="card">
+          <div class="card-head results-head">
+            <h3>📝 المعاينة</h3>
+            <span class="results-count" id="results-count">0 تغريدة</span>
+            <div class="results-actions hidden" id="results-actions">
+              <button id="btn-add-to-queue" class="btn btn--primary btn--sm">➕ إضافة للطابور</button>
+              <button id="btn-clear-preview" class="btn btn--secondary btn--sm">🧹 مسح</button>
+            </div>
+          </div>
+          <div class="results-list vlist" id="results-list"></div>
+        </div>
+      </section>
+
+      <!-- ═══════════ VIEW: QUEUE ═══════════ -->
+      <section class="view view--fill" id="view-queue">
+        <div class="page-head">
+          <h2>📋 إدارة الطابور</h2>
+          <p>راجع، استورد، أو احذف المنشورات قبل النشر.</p>
+        </div>
+        <div class="queue-toolbar">
+          <button id="btn-add-posts" class="btn btn--secondary">📂 استيراد CSV</button>
+          <button id="btn-export-queue" class="btn btn--secondary">💾 تصدير CSV</button>
+          <button id="btn-delete-selected" class="btn btn--danger">🗑️ حذف المحدد (<span id="selected-count">0</span>)</button>
+          <span class="queue-total">الإجمالي: <b id="queue-total-num">0</b></span>
+        </div>
+        <div class="queue-card">
+          <div class="qcols qhead">
+            <span class="q-center"><input type="checkbox" id="select-all" title="تحديد الكل"></span>
+            <span>المحتوى</span>
+            <span class="q-center">حروف</span>
+            <span class="q-center">إجراء</span>
+          </div>
+          <div class="queue-list vlist" id="queue-list"></div>
+        </div>
+      </section>
+
+      <!-- ═══════════ VIEW: SETTINGS ═══════════ -->
+      <section class="view view--scroll" id="view-settings">
+        <div class="page-head">
+          <h2>⚙️ الإعدادات</h2>
+          <p>اضبط اتصال الذكاء الاصطناعي وإعدادات النظام.</p>
+        </div>
+
+        <div class="card settings-panel">
+          <div class="card-head"><h3>🧠 اتصال الذكاء الاصطناعي</h3></div>
+          <p class="settings-note">
+            النظام يكتشف نوع المزوّد تلقائياً (OpenAI / Anthropic / Gemini) من الـ Base URL.
+            ضع رابط الـ API ومفتاحك واسم الموديل. مفاتيحك تُحفظ محلياً على جهازك فقط.
+          </p>
+
+          <div class="field">
+            <label>🌐 المزوّد</label>
+            <select id="ai-provider-select" class="select">
+              <option value="iamhc">IamHC — api.iamhc.cn</option>
+              <option value="iyh">IYH — v1.iyhapi.app</option>
+              <option value="opencode-go">Opencode Go — opencode.ai</option>
+            </select>
+          </div>
+
+          <!-- حقلان مخفيان يُملآن تلقائياً من الـ dropdown — لا يظهران للمستخدم -->
+          <input type="hidden" id="ai-base-url" value="https://api.iamhc.cn/v1">
+          <input type="hidden" id="ai-provider-override" value="auto">
+
+          <div class="field">
+            <label>🔑 API Key</label>
+            <div class="input-with-btn">
+              <input type="password" id="ai-api-key" class="input input--ltr" placeholder="sk-... / AIza... / مفتاحك">
+              <button id="btn-toggle-key" class="btn btn--secondary btn--icon" title="إظهار/إخفاء">👁️</button>
+            </div>
+          </div>
+
+          <div class="field field--rel">
+            <label>🤖 اسم الموديل <span class="badge badge--mono" id="ai-provider-tag">—</span></label>
+            <div class="input-with-btn">
+              <input type="text" id="ai-model" class="input input--ltr" placeholder="اضغط فحص الموديلات أو اكتب الاسم يدوياً" autocomplete="off">
+              <button id="btn-fetch-models" class="btn btn--secondary" title="فحص الموديلات المتاحة من المزوّد">🔄 فحص</button>
+            </div>
+            <!-- قائمة الموديلات المرئية — تُملأ بعد «فحص» وتُفتح تلقائياً -->
+            <div class="model-menu hidden" id="ai-model-menu"></div>
+            <span class="field-hint" id="ai-model-hint">اختر المزوّد وضع المفتاح ثم اضغط «فحص» لجلب الموديلات الفعلية.</span>
+          </div>
+
+          <div class="settings-actions">
+            <button id="btn-save-ai-settings" class="btn btn--primary">💾 حفظ الإعدادات</button>
+            <button id="btn-reset-ai-settings" class="btn btn--secondary">🔄 إعادة تعيين</button>
+            <span class="save-ok hidden" id="save-ok">✅ تم الحفظ</span>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ═══════════ PROFILE MODAL ═══════════ -->
+  <div id="profile-modal" class="overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="profile-modal-title">👤 إضافة بروفايل</h2>
+        <button id="btn-close-profile-modal" class="btn btn--secondary btn--icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="profile-modal-hint">أدخل اسماً للبروفايل الجديد. يُستخدم للتمييز بين حسابات X المختلفة.</p>
+        <input type="text" id="profile-modal-input" class="input" placeholder="مثال: حساب_التسويق" />
+        <div id="profile-modal-error" class="profile-modal-error hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="btn-confirm-profile" class="btn btn--primary">✅ تأكيد</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

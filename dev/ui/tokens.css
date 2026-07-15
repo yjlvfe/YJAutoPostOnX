@@ -1,0 +1,133 @@
+/* ═══════════════════════════════════════════════════════════════
+   YJAutoPostOnX — Design System Tokens (المصدر الوحيد)
+   ─────────────────────────────────────────────────────────────────
+   • accent واحد فقط لكل الأزرار الرئيسية والعناصر النشطة
+   • 4 ألوان حالة فقط: نجاح / فشل / تحذير / معلومة
+   • 3 مستويات خلفية فقط: تطبيق / بطاقة / مدخلات
+   • لا لون ولا حجم هاردكود خارج هذا الملف
+   ================================================================ */
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  /* ═══ SURFACES — 3 مستويات فقط ═══ */
+  --bg-app:    #080911;                       /* خلفية التطبيق */
+  --bg-card:   #10121F;                       /* البطاقات والبانلات */
+  --bg-inset:  #0B0D18;                       /* المدخلات والمناطق الغائرة */
+  --border:    rgba(255, 255, 255, 0.07);     /* حدود موحّدة */
+  --hover:     rgba(255, 255, 255, 0.045);    /* طبقة hover مشتقة، ليست مستوى رابعاً */
+
+  /* ═══ TEXT — نمطان فقط ═══ */
+  --text-0: #EEF0FA;
+  --text-1: #8E94B8;
+
+  /* ═══ ACCENT — لون أساسي واحد ═══ */
+  --accent:        #6D5DFC;
+  --accent-hover:  #7E6FFD;
+  --accent-soft:   rgba(109, 93, 252, 0.14);
+  --accent-border: rgba(109, 93, 252, 0.35);
+  --on-accent:     #FFFFFF;
+
+  /* ═══ STATUS — 4 ألوان حالة فقط ═══ */
+  --success: #2FE6A8;  --success-soft: rgba(47, 230, 168, 0.13);
+  --error:   #FF5C7C;  --error-soft:   rgba(255, 92, 124, 0.13);
+  --warning: #FFB547;  --warning-soft: rgba(255, 181, 71, 0.13);
+  --info:    #2AD4FF;  --info-soft:    rgba(42, 212, 255, 0.13);
+
+  /* ═══ SPACING ═══ */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* ═══ RADIUS — كبير للبطاقات، أصغر للأزرار/المدخلات ═══ */
+  --radius-card: 14px;
+  --radius-ctl:  9px;
+  --radius-sm:   6px;
+  --radius-pill: 999px;
+
+  /* ═══ CONTROL SIZING ═══ */
+  --ctrl-h:     40px;
+  --ctrl-h-sm:  32px;
+  --ctrl-h-lg:  48px;
+  --ctrl-px:    16px;
+  --ctrl-px-sm: 10px;
+
+  /* ═══ TYPOGRAPHY ═══ */
+  --fs-xs:   11px;
+  --fs-sm:   12.5px;
+  --fs-base: 14px;
+  --fs-md:   16px;
+  --fs-lg:   clamp(17px, 1.6vw, 20px);
+  --fs-xl:   clamp(20px, 2.1vw, 24px);
+  --fs-2xl:  clamp(22px, 2.6vw, 28px);
+  --fw-reg:   400;
+  --fw-med:   500;
+  --fw-bold:  700;
+  --fw-black: 800;
+  --font-ui:   'Cairo', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Courier New', monospace;
+
+  /* ═══ SHADOWS ═══ */
+  --shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-accent: 0 6px 20px rgba(109, 93, 252, 0.30);
+
+  /* ═══ MOTION ═══ */
+  --t-fast:   0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --t-normal: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ═══ SCROLLBAR ═══ */
+  --scroll-w:       8px;
+  --scroll-thumb:   #2B2E4E;
+  --scroll-thumb-h: #3C4070;
+}
+
+/* ── Base ── */
+html {
+  direction: rtl;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  background: var(--bg-app);
+  color: var(--text-0);
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  direction: rtl;
+  text-align: right;
+}
+
+/* ── Scrollbar موحّد رفيع (كل مناطق التمرير) ── */
+::-webkit-scrollbar {
+  width: var(--scroll-w);
+  height: var(--scroll-w);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-h);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
