@@ -326,10 +326,14 @@ ipcMain.handle('add-posts', async (event, newPosts, profileName) => {
   }
 });
 
-ipcMain.handle('bulk-delete', async (event, indices, profileName) => {
+// Deletes by post TEXT, not by row position — a position captured when the UI
+// last loaded the list goes stale the moment publishing consumes a post, and
+// would delete a different post than the one the user picked.
+ipcMain.handle('bulk-delete', async (event, texts, profileName) => {
   // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
   try {
-    return await queueManager.bulkDelete(indices);
+    if (!Array.isArray(texts)) return null;
+    return await queueManager.bulkDeleteByText(texts);
   } catch (e) {
     console.error('bulk-delete IPC error:', e?.message || e);
     return null;
@@ -406,16 +410,69 @@ ipcMain.handle('clear-cooldown', async (event, profileName) => {
   }
 });
 
+/**
+ * Report a main-process fault to the UI without ever throwing from inside a
+ * fault handler.
+ *
+ * `mainWindow` is truthy but UNUSABLE once the window has been closed — its
+ * webContents is gone, so `.send()` throws. Throwing here means throwing from
+ * inside the very handler meant to contain the problem: the uncaughtException
+ * handler below would re-enter on its own error. isDestroyed() is the actual
+ * liveness check; the truthiness check alone is not.
+ */
+function reportFaultToUI(message) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('status-update', { type: 'error', message });
+    }
+  } catch (e) {
+    console.error('Failed to report fault to UI:', e?.message || e);
+  }
+}
+
 // Global unhandled rejection handler
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  if (mainWindow) {
-    mainWindow.webContents.send('status-update', { type: 'error', message: `Unhandled error: ${reason}` });
-  }
+  reportFaultToUI(`Unhandled error: ${reason}`);
+});
+
+/**
+ * Synchronous twin of the rejection handler above. Without it, ONE uncaught
+ * throw anywhere in the main process (a Playwright teardown, an Electron API
+ * misuse, a bad write) takes the whole app down instantly — no window, no
+ * message, mid-run.
+ *
+ * It deliberately does not exit. The queue is consumed post-by-post, so
+ * anything already published is already out of the queue and nothing is
+ * double-posted by staying alive; the user gets to see what happened instead of
+ * watching the window vanish. The run flags are cleared because the automation
+ * that was in flight is definitively over — leaving them set would strand the
+ * UI on "جاري النشر..." and `automationRunning` would refuse every later run
+ * with "Automation already running".
+ */
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  global.isRunning = false;
+  automationRunning = false;
+  reportFaultToUI(`خطأ غير متوقع أوقف التشغيل: ${error?.message || error} — الطابور سليم، وكل منشور نُشر فعلاً حُذف منه.`);
 });
 
 ipcMain.on('stop-automation', () => {
   global.isRunning = false;
+});
+
+// Synchronous on purpose: the preload bridge resolves this before the
+// renderer's first script runs, so the sidebar can paint the version with the
+// rest of the shell instead of popping in a frame later. One small string, once
+// per window — app.getVersion() is an in-memory read, not a round-trip to disk.
+ipcMain.on('get-app-version', (event) => {
+  try {
+    event.returnValue = app.getVersion();
+  } catch (e) {
+    // The UI must still boot if this ever fails; the label just stays empty.
+    console.error('get-app-version failed:', e?.message || e);
+    event.returnValue = null;
+  }
 });
 
 // Login mode handler

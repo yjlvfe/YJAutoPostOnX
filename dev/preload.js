@@ -1,5 +1,19 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+/**
+ * Resolved BEFORE the renderer's own scripts run, so the sidebar paints the
+ * version with the rest of the shell rather than popping in a frame later.
+ * sendSync is the point: an async invoke() would resolve after first paint.
+ *
+ * This exists because the app previously showed its version NOWHERE — with
+ * several builds sharing a download folder, "which version am I actually
+ * running?" was unanswerable from the app itself, and an old build looked
+ * exactly like a fixed one.
+ */
+const appVersion = ipcRenderer.sendSync('get-app-version');
+
+contextBridge.exposeInMainWorld('appInfo', { version: appVersion });
+
 // Expose protected APIs to renderer
 contextBridge.exposeInMainWorld('api', {
   // Settings
@@ -20,7 +34,9 @@ contextBridge.exposeInMainWorld('api', {
   // Queue operations
   getQueue: (profileName) => ipcRenderer.invoke('get-queue', profileName),
   addPosts: (posts, profileName) => ipcRenderer.invoke('add-posts', posts, profileName),
-  bulkDelete: (indices, profileName) => ipcRenderer.invoke('bulk-delete', indices, profileName),
+  // Takes post TEXTS, not row indices — an index goes stale as soon as
+  // publishing consumes a post. See queueManager.bulkDeleteByText.
+  bulkDelete: (texts, profileName) => ipcRenderer.invoke('bulk-delete', texts, profileName),
 
   // Automation control
   startPosting: (config) => ipcRenderer.invoke('start-posting', config),

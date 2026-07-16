@@ -200,11 +200,36 @@ async function addPosts(newPosts, /* profileName ignored */ _profileName) {
   });
 }
 
-async function bulkDelete(indices /* profileName not needed */) {
+/**
+ * Delete posts the user picked in the UI, addressed BY TEXT — never by index.
+ *
+ * The UI used to send the row's position, captured when the list was last
+ * loaded. That was survivable only while the queue never shrank on its own.
+ * Now that publishing consumes the head post, every consume shifts all later
+ * positions down by one, so a stored index silently comes to mean a DIFFERENT
+ * post: pick "C" from a stale list and "D" gets deleted instead — no error, no
+ * warning, wrong post gone. (Switching to the queue tab re-renders the list but
+ * does not reload it, so a stale index can sit there indefinitely.)
+ *
+ * Text is stable under consumption: whatever else moved, "C" still means "C".
+ * Same reasoning and same first-occurrence/FIFO rule as consumePost.
+ *
+ * One queue entry is removed per requested text, so selecting N rows removes
+ * exactly N posts even in the pathological case of duplicate text.
+ *
+ * @param {string[]} texts - stored texts of the posts to delete.
+ * @returns {Array} the updated queue.
+ */
+async function bulkDeleteByText(texts) {
   return withLock(async () => {
     const queue = await _getQueueRaw();
-    const sortedIndices = new Set(indices);
-    const updatedQueue = queue.filter((_, i) => !sortedIndices.has(i));
+    const wanted = Array.isArray(texts) ? [...texts] : [];
+    const updatedQueue = [];
+    for (const item of queue) {
+      const i = wanted.indexOf(postTextOf(item));
+      if (i !== -1) { wanted.splice(i, 1); continue; } // consume one request, drop this entry
+      updatedQueue.push(item);
+    }
     await _saveQueueRaw(updatedQueue);
     return updatedQueue;
   });
@@ -300,7 +325,7 @@ module.exports = {
   consumePost,
   getPublishedTexts,
   addPosts,
-  bulkDelete,
+  bulkDeleteByText,
   // Per-profile
   addToPending,
   addDeadLetter,

@@ -207,7 +207,9 @@ function switchView(view) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
   // القوائم الافتراضية تحتاج إعادة حساب عندما تصبح مرئية (clientHeight كان 0)
-  if (view === 'queue') queueList.refresh();
+  // الطابور يُعاد تحميله من القرص لا رسمه فقط: النشر يحذف منه أثناء العمل، فقائمة
+  // مرسومة من تحميل سابق تعرض منشورات نُشرت وحُذفت فعلاً.
+  if (view === 'queue') loadQueue();
   if (view === 'studio') studioList.refresh();
 }
 document.querySelectorAll('.nav-item').forEach(btn => {
@@ -686,8 +688,11 @@ async function loadQueue(profile) {
   state.queueView = state.queue.map((p, i) => {
     const isObj = p && typeof p === 'object';
     return {
+      // `id` is for list bookkeeping only (selection + DOM keys) — never send it
+      // to the backend. Deliberately NO `index` field: a stored row position
+      // goes stale the moment publishing consumes a post, and deleting by a
+      // stale index removes the wrong post. Deletion addresses posts by `text`.
       id: `q${seq}-${i}`,
-      index: i,  // موقع العنصر في طابور الباكند وقت التحميل
       text: isObj ? (p.text || '') : String(p ?? ''),
       media: isObj ? (p.media_path || null) : null,
     };
@@ -731,17 +736,17 @@ async function deleteQueueItem(id) {
   const profile = profileSelect.value;
   const item = state.queueView.find(v => v.id === id);
   if (!item) return;
-  await window.api.bulkDelete([item.index], profile);
+  await window.api.bulkDelete([item.text], profile);
   await loadQueue(profile);
 }
 
 $('btn-delete-selected').addEventListener('click', async () => {
   if (!qSelection.size) { addLog('لم تحدد أي منشور', 'warning'); return; }
   const profile = profileSelect.value;
-  const idx = state.queueView.filter(v => qSelection.has(v.id)).map(v => v.index);
-  await window.api.bulkDelete(idx, profile);
+  const texts = state.queueView.filter(v => qSelection.has(v.id)).map(v => v.text);
+  await window.api.bulkDelete(texts, profile);
   await loadQueue(profile);
-  addLog(`🗑️ حُذف ${idx.length} منشور`, 'warning');
+  addLog(`🗑️ حُذف ${texts.length} منشور`, 'warning');
 });
 
 // import CSV (two buttons share logic)
@@ -1204,6 +1209,13 @@ window.addEventListener('resize', () => {
 
 // ═══════════ INIT ═══════════
 document.addEventListener('DOMContentLoaded', async () => {
+  // Version first, and NOT awaited on anything: it is already resolved in the
+  // preload bridge, and it must show even if a later await below fails — the
+  // whole point is being able to tell which build is running, especially when
+  // something is broken.
+  const version = window.appInfo?.version;
+  if (version) $('app-version').textContent = `v${version}`;
+
   const settings = await window.api.getSettings();
   applySettings(settings);
   await loadProfiles();

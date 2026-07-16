@@ -234,6 +234,29 @@ async function run() {
   assert(published.some(t => t === 'SPIN_{a|b}'),
     'the spintax template is archived (dedup matches on what the studio would generate)');
 
+  // ── Manual delete must survive the queue shrinking under it ───────────
+  // The UI captures a row list, then publishing consumes the head post and
+  // shifts every later position down by one. Deleting by that stale POSITION
+  // removes a different post than the user picked — silently. Deletion is
+  // therefore addressed by text, like consumePost.
+  console.log('📋 Manual delete is content-addressed, not positional');
+  await queueManager.addPosts(['DEL_A', 'DEL_B', 'DEL_C', 'DEL_D']);
+  const uiSnapshot = (await queueManager.getQueue())
+    .map((p, i) => ({ index: i, text: typeof p === 'string' ? p : p.text }))
+    .filter(v => v.text.startsWith('DEL_'));
+  const pick = uiSnapshot.find(v => v.text === 'DEL_C');
+  // the queue shifts under the UI, exactly as a publish would
+  await queueManager.consumePost('DEL_A', { published: true });
+  await queueManager.bulkDeleteByText([pick.text]);
+  const afterDel = queueOnDisk();
+  assert(!afterDel.includes('DEL_C'),
+    'the post the user actually picked is the one deleted');
+  assert(afterDel.includes('DEL_D'),
+    'the NEXT post is untouched — a stale row position would have deleted this one instead');
+  assert(afterDel.includes('DEL_B'), 'unrelated posts are untouched');
+  // clean up so the drain assertions below still hold
+  await queueManager.bulkDeleteByText(['DEL_B', 'DEL_D']);
+
   // ── Durability: consumption survives a fresh read of the module ───────
   console.log('📋 Durability — the deletion is on disk, not in memory');
   const reread = (await queueManager.getQueue()).map(p => (typeof p === 'string' ? p : p.text));

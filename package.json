@@ -1,6 +1,6 @@
 {
   "name": "YJAutoPostOnX",
-  "version": "5.15.0",
+  "version": "5.17.0",
   "description": "Automated posting tool for X.com (Twitter) — AI tweet generation, CSV-based scheduling, Playwright automation",
   "main": "dev/main.js",
   "scripts": {
