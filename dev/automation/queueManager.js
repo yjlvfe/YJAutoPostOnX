@@ -4,12 +4,30 @@ const os = require('os');
 const log = require('../utils/logger');
 
 // ===== SHARED QUEUE — one queue.json for ALL profiles =====
-// Each profile has its own "position pointer" so it continues from where it left off.
-// This is the single source of truth for all posts across all profiles.
+// A CONSUMABLE FIFO: publishing always takes queue[0], and a post that goes out
+// successfully is removed from queue.json immediately and permanently
+// (consumePost). A post is therefore published exactly ONCE, by whichever
+// profile reaches it first — the queue is work to divide, not a playlist each
+// account replays.
+//
+// This replaces the old "append-only queue + per-profile position cursor"
+// model (positions.json), which never deleted anything: publishing only bumped
+// a counter, so every published post stayed in queue.json and reappeared in the
+// UI the moment the run ended. That cursor also contradicted the rate-limit
+// hand-off design, which assumes an unpublished post is still IN the queue for
+// the next account to pick up. positions.json is no longer read or written; a
+// leftover file from an older version is inert and can be deleted.
 
 const SHARED_DIR  = path.join(os.homedir(), '.config', 'x-poster-shared');
 const QUEUE_FILE  = path.join(SHARED_DIR, 'queue.json');
-const POS_FILE    = path.join(SHARED_DIR, 'positions.json');   // { profileName: index }
+// Texts of posts that actually went out, kept AFTER they leave the queue.
+// The "never repeat the same meaning, with no time window" guarantee used to
+// ride on queue.json being append-only — every post ever added stayed there and
+// so stayed in the semantic-dedup corpus. Now that publishing deletes the post,
+// that corpus would shrink and the studio could regenerate a tweet it already
+// published. This archive keeps the guarantee without keeping the post in the
+// queue: it feeds dedup, it is never republished from.
+const PUBLISHED_FILE = path.join(SHARED_DIR, 'published.json');
 
 // Legacy per-profile paths (kept for session browser data — NOT for queue)
 const GLOBAL_PROFILES_DIR = path.join(os.homedir(), '.config', 'x-poster-profiles');
@@ -78,19 +96,11 @@ async function _saveQueueRaw(queue) {
   await fs.writeFile(QUEUE_FILE, JSON.stringify(queue, null, 2));
 }
 
-async function _getPositionsRaw() {
-  await ensureSharedDir();
-  try {
-    const data = await fs.readFile(POS_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch {
-    return {};
-  }
-}
-
-async function _savePositionsRaw(positions) {
-  await ensureSharedDir();
-  await fs.writeFile(POS_FILE, JSON.stringify(positions, null, 2));
+/** Text of a queue entry — entries are stored either as a bare string or as
+ *  { text, media_path }. */
+function postTextOf(item) {
+  if (typeof item === 'string') return item;
+  return item && typeof item === 'object' ? (item.text || '') : '';
 }
 
 // Public: lock-protected reads/writes (for IPC + external callers).
@@ -99,77 +109,66 @@ async function getQueue(/* profileName ignored — queue is global */) {
   return withLock(_getQueueRaw);
 }
 
-// ── Position tracker ─────────────────────────────────────────────────────────
+// ── Consume ──────────────────────────────────────────────────────────────────
 
 /**
- * Get the current queue position for a profile.
- * Returns the index of the next post to publish (0-based).
+ * Permanently remove a post from the shared queue.
+ *
+ * Called the instant a post is confirmed published, so it can never be
+ * republished by this profile, by another profile, or by a later run — and so
+ * it disappears from the UI list for good. This is the ONLY thing that makes
+ * the queue shrink during a run.
+ *
+ * Matches on the STORED text (the first occurrence — FIFO), not on an index:
+ * an index captured before publishing can be invalidated by a concurrent
+ * add/delete from the UI, which would silently delete the wrong post. Pass the
+ * raw stored text, NOT the spintax-expanded text that was actually typed.
+ *
+ * @param {string} postText - the post as stored in the queue.
+ * @param {{ published?: boolean }} [opts] - `published: true` also records the
+ *   text in the published archive, so the studio's semantic dedup keeps seeing
+ *   it forever. Pass false (the default) when removing a post that never went
+ *   out — e.g. escalating to a dead-letter — so the user is still free to
+ *   regenerate that idea later.
+ * @returns {boolean} true if an entry was removed.
  */
-async function getProfilePosition(profileName) {
-  // 🔒 C4: read under lock so we don't race with a concurrent write.
+async function consumePost(postText, opts = {}) {
   return withLock(async () => {
-    const positions = await _getPositionsRaw();
-    const pos = positions[profileName] ?? 0;
     const queue = await _getQueueRaw();
-    // Clamp to valid range
-    return Math.min(pos, queue.length);
-  });
-}
-
-/**
- * Advance the profile position by `count` posts.
- * Called by xPoster after each successful/failed post.
- */
-async function advancePosition(profileName, count = 1) {
-  return withLock(async () => {
-    const positions = await _getPositionsRaw();
-    const queue = await _getQueueRaw();
-    const current = positions[profileName] ?? 0;
-    positions[profileName] = Math.min(current + count, queue.length);
-    await _savePositionsRaw(positions);
-    return positions[profileName];
-  });
-}
-
-/**
- * Move a profile's queue cursor to a new profile name (profile rename).
- * Without this, renaming a profile silently reset it to post #1.
- */
-async function renameProfilePosition(oldName, newName) {
-  return withLock(async () => {
-    const positions = await _getPositionsRaw();
-    if (Object.prototype.hasOwnProperty.call(positions, oldName)) {
-      positions[newName] = positions[oldName];
-      delete positions[oldName];
-      await _savePositionsRaw(positions);
+    const idx = queue.findIndex(item => postTextOf(item) === postText);
+    if (idx === -1) return false;
+    queue.splice(idx, 1);
+    await _saveQueueRaw(queue);
+    if (opts.published) {
+      // Best-effort: a post that went out must never be resurrected by an
+      // archive write failing, so this can't be allowed to throw.
+      try {
+        const archive = await _getPublishedRaw();
+        archive.push({ text: postText, publishedAt: new Date().toISOString() });
+        await fs.writeFile(PUBLISHED_FILE, JSON.stringify(archive, null, 2));
+      } catch (e) {
+        log.error('Failed to archive published post (dedup corpus may miss it):', e?.message);
+      }
     }
+    return true;
   });
 }
 
-/** Drop a profile's queue cursor entirely (profile deletion). */
-async function removeProfilePosition(profileName) {
-  return withLock(async () => {
-    const positions = await _getPositionsRaw();
-    if (Object.prototype.hasOwnProperty.call(positions, profileName)) {
-      delete positions[profileName];
-      await _savePositionsRaw(positions);
-    }
-  });
+async function _getPublishedRaw() {
+  await ensureSharedDir();
+  try {
+    return JSON.parse(await fs.readFile(PUBLISHED_FILE, 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
-/**
- * Get the slice of the queue that a profile should post next.
- * Returns { posts, startIndex } where posts[0] is at queue[startIndex].
- */
-async function getProfileQueue(profileName) {
-  // 🔒 C4: atomic snapshot of queue + position (no torn read).
+/** Texts of every post that has actually been published. Feeds the studio's
+ *  semantic-dedup corpus — see PUBLISHED_FILE. */
+async function getPublishedTexts() {
   return withLock(async () => {
-    const queue = await _getQueueRaw();
-    const positions = await _getPositionsRaw();
-    let startIndex = positions[profileName] ?? 0;
-    startIndex = Math.min(startIndex, queue.length);
-    const posts = queue.slice(startIndex);
-    return { posts, startIndex, total: queue.length };
+    const archive = await _getPublishedRaw();
+    return archive.map(e => (typeof e === 'string' ? e : e && e.text)).filter(t => typeof t === 'string' && t.trim());
   });
 }
 
@@ -204,22 +203,9 @@ async function addPosts(newPosts, /* profileName ignored */ _profileName) {
 async function bulkDelete(indices /* profileName not needed */) {
   return withLock(async () => {
     const queue = await _getQueueRaw();
-    const sortedIndices = [...new Set(indices)].sort((a, b) => a - b);
-    const updatedQueue = queue.filter((_, i) => !sortedIndices.includes(i));
+    const sortedIndices = new Set(indices);
+    const updatedQueue = queue.filter((_, i) => !sortedIndices.has(i));
     await _saveQueueRaw(updatedQueue);
-
-    // Shift profile positions
-    const positions = await _getPositionsRaw();
-    let changed = false;
-    for (const name of Object.keys(positions)) {
-      let pos = positions[name];
-      for (const idx of sortedIndices) {
-        if (pos > idx) pos--;
-      }
-      pos = Math.max(0, Math.min(pos, updatedQueue.length));
-      if (pos !== positions[name]) { positions[name] = pos; changed = true; }
-    }
-    if (changed) await _savePositionsRaw(positions);
     return updatedQueue;
   });
 }
@@ -311,11 +297,8 @@ module.exports = {
   getProfileDataDir,
   // Shared queue
   getQueue,
-  getProfileQueue,
-  getProfilePosition,
-  advancePosition,
-  renameProfilePosition,
-  removeProfilePosition,
+  consumePost,
+  getPublishedTexts,
   addPosts,
   bulkDelete,
   // Per-profile

@@ -198,12 +198,12 @@ async function start(config, onStatus) {
   // 🚫 Shared rate-limit reporting: records the cooldown, notifies the UI,
   // and throws RATE_LIMITED so this profile stops IMMEDIATELY and the
   // orchestrator (startMulti) moves to the next profile without burning
-  // through the rest of the queue. `pendingPost` ({ text, origin }), when
-  // given, is the exact post that was in flight when the limit was hit — it
-  // rides along on the thrown error so startMulti can hand it to the NEXT
-  // profile instead of losing it until this profile's cooldown expires.
-  // `origin` is the profile whose queue cursor still points at this post, so
-  // the cursor can be advanced once another profile actually publishes it.
+  // through the rest of the queue. `pendingPost` ({ text }), when given, is the
+  // exact post that was in flight when the limit was hit. It was NOT consumed
+  // (it never went out), so it is still sitting at the head of the shared queue
+  // and the next profile will pick it up on its own — this value rides along on
+  // the error for REPORTING only, so the UI can name the post that was
+  // interrupted.
   async function reportRateLimitAndThrow(pageContent, attemptNum, opts = {}, pendingPost = null) {
     global.isRateLimited = true;
     const parsedMs = pageContent ? rateLimitStore.parseCooldownFromText(pageContent) : null;
@@ -232,43 +232,33 @@ async function start(config, onStatus) {
   let queue;
   let context = null;
   try {
-    // Shared queue — load only the slice starting from this profile's position
-    const profileQueueData = await queueManager.getProfileQueue(profileName);
-    queue = profileQueueData.posts;
-    // 🔁 Hand-off: a post that another profile hit its rate limit on gets
-    // prepended here so it's attempted immediately instead of waiting a full
-    // cooldown cycle. Marked __priority so it never consumes THIS profile's
-    // own position cursor — it's a bonus attempt, not part of its sequence.
-    if (config.priorityPost) {
-      const pp = typeof config.priorityPost === 'string'
-        ? { text: config.priorityPost, origin: null }
-        : config.priorityPost;
-      queue = [{ text: pp.text, __priority: true, __origin: pp.origin }, ...queue];
-      onStatus({ type: 'info', message: '📨 استلام منشور من بروفايل سابق ضرب الحد — سيُنشر أولاً على هذا الحساب.' });
-    }
-    // ⏸️ v5.12.0: this profile's own deferred backlog (transient/network
-    // failures from a previous run) gets first crack this run too. Marked
-    // __deferredRetry — its position slot was already consumed by
-    // advancePosition() when it was first deferred, so it never touches
-    // this profile's cursor again (cursorOwner resolves to null for it,
-    // same as a hand-off item with no origin).
-    const deferredBacklog = await queueManager.getDeferred(profileName);
-    if (deferredBacklog.length) {
-      queue = [...deferredBacklog.map(d => ({ text: d.text, __deferredRetry: true, attempts: d.attempts })), ...queue];
-      onStatus({ type: 'info', message: `⏸️ ${deferredBacklog.length} منشور مؤجَّل من تشغيل سابق (فشل شبكي) — سيُعاد المحاولة الآن.` });
-    }
-    const queueStartIndex = profileQueueData.startIndex;
+    // Shared consumable queue — ALWAYS starts at the first post. There is no
+    // resume cursor any more: a published post is deleted from the queue
+    // outright (consumePost), so whatever sits at index 0 is BY DEFINITION the
+    // next unpublished post. Anything still in the queue has not gone out.
+    //
+    // This is also why a rate-limit hand-off needs no plumbing: the post the
+    // previous profile couldn't publish was never consumed, so it's still at
+    // the head and this profile picks it up first, naturally. Prepending it
+    // (the old config.priorityPost path) would now publish it TWICE — once as
+    // the injected copy, once from the queue itself.
+    //
+    // Same for the deferred backlog: a network-failed post stays in the queue,
+    // so the next run retries it at the head on its own. deferred-posts.json is
+    // now only an attempt COUNTER (see the network branch below) — never a
+    // re-injection source.
+    queue = await queueManager.getQueue();
+    const queueTotalAtStart = queue.length;
     onStatus({
       type: 'info',
-      message: `Starting automation — البروفايل \"${profileName}\" يبدأ من المنشور #${queueStartIndex + 1} (${queue.length} متبقٍّ من ${profileQueueData.total})`,
+      message: `Starting automation — البروفايل \"${profileName}\" يبدأ من المنشور #1 (${queueTotalAtStart} في الطابور)`,
       queueCount: queue.length,
-      queueStart: queueStartIndex + 1,
-      queueTotal: profileQueueData.total,
+      queueStart: 1,
+      queueTotal: queueTotalAtStart,
     });
-    // 📍 Counts only NORMAL (cursor-owned, sequential) items this run — used
-    // below to show the TRUE absolute queue position in the live per-post
-    // status message. See the "Processing post" fix at the top of the loop
-    // for why this must be tracked separately from `postedCount`.
+    // 📍 How many posts this profile has worked through this run — drives the
+    // live "المنشور رقم X من Y" message. Tracked separately from postedCount,
+    // which counts attempts rather than queue slots.
     let sequentialPosted = 0;
 
     context = await launchBrowser(profile || 'Default');
@@ -291,17 +281,11 @@ async function start(config, onStatus) {
       if (!global.isRunning) break;
 
       const rawItem = queue[0];
-      const isPriorityItem = typeof rawItem === 'object' && rawItem !== null && rawItem.__priority === true;
-      const isDeferredRetryItem = typeof rawItem === 'object' && rawItem !== null && rawItem.__deferredRetry === true;
-      // The profile whose queue cursor still points at this post. For a normal
-      // item that's THIS profile; for a handed-off item it's the profile the
-      // hand-off chain started from (its cursor never advanced past the post);
-      // for a deferred-retry item it's null — its position slot was already
-      // consumed by advancePosition() the run it was first deferred.
-      const cursorOwner = isPriorityItem ? (rawItem.__origin || null)
-        : isDeferredRetryItem ? null
-        : profileName;
-      const rawText = parseSpintax(typeof rawItem === 'string' ? rawItem : rawItem.text);
+      // The post EXACTLY as stored in queue.json. Every queue operation
+      // (consumePost / addDeferred / addDeadLetter / addToPending) must key off
+      // this — never off `postText` below, which spintax may have rewritten.
+      const itemText = typeof rawItem === 'string' ? rawItem : rawItem.text;
+      const rawText = parseSpintax(itemText);
 
       // 🔓 DECOUPLED: queue posts are published EXACTLY as stored. Referral
       // links (if any) were already baked in by the studio at generation
@@ -312,25 +296,13 @@ async function start(config, onStatus) {
       const postStartTime = Date.now();
       report.logEvent({ level: 'info', event: 'POST_START', postId: `post-${postedCount}`, attempt: 1, message: `Processing post ${postedCount}` });
 
-      // 🩹 "looks random every time it starts" fix: this used to always print
-      // `Processing post ${postedCount}` — a SESSION-LOCAL counter that
-      // restarts at 1 on every run. Right after announcing "starts from post
-      // #101" above, the very next line said "Processing post 1...", which
-      // reads as "it ignored the resume position and restarted from
-      // scratch" even though the underlying queue cursor (positions.json)
-      // was advancing correctly the whole time — only the LIVE LOG text was
-      // lying about it. Priority hand-off / deferred-retry items are ALSO
-      // out-of-sequence on purpose (see cursorOwner above) and must say so
-      // instead of being folded into a fake sequential number.
-      let progressMessage;
-      if (isPriorityItem) {
-        progressMessage = `📨 نشر منشور مُحال من حساب سابق ضرب الحد (خارج الترتيب الطبيعي)...`;
-      } else if (isDeferredRetryItem) {
-        progressMessage = `🔁 إعادة محاولة منشور مؤجَّل من تشغيل سابق (خارج الترتيب الطبيعي)...`;
-      } else {
-        sequentialPosted++;
-        progressMessage = `📝 نشر المنشور رقم ${queueStartIndex + sequentialPosted} من ${profileQueueData.total}...`;
-      }
+      // 🩹 "looks random every time it starts" fix: this used to print
+      // `Processing post ${postedCount}` — a SESSION-LOCAL attempt counter, not
+      // a queue position. Now that the queue is consumed as it's published,
+      // the head of the queue IS post #1 and the count below is honest by
+      // construction: X of Y where Y is what was waiting when the run started.
+      sequentialPosted++;
+      const progressMessage = `📝 نشر المنشور رقم ${sequentialPosted} من ${queueTotalAtStart}...`;
 
       onStatus({
         type: 'action',
@@ -464,7 +436,7 @@ async function start(config, onStatus) {
                 // that used to only run after all 3 retries were burned.
                 const earlyScan = await scanForRateLimit(page);
                 if (earlyScan.isRateLimited && global.isRunning) {
-                  await reportRateLimitAndThrow(earlyScan.pageContent, attempts, {}, { text: postText, origin: cursorOwner });
+                  await reportRateLimitAndThrow(earlyScan.pageContent, attempts, {}, { text: itemText });
                 }
                 onStatus({ type: 'warning', message: `Attempt ${attempts}/${maxRetries}: trying Ctrl+Enter...` });
                 try {
@@ -560,7 +532,7 @@ async function start(config, onStatus) {
       if (!postSuccess && attempts >= maxRetries) {
         const scan = await scanForRateLimit(page);
         if (scan.isRateLimited && global.isRunning) {
-          await reportRateLimitAndThrow(scan.pageContent, attempts, {}, { text: postText, origin: cursorOwner });
+          await reportRateLimitAndThrow(scan.pageContent, attempts, {}, { text: itemText });
         }
       }
 
@@ -603,30 +575,39 @@ async function start(config, onStatus) {
           message: `⛔ رابط التأكيد يشير لصفحة "حد النشر اليومي" (${postUrl}) — المنشور لم يُنشر فعلياً والحساب ضرب الحد.`,
         });
         const scan = await scanForRateLimit(page);
-        await reportRateLimitAndThrow(scan.pageContent || null, attempts, {}, { text: postText, origin: cursorOwner });
+        await reportRateLimitAndThrow(scan.pageContent || null, attempts, {}, { text: itemText });
       }
       postUrl = postUrl || 'N/A';
 
       if (postSuccess === true) {
         successCount++;
         consecutiveFailures = 0;
-        // Advance the cursor of whichever profile owns this post (the ORIGIN for handed-off items)
-        if (cursorOwner) await queueManager.advancePosition(cursorOwner);
-        // ⏸️ v5.12.0: a previously-deferred post that finally went through —
-        // clear it from this profile's deferred backlog.
-        if (isDeferredRetryItem) await queueManager.removeDeferred(profileName, rawItem.text);
+        // ✅ PUBLISHED + LINK CAPTURED → delete from the shared queue NOW, for
+        // good. This is the single point where the queue shrinks. It runs
+        // before anything else that could throw (reporting, CSV, cooldown), so
+        // a later failure can never resurrect an already-published post.
+        // published: true also archives the text for the studio's semantic
+        // dedup, which must keep seeing it long after it leaves the queue.
+        await queueManager.consumePost(itemText, { published: true });
+        // A post that had been network-deferred and finally went through — drop
+        // its attempt counter so a future post never inherits a stale count.
+        await queueManager.removeDeferred(profileName, itemText);
         queue = queue.slice(1);
         report.recordPostResult({
           postId: `post-${postedCount}`,
-          text: typeof rawItem === 'string' ? rawItem : rawItem.text,
+          text: itemText,
           status: 'success',
           attempts: attempts
         });
       } else if (postSuccess === 'unconfirmed') {
-        const itemText = typeof rawItem === 'string' ? rawItem : rawItem.text;
-        // Advance the cursor of whichever profile owns this post (the ORIGIN for handed-off items)
-        if (cursorOwner) await queueManager.advancePosition(cursorOwner);
-        if (isDeferredRetryItem) await queueManager.removeDeferred(profileName, itemText);
+        // Published, but the link couldn't be captured — it most likely DID go
+        // out. Consume it anyway and park a copy in pending-verification:
+        // re-posting identical text risks X's duplicate-content block, and the
+        // user can verify from the pending list. It is not returned to the
+        // queue (that's the one thing it must never do). Archived as published
+        // for the same reason: assume it went out.
+        await queueManager.consumePost(itemText, { published: true });
+        await queueManager.removeDeferred(profileName, itemText);
         queue = queue.slice(1);
         await queueManager.addToPending(itemText, profileName);
         unconfirmedCount++;
@@ -661,34 +642,31 @@ async function start(config, onStatus) {
         }
         failedCount++;
         consecutiveFailures++;
-        const itemToDelete = typeof rawItem === 'string' ? rawItem : rawItem.text;
 
-        // ⏸️ v5.12.0: transient (network) failures are DEFERRED, not deleted —
-        // "try another post now, retry this one next run" per the user's
-        // request. Still advance the cursor (advancePosition is a monotonic
-        // +1 counter, not an absolute index — skipping it here would let a
-        // LATER success in this same run push the position past this post
-        // with no record of it anywhere, silently losing it). The deferred
-        // backlog (separate from the cursor) is what brings it back.
-        // A small attempts cap (DEFER_ATTEMPTS_LIMIT) prevents a genuinely
-        // stuck post from deferring forever, invisible, run after run.
+        // ⏸️ Transient (network) failures are NOT consumed — the post stays in
+        // the queue exactly where it is, so the next run (or the next profile)
+        // finds it at the head and retries it. Only the local `queue` copy
+        // skips past it, giving "try another post now, retry this one later".
+        // deferred-posts.json no longer re-injects anything; it survives purely
+        // as an attempt COUNTER, so a post that can never go out is eventually
+        // consumed into dead-letters instead of blocking the head of the queue
+        // forever.
         if (errorType === 'network') {
-          if (cursorOwner) await queueManager.advancePosition(cursorOwner);
-          if (isDeferredRetryItem) await queueManager.removeDeferred(profileName, itemToDelete);
-          const attemptsSoFar = await queueManager.addDeferred(itemToDelete, errorMsg, profileName);
+          const attemptsSoFar = await queueManager.addDeferred(itemText, errorMsg, profileName);
           queue = queue.slice(1);
           if (attemptsSoFar > DEFER_ATTEMPTS_LIMIT) {
-            await queueManager.removeDeferred(profileName, itemToDelete);
-            await queueManager.addDeadLetter(itemToDelete, errorType, errorMsg, profileName);
+            await queueManager.consumePost(itemText);
+            await queueManager.removeDeferred(profileName, itemText);
+            await queueManager.addDeadLetter(itemText, errorType, errorMsg, profileName);
             onStatus({ type: 'error', message: `❌ فشل شبكي متكرر (${attemptsSoFar} مرات) — تم نقله للمحذوفات نهائياً.` });
             report.recordPostResult({
-              postId: `post-${postedCount}`, text: itemToDelete, status: 'dead_letter',
+              postId: `post-${postedCount}`, text: itemText, status: 'dead_letter',
               attempts: attempts, errorType, lastError: errorMsg,
             });
           } else {
-            onStatus({ type: 'warning', message: `⏸️ فشل مؤقت (شبكة) — تم تخطي هذا المنشور مؤقتاً، سيُعاد تلقائياً في التشغيل القادم لنفس الحساب.` });
+            onStatus({ type: 'warning', message: `⏸️ فشل مؤقت (شبكة) — بقي المنشور في الطابور، وسيُعاد تلقائياً في التشغيل القادم.` });
             report.recordPostResult({
-              postId: `post-${postedCount}`, text: itemToDelete, status: 'deferred',
+              postId: `post-${postedCount}`, text: itemText, status: 'deferred',
               attempts: attempts, errorType, lastError: errorMsg,
             });
           }
@@ -717,15 +695,17 @@ async function start(config, onStatus) {
         }
 
         onStatus({ type: 'error', message: `❌ فشل (${errorType}): ${errorMsg.slice(0, 60)}` });
-        // Advance position to prevent infinite retry loop (Zero-Queue-Block)
-        // Advance the cursor of whichever profile owns this post (the ORIGIN for handed-off items)
-        if (cursorOwner) await queueManager.advancePosition(cursorOwner);
-        if (isDeferredRetryItem) await queueManager.removeDeferred(profileName, itemToDelete);
+        // A non-transient failure (selector/platform/unknown) will not fix
+        // itself on a retry. Consume it into dead-letters so it can't block the
+        // head of the queue forever (Zero-Queue-Block) — dead-letters.json
+        // keeps the text, so nothing is actually lost.
+        await queueManager.consumePost(itemText);
+        await queueManager.removeDeferred(profileName, itemText);
         queue = queue.slice(1);
-        await queueManager.addDeadLetter(itemToDelete, errorType, errorMsg, profileName);
+        await queueManager.addDeadLetter(itemText, errorType, errorMsg, profileName);
         report.recordPostResult({
           postId: `post-${postedCount}`,
-          text: typeof rawItem === 'string' ? rawItem : rawItem.text,
+          text: itemText,
           status: 'dead_letter',
           attempts: attempts,
           errorType: errorType,
@@ -910,9 +890,11 @@ async function startMulti(config, onStatus) {
 
   const results = [];
   let totalSuccess = 0, totalUnconfirmed = 0, totalFailed = 0, totalSkippedPosts = 0, limitedCount = 0, skippedCount = 0;
-  // 🔁 A post that hit a rate limit mid-flight rides here to the NEXT profile
-  // that actually runs, instead of being lost/delayed a full cooldown cycle.
-  let handoffPost = null;
+  // 🔁 The post a profile was mid-way through when it hit a rate limit. It was
+  // never published, so it was never consumed — it is still at the head of the
+  // shared queue and the next profile picks it up automatically. Kept only to
+  // report the outcome at the end of the run.
+  let interruptedPost = null;
 
   // 🎯 v5.11.0 fix #3: "الحد الأقصى للمنشورات" is ONE GLOBAL target shared by
   // all profiles — not a fresh quota per profile. When a profile hits its
@@ -951,7 +933,6 @@ async function startMulti(config, onStatus) {
       res = await start({
         ...config,
         profile: profileName,
-        priorityPost: handoffPost,
         // Remaining share of the global target + cumulative counter base so
         // the next profile CONTINUES the numbers instead of resetting them.
         maxPosts: hasGlobalMax ? (globalMax - doneSoFar) : config.maxPosts,
@@ -962,7 +943,9 @@ async function startMulti(config, onStatus) {
       onStatus({ type: 'error', message: `خطأ في "${profileName}": ${err.message}` });
       res = { status: 'error', profile: profileName, success: 0, failed: 0, error: err.message };
     }
-    handoffPost = null; // consumed (or dropped) — never replay to more than one profile
+    // This profile ran, so any post interrupted BEFORE it has either gone out
+    // or is back at the head of the queue — either way it's no longer pending.
+    interruptedPost = null;
     results.push(res);
     totalSuccess += res.success || 0;
     totalUnconfirmed += res.unconfirmed || 0;
@@ -982,7 +965,7 @@ async function startMulti(config, onStatus) {
 
     if (res.status === 'rate_limited') {
       limitedCount++;
-      handoffPost = res.pendingPost || null;
+      interruptedPost = res.pendingPost || null;
       onStatus({
         type: 'warning',
         message: `➡️ "${profileName}" ضرب حد — الانتقال للبروفايل التالي...`,
@@ -994,13 +977,13 @@ async function startMulti(config, onStatus) {
     if (res.status === 'cooldown') { skippedCount++; continue; }
   }
 
-  // 📌 A hand-off post that never found an available account is NOT lost —
-  // its origin profile's cursor still points at it, so it publishes on the
-  // first run after that profile's cooldown expires. Tell the user.
-  if (handoffPost && handoffPost.text) {
+  // 📌 A post interrupted by a rate limit with no account left to take it is
+  // NOT lost: it was never published, so it was never consumed and is still
+  // first in the queue for the next run.
+  if (interruptedPost && interruptedPost.text) {
     onStatus({
       type: 'warning',
-      message: '📌 منشور ضرب الحد لم يجد حساباً متاحاً لنشره الآن — سيبقى في موضعه وسيُنشر تلقائياً عند أول تشغيل بعد انتهاء الكولداون.',
+      message: '📌 منشور ضرب الحد لم يجد حساباً متاحاً لنشره الآن — لم يُحذف من الطابور، وسيكون أول منشور في التشغيل القادم.',
     });
   }
 

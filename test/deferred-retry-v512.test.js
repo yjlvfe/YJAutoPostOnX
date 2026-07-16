@@ -7,12 +7,16 @@
  * Non-transient failures (selector/platform/unknown) keep today's dead-letter
  * behavior unchanged.
  *
- * Guards two real bugs found during planning (not just the happy path):
- *   - advancePosition() is a monotonic +1 counter, not an absolute index —
- *     skipping it on defer would let a LATER success in the same run push
- *     the position past the deferred post with no record anywhere, silently
- *     losing it. xPoster.js must therefore ALWAYS call advancePosition, and
- *     track "retry me" via the separate deferred-posts list, not the cursor.
+ * Reworked for the consumable queue: a deferred post is simply NOT consumed,
+ * so it stays in the shared queue and the next run finds it at the head. The
+ * old position cursor (and the "re-inject the backlog at the start of a run"
+ * machinery it required) is gone. deferred-posts.json survives purely as an
+ * attempt COUNTER so a post that can never publish is eventually escalated to
+ * a dead-letter instead of blocking the head of the queue forever.
+ *
+ * Guards the real bugs (not just the happy path):
+ *   - A deferred post must NOT be consumed — consuming it on a transient
+ *     failure would delete a post that never went out.
  *   - Playwright's native locator actions throw their OWN errors.TimeoutError
  *     on a genuine (permanent) DOM/selector regression — the error classifier
  *     must check selector/locator message content BEFORE the generic
@@ -63,17 +67,21 @@ console.log('📋 queueManager: deferred-posts persistence');
   const src = fs.readFileSync(path.join(__dirname, '../dev/automation/xPoster.js'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-  // Bug guard #1: advancePosition must ALWAYS run on a network failure —
-  // never skipped — because it's a monotonic counter, not an absolute index.
+  // Bug guard #1: a transient failure must NOT consume the post — that's the
+  // whole point of deferring. The only consumePost allowed in this branch is
+  // the one gated behind the attempts cap (escalation to a dead-letter).
   const networkBranchMatch = code.match(/if\s*\(errorType === 'network'\)\s*\{([\s\S]*?)\n\s*\}\n\n\s*onStatus/);
   assert(!!networkBranchMatch, 'network-failure branch exists and is isolatable in source');
   const networkBranch = networkBranchMatch ? networkBranchMatch[1] : '';
-  assert(/if\s*\(cursorOwner\)\s*await queueManager\.advancePosition\(cursorOwner\)/.test(networkBranch),
-    'network branch ALWAYS advances the position (monotonic counter — never skip it)');
+  assert(!/advancePosition/.test(networkBranch), 'network branch does not use the removed position cursor');
   assert(/addDeferred/.test(networkBranch), 'network branch calls addDeferred instead of addDeadLetter directly');
-  assert(!/await queueManager\.addDeadLetter\(itemToDelete, errorType, errorMsg, profileName\);\s*$/m.test(networkBranch) ||
-    /DEFER_ATTEMPTS_LIMIT/.test(networkBranch),
-    'any addDeadLetter call inside the network branch is gated by the attempts cap, not unconditional');
+  const capMatch = networkBranch.match(/if\s*\(attemptsSoFar > DEFER_ATTEMPTS_LIMIT\)\s*\{([\s\S]*?)\}\s*else\s*\{/);
+  assert(!!capMatch, 'attempts-cap escalation block is isolatable in source');
+  const beforeCap = networkBranch.slice(0, networkBranch.indexOf('if (attemptsSoFar'));
+  assert(!/consumePost/.test(beforeCap),
+    'a deferred post is NOT consumed — it stays in the queue so the next run retries it');
+  assert(/consumePost/.test(capMatch ? capMatch[1] : ''),
+    'only the over-the-cap escalation consumes the post (into dead-letters)');
 
   // Bug guard #2: selector/locator message check must run BEFORE the
   // TimeoutError-name catch-all in the classifier.
@@ -85,11 +93,11 @@ console.log('📋 queueManager: deferred-posts persistence');
   assert(selectorIdx !== -1 && networkIdx !== -1 && selectorIdx < networkIdx,
     "classifier checks 'selector' message content BEFORE the TimeoutError-name catch-all for 'network'");
 
-  // Deferred backlog prepend + cursorOwner handling
-  assert(/getDeferred\(profileName\)/.test(code), 'start() loads this profile\'s deferred backlog');
-  assert(/__deferredRetry/.test(code), 'deferred backlog items are tagged __deferredRetry');
-  assert(/isDeferredRetryItem\s*\?\s*null/.test(code),
-    'cursorOwner resolves to null for deferred-retry items (their slot was already consumed when first deferred)');
+  // The backlog must NOT be re-injected into the run any more: the deferred
+  // post is still IN the queue, so prepending a copy would publish it twice.
+  assert(!/__deferredRetry/.test(code), 'no deferred-retry re-injection (the post is already in the queue)');
+  assert(!/cursorOwner|advancePosition|getProfileQueue/.test(code),
+    'the position-cursor model is fully removed from the publish engine');
   assert(/removeDeferred/.test(code), 'success/unconfirmed/escalation paths call removeDeferred to clean up');
 
   // Circuit breaker must still apply inside the network branch (not bypassed
@@ -99,12 +107,13 @@ console.log('📋 queueManager: deferred-posts persistence');
   assert(/CONSECUTIVE_FAILURE_LIMIT/.test(networkFullBranch),
     'circuit breaker check is present INSIDE the network branch (not skipped by its early continue)');
 
-  // Non-network failures must be untouched: still unconditionally dead-lettered.
-  assert(/errorType !== 'network'|else \{[\s\S]{0,50}onStatus\({ type: 'error', message: `❌ فشل/.test(code) || true,
-    'non-network path retained (sanity placeholder — verified structurally below)');
+  // Non-network failures: still unconditionally dead-lettered, and now also
+  // consumed so a permanently-broken post can't block the head of the queue.
   const tailDeadLetter = code.slice(code.indexOf('continue;', code.indexOf("errorType === 'network'")));
-  assert(/await queueManager\.addDeadLetter\(itemToDelete, errorType, errorMsg, profileName\);/.test(tailDeadLetter),
+  assert(/await queueManager\.addDeadLetter\(itemText, errorType, errorMsg, profileName\);/.test(tailDeadLetter),
     'non-network failures still call addDeadLetter unconditionally (unchanged behavior)');
+  assert(/await queueManager\.consumePost\(itemText\);/.test(tailDeadLetter),
+    'non-network failures consume the post (dead-letters keep the text — nothing is lost)');
 
   // ── 3. reportEngine 'deferred' status support ──
   console.log('📋 reportEngine: deferred status');

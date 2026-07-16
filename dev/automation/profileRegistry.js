@@ -13,7 +13,6 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs').promises;
-const queueManager = require('./queueManager');
 const rateLimitStore = require('./rateLimitStore');
 
 // Resolved lazily so tests can point HOME at an isolated directory.
@@ -85,7 +84,6 @@ async function migrateUnnumberedProfiles() {
       const num = await nextProfileNumber();
       const newName = `${num}- ${oldName}`;
       await fs.rename(path.join(profilesDir(), oldName), path.join(profilesDir(), newName));
-      await queueManager.renameProfilePosition(oldName, newName);
       rateLimitStore.renameProfile(oldName, newName);
       console.log(`Profile migrated: "${oldName}" → "${newName}"`);
     } catch (e) {

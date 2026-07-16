@@ -71,28 +71,22 @@ async function main() {
   check('run list starts at the SELECTED profile, no wrap-around',
     JSON.stringify(runList) === JSON.stringify(['2- محمد', '3- علي']));
 
-  // ── 4. Legacy migration carries cursor + cooldown ─────────────────────────
+  // ── 4. Legacy migration carries the cooldown ──────────────────────────────
+  // The queue cursor this used to migrate is gone: the shared queue is
+  // consumed as it's published, so it holds no per-profile state and a rename
+  // has nothing to carry over. Renaming can no longer "reset a profile to post
+  // #1", because there is no profile-specific position to reset.
   await fs.mkdir(path.join(dir, 'قديم'), { recursive: true });
   await queueManager.addPosts(['a', 'b', 'c']);
-  await queueManager.advancePosition('قديم', 2);
   rateLimitStore.setCooldown('قديم', 60 * 1000);
 
   await registry.migrateUnnumberedProfiles();
   const after = await registry.listProfilesOrdered();
   check('legacy profile got number 4', after.includes('4- قديم') && !after.includes('قديم'));
-  check('queue cursor survived migration',
-    (await queueManager.getProfilePosition('4- قديم')) === 2);
   check('cooldown survived migration', rateLimitStore.getCooldown('4- قديم') !== null);
   check('old cooldown key gone', rateLimitStore.getCooldown('قديم') === null);
-
-  // ── 5. Cursor rename/remove helpers ───────────────────────────────────────
-  await queueManager.renameProfilePosition('4- قديم', '4- جديد');
-  check('renameProfilePosition moved the cursor',
-    (await queueManager.getProfilePosition('4- جديد')) === 2 &&
-    (await queueManager.getProfilePosition('4- قديم')) === 0);
-  await queueManager.removeProfilePosition('4- جديد');
-  check('removeProfilePosition dropped the cursor',
-    (await queueManager.getProfilePosition('4- جديد')) === 0);
+  check('renaming a profile does not touch the shared queue',
+    (await queueManager.getQueue()).length === 3);
 
   if (failures) {
     console.error(`\n❌ profile-numbering.test.js: ${failures} FAILED`);

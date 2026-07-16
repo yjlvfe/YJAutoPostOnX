@@ -493,8 +493,9 @@ ipcMain.handle('delete-profile', async (event, profileName) => {
       return { success: false, error: 'مسار غير مسموح' };
     }
     await fs.rm(profilePath, { recursive: true, force: true });
-    // Clean up orphaned queue cursor + cooldown entries for the deleted profile
-    try { await queueManager.removeProfilePosition(safeName); } catch { /* best-effort */ }
+    // Clean up the orphaned cooldown entry for the deleted profile. There is no
+    // queue cursor to clean up any more — the shared queue is consumed as it's
+    // published, so it holds no per-profile state.
     try { rateLimitStore.clearCooldown(safeName); } catch { /* best-effort */ }
     return { success: true };
   } catch (error) {
@@ -526,10 +527,10 @@ ipcMain.handle('rename-profile', async (event, oldName, newName) => {
         return { success: false, error: 'يوجد بروفايل بنفس الاسم بالفعل' };
       }
       await fs.rename(oldPath, newPath);
-      // ⚡ FIX (hidden bug): the queue cursor and rate-limit cooldown are keyed
-      // by profile name — without migrating them, a renamed profile silently
-      // restarted the queue from post #1 and lost its cooldown.
-      try { await queueManager.renameProfilePosition(safeOld, safeName); } catch { /* best-effort */ }
+      // ⚡ FIX (hidden bug): the rate-limit cooldown is keyed by profile name —
+      // without migrating it, a renamed profile lost its cooldown. (The queue
+      // cursor this used to migrate no longer exists — the shared queue is
+      // consumed as it's published and keeps no per-profile state.)
       try { rateLimitStore.renameProfile(safeOld, safeName); } catch { /* best-effort */ }
     }
     return { success: true, profile: { name: safeName } };
@@ -1161,10 +1162,18 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
 
   // 🧠 Semantic dedup index — rejects same-MEANING rewrites, not just
   // near-verbatim copies, against the ENTIRE corpus (no recency window):
-  // the live queue on disk + the renderer's texts (queue + preview) + every
-  // acceptance of this run. IDF weighting keeps shared domain vocabulary
-  // (تداول، سوق…) from causing false rejections at any corpus size.
+  // everything ALREADY PUBLISHED + the live queue on disk + the renderer's
+  // texts (queue + preview) + every acceptance of this run. IDF weighting keeps
+  // shared domain vocabulary (تداول، سوق…) from causing false rejections at any
+  // corpus size.
   const semIndex = new SemanticIndex();
+  try {
+    // Published posts are DELETED from the queue the moment they go out, so the
+    // queue alone is no longer the full history — without this archive the
+    // corpus would shrink as posts publish and the studio could regenerate a
+    // tweet already on X. This is what keeps "no time window" literally true.
+    for (const t of await queueManager.getPublishedTexts()) semIndex.add(t);
+  } catch { /* archive unreadable — dedup still covers the queue below */ }
   try {
     const diskQueue = await queueManager.getQueue();
     for (const item of (Array.isArray(diskQueue) ? diskQueue : [])) {

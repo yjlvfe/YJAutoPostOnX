@@ -1162,6 +1162,12 @@ window.api.onStatusUpdate((status) => {
     navQueueBadge.textContent = status.queueCount;
     mQueue.textContent = status.queueCount;
     queueTotalNum.textContent = status.queueCount;
+    // A published post is deleted from the queue the moment it goes out, so
+    // refresh the list as the count drops while the user is watching it —
+    // otherwise it would sit there showing already-published posts until the
+    // run ended. Only while the queue view is actually visible: this is an IPC
+    // round-trip plus a list rebuild, and it fires at most once per post.
+    if (state.isRunning && $('view-queue').classList.contains('active')) loadQueue();
   }
   if (status.stats) {
     state.stats = status.stats;

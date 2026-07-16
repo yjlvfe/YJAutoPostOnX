@@ -19,13 +19,31 @@ const CACHE_DIR = path.join(os.homedir(), '.config', 'x-poster-bot-profile', 'me
 const SESSION_DIR = path.join(os.homedir(), '.config', 'x-poster-profiles');
 
 /**
+ * Strip JS comments so only URLs that are actually REACHABLE AT RUNTIME are
+ * audited. The filter below always claimed to skip comments but never did, so
+ * documenting a URL in a comment (e.g. the daily-post-limit upsell page that
+ * isLimitUrl() detects) raised a permanent 🔴 CRITICAL that could not be
+ * cleared without deleting the explanation — training the reader to ignore the
+ * audit. A URL in a comment cannot end up in a post; a URL in a string can, and
+ * those are still scanned.
+ *
+ * `//` inside a URL is NOT a comment: the [^:] guard keeps `https://…` intact,
+ * so a real hardcoded link on a line with a trailing comment is still caught.
+ */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+/**
  * Scan a text file for URLs.
  */
 function scanFileForUrls(filePath) {
   const result = { file: filePath, urls: [], hasHardcodedLink: false, issues: [] };
   try {
     const content = fs.readFileSync(filePath, 'utf8');
-    const urls = extractUrls(content);
+    const urls = extractUrls(stripComments(content));
 
     // Filter out code patterns, comments, and known safe patterns
     const hardcoded = urls.filter(u => {
