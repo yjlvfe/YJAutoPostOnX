@@ -20,6 +20,25 @@ function profilesDir() {
   return path.join(os.homedir(), '.config', 'x-poster-profiles');
 }
 
+function assertSafeProfileName(name, { allowDefault = true } = {}) {
+  if (allowDefault && name === 'Default') return 'Default';
+  if (typeof name !== 'string') throw new Error('اسم البروفايل غير صالح');
+  const value = name.trim();
+  if (!value || value === '.' || value === '..' || value.includes('\0') || /[\\/]/.test(value)) {
+    throw new Error('اسم البروفايل يحتوي على مسار غير مسموح');
+  }
+  if (path.basename(value) !== value) throw new Error('اسم البروفايل غير صالح');
+  return value;
+}
+
+function resolveProfilePath(name) {
+  const safe = assertSafeProfileName(name, { allowDefault: false });
+  const base = path.resolve(profilesDir());
+  const resolved = path.resolve(base, safe);
+  if (!resolved.startsWith(`${base}${path.sep}`)) throw new Error('مسار البروفايل خارج المجلد المسموح');
+  return resolved;
+}
+
 /** Sequence number of a profile, or null if the name carries none. Default is always 1. */
 function profileNumber(name) {
   if (name === 'Default') return 1;
@@ -100,4 +119,6 @@ module.exports = {
   listProfilesOrdered,
   nextProfileNumber,
   migrateUnnumberedProfiles,
+  assertSafeProfileName,
+  resolveProfilePath,
 };

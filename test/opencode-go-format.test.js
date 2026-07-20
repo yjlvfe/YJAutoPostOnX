@@ -99,10 +99,10 @@ check('openai extract reads choices[0].message.content', openaiText === 'تغر�
 const ocgModels = {
   'minimax-m3': 'anthropic', 'minimax-m2.7': 'anthropic', 'minimax-m2.5': 'anthropic',
   'qwen3.7-max': 'anthropic', 'qwen3.7-plus': 'anthropic', 'qwen3.6-plus': 'anthropic',
-  'deepseek-v4-flash': 'openai', 'deepseek-v4-flash-free': 'openai', 'deepseek-v4-pro': 'openai',
-  'kimi-k2.7': 'openai', 'kimi-k2.6': 'openai',
-  'glm-5.2': 'openai', 'glm-5.1': 'openai',
-  'mimo-v2.5': 'openai', 'mimo-v2.5-pro': 'openai',
+  'deepseek-v4-flash': 'openai', 'deepseek-v4-flash-free': 'openai', 'deepseek-v4-pro': 'anthropic',
+  'kimi-k2.7': 'anthropic', 'kimi-k2.6': 'openai',
+  'glm-5.2': 'anthropic', 'glm-5.1': 'openai',
+  'mimo-v2.5': 'anthropic', 'mimo-v2.5-pro': 'anthropic',
 };
 for (const [model, expectedFormat] of Object.entries(ocgModels)) {
   const r = E.detectApiFormat('opencode-go', model);
@@ -143,7 +143,7 @@ server.listen(0, async () => {
     check(`mock returns ${models.length} models`, models.length === Object.keys(ocgModels).length);
     check('modelFormats has minimax-m3 → anthropic', modelFormats['minimax-m3'] === 'anthropic');
     check('modelFormats has deepseek-v4-flash → openai', modelFormats['deepseek-v4-flash'] === 'openai');
-    check('modelFormats has kimi-k2.7 → openai', modelFormats['kimi-k2.7'] === 'openai');
+    check('modelFormats has kimi-k2.7 → anthropic', modelFormats['kimi-k2.7'] === 'anthropic');
     check('modelFormats has qwen3.7-max → anthropic', modelFormats['qwen3.7-max'] === 'anthropic');
 
     // ── Test 8: Verify all 15 OC models map correctly ─────────────────────

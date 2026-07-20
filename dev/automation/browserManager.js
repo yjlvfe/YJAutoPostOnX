@@ -1,13 +1,30 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
 chromium.use(stealth);
-const path = require('path');
-const os = require('os');
 const fs = require('fs');
+const path = require('path');
+const { resolveProfilePath } = require('./profileRegistry');
 
-function resolveProfilePath(profileName) {
-  const name = profileName || 'Default';
-  return path.join(os.homedir(), '.config', 'x-poster-profiles', name);
+/**
+ * Chromium's Linux sandbox needs its `chrome-sandbox` helper to be a setuid-root
+ * binary (mode 4755, owner root) — Electron places it next to the running
+ * executable (node_modules/electron/dist in dev, or the app dir once packaged).
+ * Without that bit, requesting the sandbox doesn't just make things "less safe":
+ * Chromium refuses to launch at all. electron-builder/AppImage packaging does
+ * NOT set the setuid bit on its own (it stays 0755, unprivileged), so this must
+ * be checked at runtime rather than assumed from "not running as root" — the
+ * real-world desktop user this exists to protect is exactly who'd hit a broken
+ * launch if we assumed wrong.
+ */
+function sandboxHelperIsSetuidRoot() {
+  if (process.platform !== 'linux') return true; // no SUID helper involved on win/mac
+  try {
+    const helperPath = path.join(path.dirname(process.execPath), 'chrome-sandbox');
+    const st = fs.statSync(helperPath);
+    return st.uid === 0 && (st.mode & 0o4000) !== 0;
+  } catch (e) {
+    return false; // helper missing/unreadable — assume sandbox unusable
+  }
 }
 
 function detectChromePath() {
@@ -39,11 +56,13 @@ function getLaunchOptions(browserName) {
     viewport: { width: 1280, height: 800 },
     colorScheme: 'light',
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
       '--disable-blink-features=AutomationControlled'
     ],
   };
+  const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  if (process.platform === 'linux' && (runningAsRoot || !sandboxHelperIsSetuidRoot())) {
+    opts.args.unshift('--no-sandbox', '--disable-setuid-sandbox');
+  }
 
   if (browserName === 'chrome') {
     const chromePath = detectChromePath();

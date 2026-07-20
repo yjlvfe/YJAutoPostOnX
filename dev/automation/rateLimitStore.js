@@ -10,9 +10,9 @@
  *   ~/.config/x-poster-bot-profile/rate-limits.json
  *   { "<profileName>": { until: <epochMs>, since: <epochMs>, source: "x|default", note: "" }, ... }
  */
-const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { readJsonSync, atomicWriteJsonSync } = require('../utils/atomicJson');
 
 const STORE_DIR = path.join(os.homedir(), '.config', 'x-poster-bot-profile');
 const STORE_PATH = path.join(STORE_DIR, 'rate-limits.json');
@@ -22,21 +22,16 @@ const STORE_PATH = path.join(STORE_DIR, 'rate-limits.json');
 const DEFAULT_COOLDOWN_MS = 60 * 60 * 1000;
 
 function _read() {
-  try {
-    const raw = fs.readFileSync(STORE_PATH, 'utf8');
-    const obj = JSON.parse(raw);
-    return obj && typeof obj === 'object' ? obj : {};
-  } catch {
-    return {};
-  }
+  const obj = readJsonSync(STORE_PATH, {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
 }
 
 function _write(obj) {
   try {
-    fs.mkdirSync(STORE_DIR, { recursive: true });
-    fs.writeFileSync(STORE_PATH, JSON.stringify(obj, null, 2));
+    atomicWriteJsonSync(STORE_PATH, obj);
     return true;
   } catch (e) {
+    console.error('Failed to persist rate-limit state:', e?.message || e);
     return false;
   }
 }

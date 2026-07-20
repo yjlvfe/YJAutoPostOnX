@@ -1,20 +1,26 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 app.disableHardwareAcceleration();
 const path = require('path');
 const fs = require('fs').promises;
 const os = require('os');
+const crypto = require('crypto');
 const { createReadStream } = require('fs');
 const csv = require('csv-parser');
 const contentEngine = require('./automation/contentEngine');
 const { SessionManager } = require('./automation/sessionManager');
+const { readJson, atomicWriteJson } = require('./utils/atomicJson');
 
 // 🔒 Security modules
 const { runAudit } = require('./security/auditor');
 const log = require('./utils/logger');
 
 // 2. LINUX SURVIVAL & BROWSER ARCHITECTURE (CRITICAL)
-app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('disable-setuid-sandbox');
+// Electron sandbox is enabled for normal desktop users. Chromium refuses to
+// start as root without --no-sandbox, so keep the legacy fallback only there.
+if (typeof process.getuid === 'function' && process.getuid() === 0) {
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-setuid-sandbox');
+}
 
 let mainWindow;
 let loginContext = null;
@@ -23,11 +29,23 @@ let aiGenerationCancelled = false;
 // ⚡ C1+C2: Active AbortController for IMMEDIATE stop — aborts ALL in-flight
 // AI fetch requests so the user doesn't wait for the current 120s round.
 let activeAbortController = null;
+let aiGenerationActive = false;
 // Desired parallel worker count (default 5, adjustable via 'set-session-count').
 // NO upper cap — the user's number is the number that runs; SessionManager
 // ramps launches in batches and throttles status/persist so large pools stay smooth.
 let desiredWorkerCount = 5;
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
+
+// One process owns queue/profile state. A second AppImage instance focuses the
+// first instead of racing JSON writes or opening the same Chromium profile.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 
 
 function createWindow() {
@@ -42,15 +60,23 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.js')
     },
     title: "YJAutoPostOnX - Automated Posting Tool",
   });
 
   mainWindow.loadFile(path.join(__dirname, 'ui/index.html'));
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) event.preventDefault();
+  });
 }
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
+  const session = require('electron').session.defaultSession;
+  session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   // Ensure report directory exists at startup
   const REPORT_DIR = path.join(os.homedir(), '.config', 'x-poster-bot-profile', 'reports');
   try {
@@ -89,38 +115,76 @@ app.on('before-quit', async () => {
 });
 
 // --- SETTINGS MANAGER ---
+let configWriteChain = Promise.resolve();
+
+function decryptApiKey(config) {
+  const result = { ...config };
+  if (result.aiApiKeyEncrypted) {
+    try {
+      if (safeStorage.isEncryptionAvailable()) {
+        result.aiApiKey = safeStorage.decryptString(Buffer.from(result.aiApiKeyEncrypted, 'base64'));
+      }
+    } catch (e) {
+      log.error(`تعذر فك تشفير مفتاح AI: ${e.message}`);
+      result.aiApiKey = '';
+    }
+  }
+  delete result.aiApiKeyEncrypted;
+  return result;
+}
+
+function protectApiKey(config) {
+  const result = { ...config };
+  if (Object.prototype.hasOwnProperty.call(result, 'aiApiKey')) {
+    const value = String(result.aiApiKey || '').trim();
+    delete result.aiApiKey;
+    if (!value) delete result.aiApiKeyEncrypted;
+    else {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('التخزين الآمن غير متاح على هذا النظام؛ لم يُحفظ مفتاح API كنص مكشوف.');
+      result.aiApiKeyEncrypted = safeStorage.encryptString(value).toString('base64');
+    }
+  }
+  return result;
+}
+
 ipcMain.handle('get-settings', async () => {
   try {
-    await fs.access(CONFIG_FILE);
-    const data = await fs.readFile(CONFIG_FILE, 'utf8');
-    const config = JSON.parse(data);
-    return config;
-  } catch (e) {
-    if (e instanceof SyntaxError) {
-      log.error(`get-settings: config.json تالف (JSON غير صالح) — تم إرجاع إعدادات فارغة. ${e.message}`);
+    const disk = await readJson(CONFIG_FILE, {});
+    // One-time migration from legacy plaintext to Electron safeStorage.
+    if (disk.aiApiKey && !disk.aiApiKeyEncrypted && safeStorage.isEncryptionAvailable()) {
+      const migrated = protectApiKey(disk);
+      await atomicWriteJson(CONFIG_FILE, migrated, { mode: 0o600 });
+      return decryptApiKey(migrated);
     }
-    return {};
+    return decryptApiKey(disk);
+  } catch (e) {
+    log.error(`get-settings: تعذر قراءة config.json بأمان. ${e.message}`);
+    throw e;
   }
 });
 
-// ⚡ C1: Converted from ipcMain.on (fire-and-forget) to ipcMain.handle so
-// the renderer receives the actual result and can surface write failures.
 ipcMain.handle('save-settings', async (event, settings) => {
-  // Merge with existing settings
-  try {
-    const existing = JSON.parse(await fs.readFile(CONFIG_FILE, 'utf8'));
-    Object.assign(existing, settings);
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(existing, null, 2));
-    return { success: true };
-  } catch (e) {
-    await fs.mkdir(path.dirname(CONFIG_FILE), { recursive: true }).catch(() => {});
-    try {
-      await fs.writeFile(CONFIG_FILE, JSON.stringify(settings, null, 2));
-      return { success: true };
-    } catch (e2) {
-      return { success: false, error: e2.message || 'فشل حفظ الإعدادات' };
-    }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return { success: false, error: 'إعدادات غير صالحة' };
   }
+  const run = async () => {
+    try {
+      const existing = await readJson(CONFIG_FILE, {});
+      const merged = { ...existing, ...settings };
+      // Preserve an existing encrypted key when this partial settings update
+      // does not include aiApiKey; encrypt/clear only when it does.
+      const protectedSettings = Object.prototype.hasOwnProperty.call(settings, 'aiApiKey')
+        ? protectApiKey(merged)
+        : merged;
+      await atomicWriteJson(CONFIG_FILE, protectedSettings, { mode: 0o600 });
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message || 'فشل حفظ الإعدادات' };
+    }
+  };
+  const operation = configWriteChain.then(run, run);
+  configWriteChain = operation.then(() => undefined, () => undefined);
+  return operation;
 });
 
 // --- File Dialog Handlers ---
@@ -155,14 +219,22 @@ ipcMain.on('open-folder', (event, folderPath) => {
 
 // CSV parsing handler with length & link validation + stats + multi-column media detection
 ipcMain.handle('parse-csv', async (event, filePath) => {
+  const stat = await fs.stat(filePath);
+  if (stat.size > 100 * 1024 * 1024) throw new Error('ملف CSV أكبر من الحد الآمن 100MB. قسّمه إلى ملفات أصغر.');
   return new Promise((resolve, reject) => {
     const rawPosts = [];
     let totalProcessed = 0;
     let skippedLength = 0;
 
-    createReadStream(filePath)
+    const input = createReadStream(filePath);
+    input.on('error', reject);
+    input
       .pipe(csv({ headers: false }))
       .on('data', (row) => {
+        if (totalProcessed >= 100000) {
+          input.destroy(new Error('تجاوز CSV الحد الآمن 100,000 منشور. قسّمه إلى دفعات.'));
+          return;
+        }
         const vals = Object.values(row);
         let post = vals[0] || '';
         let mediaPath = null;
@@ -206,19 +278,23 @@ ipcMain.handle('parse-csv', async (event, filePath) => {
           }
         }
 
-        const validationPromises = rawPosts.map(async ({ post, mediaPath }) => {
-          if (mediaPath) {
-            const validatedMedia = await validateMedia(mediaPath);
-            if (!validatedMedia) {
-              console.warn(`Media file not found: ${mediaPath}, queuing as text-only`);
-              return { text: post, media_path: null, mediaWarning: true };
+        const validatedPosts = [];
+        const MEDIA_CONCURRENCY = 32;
+        for (let start = 0; start < rawPosts.length; start += MEDIA_CONCURRENCY) {
+          const batch = rawPosts.slice(start, start + MEDIA_CONCURRENCY);
+          const checked = await Promise.all(batch.map(async ({ post, mediaPath }) => {
+            if (mediaPath) {
+              const validatedMedia = await validateMedia(mediaPath);
+              if (!validatedMedia) {
+                console.warn(`Media file not found: ${mediaPath}, queuing as text-only`);
+                return { text: post, media_path: null, mediaWarning: true };
+              }
+              return { text: post, media_path: validatedMedia };
             }
-            return { text: post, media_path: validatedMedia };
-          }
-          return { text: post, media_path: null };
-        });
-
-        const validatedPosts = await Promise.all(validationPromises);
+            return { text: post, media_path: null };
+          }));
+          validatedPosts.push(...checked);
+        }
         
         for (const postData of validatedPosts) {
           if (postData.mediaWarning) {
@@ -269,6 +345,8 @@ const {
   listProfilesOrdered,
   nextProfileNumber,
   migrateUnnumberedProfiles,
+  assertSafeProfileName,
+  resolveProfilePath,
 } = require('./automation/profileRegistry');
 
 // Session Stats
@@ -340,6 +418,25 @@ ipcMain.handle('bulk-delete', async (event, texts, profileName) => {
   }
 });
 
+ipcMain.handle('get-recovery-items', async (_event, profileName) => {
+  try { return { success: true, ...(await queueManager.getRecoveryItems(profileName || 'Default')) }; }
+  catch (e) { return { success: false, error: e.message, pending: [], deadLetters: [] }; }
+});
+
+ipcMain.handle('requeue-recovery-item', async (_event, profileName, kind, text) => {
+  try {
+    if (!['pending', 'dead'].includes(kind) || typeof text !== 'string' || !text.trim()) throw new Error('طلب استعادة غير صالح');
+    return { success: await queueManager.requeueRecovery(profileName || 'Default', kind, text) };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('discard-recovery-item', async (_event, profileName, kind, text) => {
+  try {
+    if (!['pending', 'dead'].includes(kind) || typeof text !== 'string' || !text.trim()) throw new Error('طلب حذف غير صالح');
+    return { success: await queueManager.discardRecovery(profileName || 'Default', kind, text) };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
 let automationRunning = false;
 
 ipcMain.handle('start-posting', async (event, config) => {
@@ -351,6 +448,13 @@ ipcMain.handle('start-posting', async (event, config) => {
   automationRunning = true;
   global.isRunning = true;
   try {
+    if (loginContext) {
+      await Promise.race([
+        loginContext.close(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('تعذر إغلاق نافذة تسجيل الدخول خلال 10 ثوانٍ')), 10000)),
+      ]);
+      loginContext = null;
+    }
     // Multi-profile run — starts from the SELECTED profile and continues
     // through the ones AFTER it in numeric order (1- Default, 2- …, 3- …).
     // It never wraps back to earlier profiles: when the LAST profile finishes
@@ -459,6 +563,9 @@ process.on('uncaughtException', (error) => {
 
 ipcMain.on('stop-automation', () => {
   global.isRunning = false;
+  xPoster.stopActive().catch((error) => {
+    log.error(`تعذر إغلاق سياقات الأتمتة فورًا: ${error.message}`);
+  });
 });
 
 // Synchronous on purpose: the preload bridge resolves this before the
@@ -483,6 +590,7 @@ ipcMain.handle('open-profile-for-login', async (event, profileName) => {
       await pages[0].bringToFront();
       return { success: true, reused: true };
     }
+    try { await loginContext.close(); } catch { /* stale context */ }
     loginContext = null;
   }
   try {
@@ -495,8 +603,6 @@ ipcMain.handle('open-profile-for-login', async (event, profileName) => {
 });
 
 // Profile listing handler
-const PROFILES_DIR = path.join(os.homedir(), '.config', 'x-poster-profiles');
-
 ipcMain.handle('get-profiles', async () => {
   try {
     return await listProfilesOrdered();
@@ -523,14 +629,14 @@ ipcMain.handle('create-profile', async (event, profileName) => {
       return { success: false, error: 'يوجد بروفايل بنفس الاسم بالفعل' };
     }
     const num = await nextProfileNumber();
-    const safeName = `${num}- ${label}`;
-    const profilePath = path.join(PROFILES_DIR, safeName);
+    const safeName = assertSafeProfileName(`${num}- ${label}`, { allowDefault: false });
+    const profilePath = resolveProfilePath(safeName);
     await fs.mkdir(profilePath, { recursive: true });
-    await fs.writeFile(path.join(profilePath, 'config.json'), JSON.stringify({
+    await atomicWriteJson(path.join(profilePath, 'config.json'), {
       name: safeName,
       createdAt: new Date().toISOString(),
       browserName: 'chrome'
-    }, null, 2));
+    });
     return { success: true, profile: { name: safeName } };
   } catch (error) {
     return { success: false, error: error.message };
@@ -542,13 +648,8 @@ ipcMain.handle('delete-profile', async (event, profileName) => {
     if (!profileName || profileName === 'Default') {
       return { success: false, error: 'لا يمكن حذف البروفايل الافتراضي' };
     }
-    // 🔒 FIX: also strip dots to prevent "../../etc" traversal after slash removal
-    const safeName = profileName.trim().replace(/[/<>:"\\|?*.]/g, '');
-    if (!safeName) return { success: false, error: 'اسم البروفايل غير صالح' };
-    const profilePath = path.resolve(PROFILES_DIR, safeName);
-    if (!profilePath.startsWith(path.resolve(PROFILES_DIR) + path.sep)) {
-      return { success: false, error: 'مسار غير مسموح' };
-    }
+    const safeName = assertSafeProfileName(profileName, { allowDefault: false });
+    const profilePath = resolveProfilePath(safeName);
     await fs.rm(profilePath, { recursive: true, force: true });
     // Clean up the orphaned cooldown entry for the deleted profile. There is no
     // queue cursor to clean up any more — the shared queue is consumed as it's
@@ -565,19 +666,14 @@ ipcMain.handle('rename-profile', async (event, oldName, newName) => {
     if (!oldName || oldName === 'Default') {
       return { success: false, error: 'لا يمكن تعديل البروفايل الافتراضي' };
     }
-    // 🔒 FIX: also strip dots to prevent "../../etc" traversal after slash removal
-    const safeOld = oldName.trim().replace(/[/<>:"\\|?*.]/g, '');
+    const safeOld = assertSafeProfileName(oldName, { allowDefault: false });
     // Renaming changes only the LABEL — the profile keeps its sequence number.
     const label = stripLeadingNumber(newName || '').replace(/[/<>:"\\|?*.]/g, '').trim();
     if (!safeOld || !label) return { success: false, error: 'الاسم غير صالح' };
     const keepNum = profileNumber(safeOld) ?? await nextProfileNumber();
-    const safeName = `${keepNum}- ${label}`;
-    const profilesBase = path.resolve(PROFILES_DIR) + path.sep;
-    const oldPath = path.resolve(PROFILES_DIR, safeOld);
-    const newPath = path.resolve(PROFILES_DIR, safeName);
-    if (!oldPath.startsWith(profilesBase) || !newPath.startsWith(profilesBase)) {
-      return { success: false, error: 'مسار غير مسموح' };
-    }
+    const safeName = assertSafeProfileName(`${keepNum}- ${label}`, { allowDefault: false });
+    const oldPath = resolveProfilePath(safeOld);
+    const newPath = resolveProfilePath(safeName);
     if (safeName !== safeOld) {
       const existing = await listProfilesOrdered();
       if (existing.some(n => n !== safeOld && stripLeadingNumber(n) === label)) {
@@ -875,6 +971,14 @@ function extractAiText(format, data) {
  * Robustly parse a JSON array of strings out of an LLM reply that may be
  * wrapped in markdown fences or prose.
  */
+function isLikelyModelRefusal(text) {
+  return /\b(?:i\s+(?:cannot|can't|won't|am unable to)|unable to (?:help|generate)|cannot comply|as an ai)\b|(?:لا أستطيع|لا يمكنني|أعتذر[^\n]{0,40}(?:تنفيذ|إنشاء|توليد))/i.test(text || '');
+}
+
+function filterTweetCandidates(values) {
+  return values.filter(value => typeof value === 'string' && value.trim().length > 0 && !isLikelyModelRefusal(value));
+}
+
 function parseTweetArray(raw) {
   if (!raw) return [];
   let text = raw.trim();
@@ -883,7 +987,7 @@ function parseTweetArray(raw) {
   // Try direct parse first
   try {
     const arr = JSON.parse(text);
-    if (Array.isArray(arr)) return arr.filter(x => typeof x === 'string' && x.trim().length > 0);
+    if (Array.isArray(arr)) return filterTweetCandidates(arr);
   } catch { /* fall through */ }
   // Find the first [...] block
   const start = text.indexOf('[');
@@ -892,7 +996,7 @@ function parseTweetArray(raw) {
     const slice = text.slice(start, end + 1);
     try {
       const arr = JSON.parse(slice);
-      if (Array.isArray(arr)) return arr.filter(x => typeof x === 'string' && x.trim().length > 0);
+      if (Array.isArray(arr)) return filterTweetCandidates(arr);
     } catch { /* fall through */ }
   }
   // Last resort: split by newlines, strip bullets/quotes
@@ -900,6 +1004,7 @@ function parseTweetArray(raw) {
     .split('\n')
     .map(l => l.replace(/^[\s\-*\d.)\]]+\s*/, '').replace(/^[""'“]|[""'”]$/g, '').trim())
     .filter(l => l.length > 40 && !/^\d+\s*(char|characters|حرف|chars?)\s*$/i.test(l))
+    .filter(l => !isLikelyModelRefusal(l))
     .filter(l => !/^\d+\s*chars?$/i.test(l));
 }
 
@@ -963,11 +1068,13 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
 
   // ⚡ C2: Link the external (cancellation) signal so user-initiated stop
   // aborts the in-flight fetch IMMEDIATELY instead of waiting for timeout.
+  let externalAbortHandler = null;
   if (externalSignal) {
     if (externalSignal.aborted) {
       controller.abort();
     } else {
-      externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+      externalAbortHandler = () => controller.abort();
+      externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
     }
   }
 
@@ -1073,17 +1180,29 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
       } catch (err) {
         const status = err.statusCode;
         const isRetryable = (status === 429 || (status >= 500 && status < 600)) ||
-          (err.name === 'AbortError' && i < MAX_RETRIES) ||
           (!status && err.name !== 'AbortError'); // network error (no status code)
 
-        // Never retry AbortError from user cancellation (only from timeout)
-        if (err.name === 'AbortError' && aiGenerationCancelled) throw err;
+        // Timeout and user cancellation both abort the whole call; neither is retried.
+        if (err.name === 'AbortError') throw err;
 
         if (isRetryable && i < MAX_RETRIES) {
           const delay = Math.min(1000 * Math.pow(2, i), 10000);
           const reason = status ? `HTTP ${status}` : (err.name === 'AbortError' ? 'timeout' : 'network error');
           log.debug(`⏳ Retry ${i + 1}/${MAX_RETRIES} in ${delay}ms (${reason}) — ${req.body.model}`);
-          await new Promise(r => setTimeout(r, delay));
+          await new Promise((resolve, reject) => {
+            if (controller.signal.aborted) {
+              const abortErr = new Error('Aborted'); abortErr.name = 'AbortError'; reject(abortErr); return;
+            }
+            const timer = setTimeout(done, delay);
+            const onAbort = () => done(true);
+            function done(aborted = false) {
+              clearTimeout(timer);
+              controller.signal.removeEventListener('abort', onAbort);
+              if (aborted) { const abortErr = new Error('Aborted'); abortErr.name = 'AbortError'; reject(abortErr); }
+              else resolve();
+            }
+            controller.signal.addEventListener('abort', onAbort, { once: true });
+          });
           continue;
         }
         throw err;
@@ -1124,6 +1243,7 @@ async function callAi({ provider, baseUrl, apiKey, model, quantity, angles, insp
     return result;
   } finally {
     clearTimeout(timeout);
+    if (externalSignal && externalAbortHandler) externalSignal.removeEventListener('abort', externalAbortHandler);
   }
 }
 
@@ -1148,10 +1268,19 @@ ipcMain.handle('set-session-count', async (event, count) => {
   return { success: true, count: n };
 });
 
-// Reset: clear cancel flag + ack (no persisted state in new system).
+// Reset persisted AI sessions. Never race a live generation run.
 ipcMain.handle('reset-sessions', async () => {
+  if (aiGenerationActive) return { success: false, error: 'أوقف التوليد الحالي قبل تصفير الجلسات.' };
   aiGenerationCancelled = false;
-  return { success: true };
+  try {
+    await Promise.all([
+      fs.rm(SHARED_SESSION_FILE, { force: true }),
+      fs.rm(`${SHARED_SESSION_FILE}.bak`, { force: true }),
+    ]);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1167,6 +1296,7 @@ ipcMain.handle('reset-sessions', async () => {
 const SHARED_SESSION_FILE = path.join(os.homedir(), '.config', 'x-poster-shared', 'sessions.json');
 
 ipcMain.handle('generate-ai-posts', async (event, config) => {
+  if (aiGenerationActive) return { success: false, error: 'يوجد توليد AI جارٍ بالفعل.' };
   const {
     apiKey, baseUrl, model, providerOverride,
     quantity, referralLink, customPrompt, existingTexts, sessionCount,
@@ -1175,11 +1305,6 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
     // Undefined (old renderer/tests) preserves the exact old implicit binary.
     promptMode,
   } = config || {};
-
-  aiGenerationCancelled = false;
-  // ⚡ Fresh AbortController for this generation run — linked to every
-  // fetch so cancel-ai-generation can abort all of them instantly.
-  activeAbortController = new AbortController();
 
   // 🟢 Validation: check ALL required fields BEFORE starting any session
   if (!apiKey || !apiKey.trim()) {
@@ -1191,6 +1316,10 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   if (!model || !model.trim()) {
     return { success: false, error: 'اسم الموديل مطلوب — أدخل اسم الموديل في الإعدادات.' };
   }
+
+  aiGenerationActive = true;
+  aiGenerationCancelled = false;
+  activeAbortController = new AbortController();
 
   const target   = Math.max(1, parseInt(quantity, 10) || 20);
   const nWorkers = Math.max(1, parseInt(sessionCount, 10) || desiredWorkerCount);
@@ -1210,6 +1339,13 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   const systemBlock = contentEngine.buildSessionSystem({
     customSystem: isDynamicPrompt ? '' : (customPrompt || ''),
   });
+  const sessionFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    provider,
+    baseUrl: baseUrl.trim(),
+    model: model.trim(),
+    promptMode: promptMode || 'custom',
+    systemBlock,
+  })).digest('hex');
 
   // ── Shared state (shared across all sessions via hard guard) ──────────
   const accepted        = [];
@@ -1428,26 +1564,28 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   };
 
   // ── Persistence callback — saves session snapshots for prompt cache continuity ──
-  const SHARED_SESSION_FILE = path.join(os.homedir(), '.config', 'x-poster-shared', 'sessions.json');
   const persist = async (sessionSnapshots) => {
     try {
-      await fs.mkdir(path.dirname(SHARED_SESSION_FILE), { recursive: true });
-      // Atomic write (tmp + rename): a crash mid-write can never leave a
-      // half-written sessions.json. Compact JSON — with large pools the
-      // pretty-printed snapshot grows to many MB for no benefit.
-      const tmp = SHARED_SESSION_FILE + '.tmp';
-      await fs.writeFile(tmp, JSON.stringify(sessionSnapshots), 'utf8');
-      await fs.rename(tmp, SHARED_SESSION_FILE);
-    } catch { /* best-effort — never crash the run over a persist failure */ }
+      await atomicWriteJson(SHARED_SESSION_FILE, {
+        version: 2,
+        fingerprint: sessionFingerprint,
+        sessions: sessionSnapshots,
+      });
+    } catch (e) {
+      log.error(`Session persist failed: ${e.message}`);
+    }
   };
 
-  // Load sessions from last run for prompt cache continuity
+  // Load sessions only when provider/model/prompt identity is unchanged.
   let loadedSessions = [];
   try {
-    const raw = await fs.readFile(SHARED_SESSION_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) loadedSessions = parsed;
-  } catch { /* no saved sessions — start fresh */ }
+    const parsed = await readJson(SHARED_SESSION_FILE, null);
+    if (parsed?.version === 2 && parsed.fingerprint === sessionFingerprint && Array.isArray(parsed.sessions)) {
+      loadedSessions = parsed.sessions;
+    }
+  } catch (e) {
+    log.error(`Session restore skipped: ${e.message}`);
+  }
 
   // ── Create + run SessionManager ───────────────────────────────────────────
   const manager = new SessionManager({
@@ -1506,5 +1644,6 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   } finally {
     aiGenerationCancelled = false;
     activeAbortController = null;
+    aiGenerationActive = false;
   }
 });

@@ -118,6 +118,10 @@ class SessionManager {
     this._persistTimer = null;
     this._persistDirty = false;
     this._persistChain = Promise.resolve();
+    this.maxConsecutiveFailures = Math.max(1, Number(deps.maxConsecutiveFailures) || 5);
+    this.maxNoProgressRounds = Math.max(1, Number(deps.maxNoProgressRounds) || 10);
+    this.baseBackoffMs = Math.max(50, Number(deps.baseBackoffMs) || 1000);
+    this.maxBackoffMs = Math.max(this.baseBackoffMs, Number(deps.maxBackoffMs) || 30000);
   }
 
   /** Live desired session count, guarded against a broken getter. */
@@ -272,6 +276,12 @@ class SessionManager {
     } catch (err) {
       session.status = STATUS.WAITING;
       session._lastError = err.message;
+      session._consecutiveFailures = (session._consecutiveFailures || 0) + 1;
+      const terminal = /\b(401|403)\b|unauthorized|forbidden|invalid api key|authentication/i.test(err.message || '');
+      if (terminal || session._consecutiveFailures >= this.maxConsecutiveFailures) {
+        session._terminal = true;
+        session.status = STATUS.STOPPED;
+      }
       this._emitStatus();
       return 0;
     }
@@ -285,6 +295,7 @@ class SessionManager {
       session.usage.calls++;
     }
     const gained = this.ingest((result && result.cores) || [], session) || 0;
+    session._consecutiveFailures = 0;
     session.roundsCompleted++;
     session.status = STATUS.WAITING;
     this._emitStatus();
@@ -337,10 +348,23 @@ class SessionManager {
               this._emitStatus();
               return;
             }
-            await this._runSessionRound(session);
+            const gained = await this._runSessionRound(session);
             // Persist between rounds — debounced + serialized (one writer),
             // so an app close mid-run is resumable without write races.
             this._schedulePersist();
+            if (session._terminal) return;
+            session._noProgressRounds = gained > 0 ? 0 : (session._noProgressRounds || 0) + 1;
+            if (session._noProgressRounds >= this.maxNoProgressRounds) {
+              session.status = STATUS.STOPPED;
+              session._lastError = `No progress after ${session._noProgressRounds} consecutive rounds`;
+              this._emitStatus();
+              return;
+            }
+            if (gained === 0 && !getTargetMet() && !this.isCancelled()) {
+              const failures = Math.max(session._consecutiveFailures || 0, session._noProgressRounds || 0);
+              const delay = Math.min(this.maxBackoffMs, this.baseBackoffMs * (2 ** Math.min(failures - 1, 8)));
+              await launchWait(delay);
+            }
           } catch (err) {
             // Catch-all for any unexpected error in a single round iteration.
             // Log it, mark the session, and continue the loop (don't crash).

@@ -2,11 +2,24 @@
  * IPC test for the REAL list-models handler, invoked through window.api
  * exactly as the "🔄 فحص" button does — pointed at the live provider.
  */
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const SANDBOX = path.join(os.tmpdir(), `xposter-list-models-${process.pid}-${Date.now()}`);
+os.homedir = () => SANDBOX;
+fs.mkdirSync(SANDBOX, { recursive: true });
+process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 const { app } = require('electron');
-require('../dev/main.js');
+app.setPath('userData', path.join(SANDBOX, 'userData'));
 
 const KEY = process.env.IYH_KEY;
 const BASE = process.env.IYH_BASE || 'https://v1.iyhapi.app/v1';
+if (!KEY) {
+  console.log('SKIP list-models.test.js — set IYH_KEY to run the live-provider integration test.');
+  process.exit(0);
+} else {
+  require('../dev/main.js');
+}
 
 let errors = [], done = false;
 function finish() {

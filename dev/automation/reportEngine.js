@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const os = require('os');
+const { atomicWriteJson } = require('../utils/atomicJson');
 
 /**
  * ReportEngine
@@ -38,6 +39,10 @@ class ReportEngine {
     this._flushIntervalMs = 30000;
     this._eventCount = 0;
     this._flushEveryNEvents = 10;
+    this._writeChain = Promise.resolve();
+    this._maxTimeline = 10000;
+    this._maxFailures = 5000;
+    this._maxPostTimes = 10000;
   }
 
   // Start a new run: reset buffers and metadata
@@ -85,7 +90,10 @@ class ReportEngine {
     const partialId = (this.runId || 'unknown').slice(0, 8);
     const jsonPath = path.join(this.reportDir, `run-partial-${partialId}.json`);
     try {
-      await fs.writeFile(jsonPath, JSON.stringify(reportJson, null, 2), 'utf8');
+      const write = () => atomicWriteJson(jsonPath, reportJson);
+      const operation = this._writeChain.then(write, write);
+      this._writeChain = operation.then(() => undefined, () => undefined);
+      await operation;
     } catch {
       // best-effort — never crash the run over a partial flush
     }
@@ -102,6 +110,7 @@ class ReportEngine {
       details: message || ''
     };
     this.timeline.push(entry);
+    if (this.timeline.length > this._maxTimeline) this.timeline.splice(0, this.timeline.length - this._maxTimeline);
 
     // track retries on certain events
     // Only track retries on explicit RETRY events (not final POST_FAIL which is a terminal event)
@@ -154,12 +163,16 @@ class ReportEngine {
         lastError: (lastError != null) ? lastError : '',
         finalStatus
       });
+      if (this.failures.length > this._maxFailures) this.failures.splice(0, this.failures.length - this._maxFailures);
     }
   }
 
   // Record how long a post attempt took (ms)
   recordPostTime(durationMs) {
     this.performance.postTimes.push(durationMs);
+    if (this.performance.postTimes.length > this._maxPostTimes) {
+      this.performance.postTimes.splice(0, this.performance.postTimes.length - this._maxPostTimes);
+    }
   }
 
   // Generate a structured JSON report
@@ -270,7 +283,7 @@ class ReportEngine {
     const txtPath = path.join(this.reportDir, `${filenameBase}.txt`);
 
     try {
-      await fs.writeFile(jsonPath, JSON.stringify(reportJson, null, 2), 'utf8');
+      await atomicWriteJson(jsonPath, reportJson);
     } catch (err) {
       console.error('ReportEngine flush error (JSON):', err);
       return { success: false, error: err && err.message ? err.message : 'unknown' };

@@ -5,7 +5,15 @@
  * Proves the entire wired path end-to-end.
  */
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const SANDBOX = path.join(os.tmpdir(), `xposter-ipc-generation-${process.pid}-${Date.now()}`);
+os.homedir = () => SANDBOX;
+fs.mkdirSync(SANDBOX, { recursive: true });
+process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 const { app } = require('electron');
+app.setPath('userData', path.join(SANDBOX, 'userData'));
 
 // Realistic Arabic crypto cores a good model would return
 const CORES = [

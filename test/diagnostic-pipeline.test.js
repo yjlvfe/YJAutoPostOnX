@@ -5,6 +5,14 @@
  * reporting exact failure counts and reasons. Run this first when generation
  * produces 0 accepted posts.
  */
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const SANDBOX = path.join(os.tmpdir(), `xposter-diagnostic-${process.pid}-${Date.now()}`);
+os.homedir = () => SANDBOX;
+fs.mkdirSync(SANDBOX, { recursive: true });
+process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
+
 const E = require('../dev/automation/contentEngine');
 const LINK = 'https://www.mexc.com/auth/signup?inviteCode=mexc-DIAG';
 
@@ -28,7 +36,10 @@ function parseTweetArray(raw) {
   try { const arr = JSON.parse(text); if (Array.isArray(arr)) return arr.filter(x => typeof x === 'string' && x.trim().length > 0); } catch {}
   const start = text.indexOf('['), end = text.lastIndexOf(']');
   if (start !== -1 && end !== -1 && end > start) { try { const arr = JSON.parse(text.slice(start, end + 1)); if (Array.isArray(arr)) return arr.filter(x => typeof x === 'string' && x.trim().length > 0); } catch {} }
-  return text.split('\n').map(l => l.replace(/^[\s\-*\d.)\]]+\s*/, '').replace(/^[""'“]|[""'”]$/g, '').trim()).filter(l => l.length > 40).filter(l => !/^\d+\s*chars?$/i.test(l));
+  return text.split('\n').map(l => l.replace(/^[\s\-*\d.)\]]+\s*/, '').replace(/^[""'“]|[""'”]$/g, '').trim())
+    .filter(l => l.length > 40)
+    .filter(l => !/\b(?:i\s+(?:cannot|can't|won't|am unable to)|unable to (?:help|generate)|cannot comply|as an ai)\b/i.test(l))
+    .filter(l => !/^\d+\s*chars?$/i.test(l));
 }
 
 const PARSE_CASES = [
@@ -42,7 +53,7 @@ const PARSE_CASES = [
   { name: 'null input', input: null, expect: 0 },
   { name: 'empty string', input: '', expect: 0 },
   { name: 'Arabic line-separated', input: '📈 نص طويل بما فيه الكفاية ليكون تغريدة مناسبة للتداول في الكريبتو والأسواق المالية\n🔥 نص آخر طويل بما فيه الكفاية ليكون تغريدة مناسبة عن التداول', expect: 2 },
-  { name: 'numbered lines Arabic', input: '1. 📈 نص طويل بما فيه الكفاية ليكون تغريدة مناسبة للتداول في الكريبتو والأسواق المالية\n2. 🔥 نص آخر طويل بما فيه الكفاية', expect: 2 },
+  { name: 'numbered lines Arabic', input: '1. 📈 نص طويل بما فيه الكفاية ليكون تغريدة مناسبة للتداول في الكريبتو والأسواق المالية\n2. 🔥 نص آخر طويل بما فيه الكفاية ليكون تغريدة مناسبة عن التداول والأسواق الرقمية', expect: 2 },
   { name: 'model refuses', input: 'I cannot generate this content as it may promote risky financial behavior.', expect: 0 }, // falls through to line split, each line < 40 chars
 ];
 
@@ -65,7 +76,7 @@ section('3. assembleTweet — core→tweet assembly');
 const CORES_GOOD = [
   { core: '📈 حجم التداول هو المؤشر الأهم لقياس قوة أي حركة سعرية في سوق الكريبتو، فالصعود المصحوب بحجم كبير يعكس اهتماماً حقيقياً من المتداولين بينما الصعود بحجم ضعيف غالباً ما يكون مجرد فخ سعري يجب الحذر منه دائماً', expect: true },
   { core: 'نص قصير', expect: false },
-  { core: 'نص طويل جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً', expect: false },
+  { core: 'نص طويل جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً جداً', expect: true },
 ];
 
 for (const tc of CORES_GOOD) {

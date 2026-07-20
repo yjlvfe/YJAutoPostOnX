@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; img-src 'self' data:; connect-src 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; img-src 'self' data:; connect-src 'self';">
   <title>YJAutoPostOnX</title>
   <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="styles.css">
@@ -264,6 +264,10 @@
             <span class="q-center">إجراء</span>
           </div>
           <div class="queue-list vlist" id="queue-list"></div>
+        </div>
+        <div class="queue-card" id="recovery-card">
+          <div class="qhead recovery-head">🛟 عناصر تحتاج قرارك بعد فشل أو انقطاع</div>
+          <div id="recovery-list" class="recovery-list"></div>
         </div>
       </section>
 

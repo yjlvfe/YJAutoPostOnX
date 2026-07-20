@@ -7,6 +7,10 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const SANDBOX = path.join(os.tmpdir(), `xposter-full-ui-${process.pid}-${Date.now()}`);
+os.homedir = () => SANDBOX;
+fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-bot-profile'), { recursive: true });
+process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 
 // ─── نتائج الاختبار ───
 let passed = 0, failed = 0;
@@ -168,11 +172,10 @@ async function runTests() {
   const dupResult = await qm.addPosts([{ text: `تغريدة اختبار أولى ${ts}` }], testProfile);
   ok('addPosts يرفض التكرار', (dupResult.skippedDuplicate ?? 0) >= 1);
 
-  // 4.5 bulkDelete — احسب indices المضافة وامسحها
-  const addedIndices = [beforeCount, beforeCount + 1, beforeCount + 2];
-  await qm.bulkDelete(addedIndices, testProfile);
+  // 4.5 bulkDeleteByText — حذف موجّه بالمحتوى، لا بمؤشرات قابلة للتقادم
+  await qm.bulkDeleteByText(posts.map(post => post.text), testProfile);
   const afterQ = await qm.getQueue(testProfile);
-  ok('getQueue بعد الحذف = 2 منشور', afterQ.length === beforeCount);
+  ok('getQueue بعد الحذف يعود للعدد السابق', afterQ.length === beforeCount);
 
   // تنظيف
   try {
@@ -370,13 +373,13 @@ async function runTests() {
     ['نص الكول داون', 'cooldown-text'],
     ['عداد الكول داون', 'cooldown-timer-live'],
     ['زر إلغاء الكول داون', 'btn-clear-cooldown'],
-    ['قائمة الموديلات', 'model-select'],
+    ['قائمة الموديلات', 'ai-model-menu'],
     ['زر فحص الموديلات', 'btn-fetch-models'],
     ['جدول الطابور', 'queue-list'],
-    ['عداد الطابور', 'queue-count'],
+    ['عداد الطابور', 'm-queue'],
     ['زر استيراد CSV', 'btn-add-posts'],
-    ['عداد النجاح', 'success-count'],
-    ['عداد الفشل', 'failed-count'],
+    ['عداد النجاح', 'm-success'],
+    ['عداد الفشل', 'm-failed'],
     ['حقل رابط الإحالة', 'referral-link'],
     ['حقل Base URL', 'ai-base-url'],
     ['حقل API Key', 'ai-api-key'],

@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { readJsonSync, atomicWriteJsonSync } = require('../utils/atomicJson');
 
 // ─────────────────────────────────────────────────────────────────────
 // 1. ANGLE MATRIX — diverse crypto topics so tweets never feel repetitive
@@ -130,13 +131,7 @@ let _histCache = null;
 
 function readRawHistory() {
   if (_histCache) return _histCache;
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(historyPath(), 'utf8'));
-  } catch {
-    _histCache = [];
-    return _histCache;
-  }
+  const data = readJsonSync(historyPath(), []);
   if (!Array.isArray(data)) { _histCache = []; return _histCache; }
   const now = Date.now();
   _histCache = data
@@ -184,9 +179,9 @@ function appendHistory(newTexts) {
   }
   // Cap at last 5000 entries to keep the file lean
   const trimmed = kept.slice(-5000);
-  _histCache = trimmed;
   try {
-    fs.writeFileSync(historyPath(), JSON.stringify(trimmed, null, 0), 'utf8');
+    atomicWriteJsonSync(historyPath(), trimmed);
+    _histCache = trimmed;
   } catch (e) {
     console.error('Failed to save generation history:', e?.message);
   }

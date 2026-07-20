@@ -14,6 +14,7 @@ function check(name, cond) {
 const opencodeGoAnthropic = [
   'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
   'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus',
+  'deepseek-v4-pro', 'kimi-k2.7', 'glm-5.2', 'mimo-v2.5', 'mimo-v2.5-pro',
 ];
 for (const m of opencodeGoAnthropic) {
   const r = E.detectApiFormat('opencode-go', m);
@@ -22,10 +23,8 @@ for (const m of opencodeGoAnthropic) {
 
 // ── detectApiFormat: OpenCode Go openai models ───────────────────────
 const opencodeGoOpenAi = [
-  'deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek-v4-pro',
-  'kimi-k2.7', 'kimi-k2.6',
-  'glm-5.2', 'glm-5.1',
-  'mimo-v2.5', 'mimo-v2.5-pro',
+  'deepseek-v4-flash', 'deepseek-v4-flash-free',
+  'kimi-k2.6', 'glm-5.1',
 ];
 for (const m of opencodeGoOpenAi) {
   const r = E.detectApiFormat('opencode-go', m);

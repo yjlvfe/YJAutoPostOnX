@@ -361,12 +361,16 @@ document.addEventListener('click', (e) => {
   }
 });
 
-$('btn-save-ai-settings').addEventListener('click', () => {
-  window.api.saveSettings({
+$('btn-save-ai-settings').addEventListener('click', async () => {
+  const result = await window.api.saveSettings({
     aiProviderSelect: $('ai-provider-select').value,
     aiApiKey: $('ai-api-key').value.trim(),
     aiModel: $('ai-model').value.trim(),
   });
+  if (!result?.success) {
+    addLog(`فشل حفظ إعدادات AI: ${result?.error || 'خطأ غير معروف'}`, 'error');
+    return;
+  }
   const ok = $('save-ok');
   ok.classList.remove('hidden');
   setTimeout(() => ok.classList.add('hidden'), 2000);
@@ -374,7 +378,7 @@ $('btn-save-ai-settings').addEventListener('click', () => {
   addLog('تم حفظ إعدادات الذكاء الاصطناعي', 'success');
 });
 
-$('btn-reset-ai-settings').addEventListener('click', () => {
+$('btn-reset-ai-settings').addEventListener('click', async () => {
   if (!confirm('هل تريد إعادة تعيين جميع إعدادات الذكاء الاصطناعي؟')) return;
   $('ai-provider-select').value = 'iamhc';
   syncProviderBaseUrl();
@@ -383,7 +387,11 @@ $('btn-reset-ai-settings').addEventListener('click', () => {
   $('ai-prompt').value = '';
   $('prompt-mode-dynamic').checked = true;
   updatePromptModeVisibility();
-  window.api.saveSettings({ aiProviderSelect: 'iamhc', aiApiKey: '', aiModel: '', aiPrompt: '', promptMode: 'dynamic' });
+  const result = await window.api.saveSettings({ aiProviderSelect: 'iamhc', aiApiKey: '', aiModel: '', aiPrompt: '', promptMode: 'dynamic' });
+  if (!result?.success) {
+    addLog(`فشل إعادة تعيين إعدادات AI: ${result?.error || 'خطأ غير معروف'}`, 'error');
+    return;
+  }
   updateProviderTag();
   addLog('تم إعادة تعيين إعدادات الذكاء الاصطناعي', 'info');
 });
@@ -702,6 +710,56 @@ async function loadQueue(profile) {
   queueEmptyNote.classList.toggle('hidden', state.queueView.length > 0);
   updateQueueCounters();
   updateSelectionUI();
+  await loadRecoveryItems(profile || profileSelect.value);
+}
+
+async function loadRecoveryItems(profile) {
+  const host = $('recovery-list');
+  host.replaceChildren();
+  const result = await window.api.getRecoveryItems(profile || profileSelect.value);
+  const items = [
+    ...(result.pending || []).map(item => ({ ...item, kind: 'pending', label: 'بانتظار التحقق' })),
+    ...(result.deadLetters || []).map(item => ({ ...item, kind: 'dead', label: 'فشل نهائي' })),
+  ];
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'recovery-empty';
+    empty.textContent = 'لا توجد عناصر معلقة أو محذوفات تحتاج مراجعة.';
+    host.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'recovery-item';
+    const kind = document.createElement('span');
+    kind.className = 'recovery-kind';
+    kind.textContent = item.label;
+    const text = document.createElement('span');
+    text.className = 'recovery-text';
+    text.textContent = item.text || '';
+    const actions = document.createElement('span');
+    actions.className = 'recovery-actions';
+    const retry = document.createElement('button');
+    retry.className = 'btn btn--secondary btn--sm';
+    retry.textContent = 'إعادة للطابور';
+    retry.addEventListener('click', async () => {
+      const r = await window.api.requeueRecoveryItem(profile, item.kind, item.text);
+      addLog(r.success ? '↩️ أُعيد المنشور للطابور' : `❌ ${r.error || 'تعذرت الاستعادة'}`, r.success ? 'success' : 'error');
+      await loadQueue(profile);
+    });
+    const discard = document.createElement('button');
+    discard.className = 'btn btn--danger btn--sm';
+    discard.textContent = 'حذف';
+    discard.addEventListener('click', async () => {
+      if (!confirm('حذف هذا العنصر نهائياً من قائمة الاستعادة؟')) return;
+      const r = await window.api.discardRecoveryItem(profile, item.kind, item.text);
+      addLog(r.success ? '🗑️ حُذف عنصر الاستعادة' : `❌ ${r.error || 'تعذر الحذف'}`, r.success ? 'warning' : 'error');
+      await loadRecoveryItems(profile);
+    });
+    actions.append(retry, discard);
+    row.append(kind, text, actions);
+    host.appendChild(row);
+  }
 }
 
 function updateQueueCounters() {

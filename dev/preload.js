@@ -37,6 +37,9 @@ contextBridge.exposeInMainWorld('api', {
   // Takes post TEXTS, not row indices — an index goes stale as soon as
   // publishing consumes a post. See queueManager.bulkDeleteByText.
   bulkDelete: (texts, profileName) => ipcRenderer.invoke('bulk-delete', texts, profileName),
+  getRecoveryItems: (profileName) => ipcRenderer.invoke('get-recovery-items', profileName),
+  requeueRecoveryItem: (profileName, kind, text) => ipcRenderer.invoke('requeue-recovery-item', profileName, kind, text),
+  discardRecoveryItem: (profileName, kind, text) => ipcRenderer.invoke('discard-recovery-item', profileName, kind, text),
 
   // Automation control
   startPosting: (config) => ipcRenderer.invoke('start-posting', config),

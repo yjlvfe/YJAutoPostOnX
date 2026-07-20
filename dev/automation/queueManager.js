@@ -2,6 +2,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const os = require('os');
 const log = require('../utils/logger');
+const { readJson, atomicWriteJson } = require('../utils/atomicJson');
+const { resolveProfilePath } = require('./profileRegistry');
 
 // ===== SHARED QUEUE — one queue.json for ALL profiles =====
 // A CONSUMABLE FIFO: publishing always takes queue[0], and a post that goes out
@@ -28,16 +30,16 @@ const QUEUE_FILE  = path.join(SHARED_DIR, 'queue.json');
 // published. This archive keeps the guarantee without keeping the post in the
 // queue: it feeds dedup, it is never republished from.
 const PUBLISHED_FILE = path.join(SHARED_DIR, 'published.json');
+const POSTING_FILE = path.join(SHARED_DIR, 'posting-state.json');
 
 // Legacy per-profile paths (kept for session browser data — NOT for queue)
-const GLOBAL_PROFILES_DIR = path.join(os.homedir(), '.config', 'x-poster-profiles');
 
 function getProfileDataDir(profileName) {
   const name = profileName || 'Default';
   if (name === 'Default') {
     return path.join(os.homedir(), '.config', 'x-poster-bot-profile');
   }
-  return path.join(GLOBAL_PROFILES_DIR, name);
+  return resolveProfilePath(name);
 }
 
 // Pending / dead-letters / deferred still live per-profile (profile-specific)
@@ -83,17 +85,14 @@ async function ensureDir(profileName) {
 // re-entrant), so internal callers use the _Raw helpers.
 async function _getQueueRaw() {
   await ensureSharedDir();
-  try {
-    const data = await fs.readFile(QUEUE_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  const queue = await readJson(QUEUE_FILE, []);
+  if (!Array.isArray(queue)) throw new Error('queue.json must contain an array');
+  return queue;
 }
 
 async function _saveQueueRaw(queue) {
   await ensureSharedDir();
-  await fs.writeFile(QUEUE_FILE, JSON.stringify(queue, null, 2));
+  await atomicWriteJson(QUEUE_FILE, queue);
 }
 
 /** Text of a queue entry — entries are stored either as a bare string or as
@@ -145,22 +144,52 @@ async function consumePost(postText, opts = {}) {
       try {
         const archive = await _getPublishedRaw();
         archive.push({ text: postText, publishedAt: new Date().toISOString() });
-        await fs.writeFile(PUBLISHED_FILE, JSON.stringify(archive, null, 2));
+        await atomicWriteJson(PUBLISHED_FILE, archive);
       } catch (e) {
         log.error('Failed to archive published post (dedup corpus may miss it):', e?.message);
       }
     }
+    if (opts.profileName) await _clearPostingRaw(opts.profileName, postText);
     return true;
   });
 }
 
 async function _getPublishedRaw() {
   await ensureSharedDir();
-  try {
-    return JSON.parse(await fs.readFile(PUBLISHED_FILE, 'utf8'));
-  } catch {
-    return [];
+  const archive = await readJson(PUBLISHED_FILE, []);
+  if (!Array.isArray(archive)) throw new Error('published.json must contain an array');
+  return archive;
+}
+
+async function _getPostingRaw() {
+  const state = await readJson(POSTING_FILE, {});
+  return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+}
+
+async function _clearPostingRaw(profileName, postText) {
+  const state = await _getPostingRaw();
+  const key = profileName || 'Default';
+  if (state[key] && (!postText || state[key].text === postText)) {
+    delete state[key];
+    await atomicWriteJson(POSTING_FILE, state);
+    return true;
   }
+  return false;
+}
+
+/** Persist intent BEFORE Ctrl+Enter so a crash can never blindly repost it. */
+async function markPosting(postText, profileName) {
+  return withLock(async () => {
+    const state = await _getPostingRaw();
+    const key = profileName || 'Default';
+    state[key] = { text: postText, startedAt: new Date().toISOString() };
+    await atomicWriteJson(POSTING_FILE, state);
+    return state[key];
+  });
+}
+
+async function clearPosting(profileName, postText) {
+  return withLock(() => _clearPostingRaw(profileName, postText));
 }
 
 /** Texts of every post that has actually been published. Feeds the studio's
@@ -239,24 +268,44 @@ async function bulkDeleteByText(texts) {
 // 🔒 C4: read pending inside the SAME withLock block so parallel calls
 // don't race — both reads and writes are serialised under the same mutex.
 async function addToPending(postText, profileName) {
+  return withLock(() => _addToPendingRaw(postText, profileName, 'unconfirmed'));
+}
+
+async function _addToPendingRaw(postText, profileName, reason = 'unconfirmed') {
+  await ensureDir(profileName);
+  const file = getPendingFile(profileName);
+  const pending = await readJson(file, []);
+  if (!Array.isArray(pending)) throw new Error('pending-verification.json must contain an array');
+  if (!pending.some(entry => entry?.text === postText)) {
+    pending.push({ text: postText, reason, addedAt: new Date().toISOString() });
+    await atomicWriteJson(file, pending);
+  }
+}
+
+async function getPending(profileName) {
+  await ensureDir(profileName);
+  const pending = await readJson(getPendingFile(profileName), []);
+  return Array.isArray(pending) ? pending : [];
+}
+
+async function moveToPending(postText, profileName, reason = 'unconfirmed') {
   return withLock(async () => {
-    await ensureDir(profileName);
-    // Read pending UNDER the lock (was lock-less → race window).
-    let pending = [];
-    try {
-      pending = JSON.parse(await fs.readFile(getPendingFile(profileName), 'utf8'));
-    } catch { pending = []; }
-    pending.push({ text: postText, addedAt: new Date().toISOString() });
-    await fs.writeFile(getPendingFile(profileName), JSON.stringify(pending, null, 2));
+    await _addToPendingRaw(postText, profileName, reason);
+    const queue = await _getQueueRaw();
+    const idx = queue.findIndex(item => postTextOf(item) === postText);
+    if (idx !== -1) {
+      queue.splice(idx, 1);
+      await _saveQueueRaw(queue);
+    }
+    await _clearPostingRaw(profileName, postText);
+    return idx !== -1;
   });
 }
 
 async function getDeadLetters(profileName) {
   await ensureDir(profileName);
-  try {
-    const data = await fs.readFile(getDeadLettersFile(profileName), 'utf8');
-    return JSON.parse(data);
-  } catch { return []; }
+  const letters = await readJson(getDeadLettersFile(profileName), []);
+  return Array.isArray(letters) ? letters : [];
 }
 
 async function addDeadLetter(postText, errorType, errorMsg, profileName) {
@@ -264,7 +313,27 @@ async function addDeadLetter(postText, errorType, errorMsg, profileName) {
     await ensureDir(profileName);
     const letters = await getDeadLetters(profileName);
     letters.push({ text: postText, errorType, errorMsg, failedAt: new Date().toISOString() });
-    await fs.writeFile(getDeadLettersFile(profileName), JSON.stringify(letters, null, 2));
+    await atomicWriteJson(getDeadLettersFile(profileName), letters);
+  });
+}
+
+async function moveToDeadLetter(postText, errorType, errorMsg, profileName) {
+  return withLock(async () => {
+    await ensureDir(profileName);
+    const file = getDeadLettersFile(profileName);
+    const letters = await readJson(file, []);
+    if (!letters.some(entry => entry?.text === postText)) {
+      letters.push({ text: postText, errorType, errorMsg, failedAt: new Date().toISOString() });
+      await atomicWriteJson(file, letters);
+    }
+    const queue = await _getQueueRaw();
+    const idx = queue.findIndex(item => postTextOf(item) === postText);
+    if (idx !== -1) {
+      queue.splice(idx, 1);
+      await _saveQueueRaw(queue);
+    }
+    await _clearPostingRaw(profileName, postText);
+    return idx !== -1;
   });
 }
 
@@ -275,10 +344,8 @@ async function addDeadLetter(postText, errorType, errorMsg, profileName) {
 // unlikely to succeed on retry — see xPoster.js's errorType classification).
 async function getDeferred(profileName) {
   await ensureDir(profileName);
-  try {
-    const data = await fs.readFile(getDeferredFile(profileName), 'utf8');
-    return JSON.parse(data);
-  } catch { return []; }
+  const list = await readJson(getDeferredFile(profileName), []);
+  return Array.isArray(list) ? list : [];
 }
 
 /**
@@ -301,7 +368,7 @@ async function addDeferred(postText, errorMsg, profileName) {
     } else {
       list.push({ text: postText, attempts: 1, firstDeferredAt: now, lastDeferredAt: now, errorMsg });
     }
-    await fs.writeFile(getDeferredFile(profileName), JSON.stringify(list, null, 2));
+    await atomicWriteJson(getDeferredFile(profileName), list);
     return existing ? existing.attempts : 1;
   });
 }
@@ -313,8 +380,62 @@ async function removeDeferred(profileName, postText) {
     const list = await getDeferred(profileName);
     const updated = list.filter(d => d.text !== postText);
     if (updated.length !== list.length) {
-      await fs.writeFile(getDeferredFile(profileName), JSON.stringify(updated, null, 2));
+      await atomicWriteJson(getDeferredFile(profileName), updated);
     }
+  });
+}
+
+async function recoverInterruptedPosts(profileName) {
+  return withLock(async () => {
+    const state = await _getPostingRaw();
+    const key = profileName || 'Default';
+    const intent = state[key];
+    if (!intent?.text) return [];
+    await _addToPendingRaw(intent.text, key, 'interrupted_after_publish_attempt');
+    const queue = await _getQueueRaw();
+    const idx = queue.findIndex(item => postTextOf(item) === intent.text);
+    if (idx !== -1) {
+      queue.splice(idx, 1);
+      await _saveQueueRaw(queue);
+    }
+    delete state[key];
+    await atomicWriteJson(POSTING_FILE, state);
+    return [intent];
+  });
+}
+
+async function getRecoveryItems(profileName) {
+  const [pending, deadLetters] = await Promise.all([
+    getPending(profileName),
+    getDeadLetters(profileName),
+  ]);
+  return { pending, deadLetters };
+}
+
+async function requeueRecovery(profileName, kind, postText) {
+  return withLock(async () => {
+    const file = kind === 'dead' ? getDeadLettersFile(profileName) : getPendingFile(profileName);
+    const list = await readJson(file, []);
+    const updated = Array.isArray(list) ? list.filter(item => item?.text !== postText) : [];
+    if (updated.length === list.length) return false;
+    await atomicWriteJson(file, updated);
+    const queue = await _getQueueRaw();
+    if (!queue.some(item => postTextOf(item) === postText)) {
+      queue.push(postText);
+      await _saveQueueRaw(queue);
+    }
+    return true;
+  });
+}
+
+async function discardRecovery(profileName, kind, postText) {
+  return withLock(async () => {
+    const file = kind === 'dead' ? getDeadLettersFile(profileName) : getPendingFile(profileName);
+    const list = await readJson(file, []);
+    const updated = Array.isArray(list) ? list.filter(item => item?.text !== postText) : [];
+    if (updated.length === list.length) return false;
+    await atomicWriteJson(file, updated);
+    return true;
   });
 }
 
@@ -328,8 +449,18 @@ module.exports = {
   bulkDeleteByText,
   // Per-profile
   addToPending,
+  getPending,
+  moveToPending,
   addDeadLetter,
+  getDeadLetters,
+  moveToDeadLetter,
   getDeferred,
   addDeferred,
   removeDeferred,
+  markPosting,
+  clearPosting,
+  recoverInterruptedPosts,
+  getRecoveryItems,
+  requeueRecovery,
+  discardRecovery,
 };

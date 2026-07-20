@@ -608,6 +608,15 @@ input[type="checkbox"] {
 }
 .q-center { text-align: center; }
 
+/* Recovery / dead-letter reconciliation */
+.recovery-head { height: auto; min-height: 44px; padding: var(--space-3) var(--space-4); }
+.recovery-list { padding: var(--space-2) var(--space-3); display: grid; gap: var(--space-2); max-height: 260px; overflow: auto; }
+.recovery-empty { color: var(--text-1); padding: var(--space-3); }
+.recovery-item { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: var(--space-2); align-items: center; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-inset); }
+.recovery-kind { color: var(--warning); font-weight: var(--fw-bold); }
+.recovery-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.recovery-actions { display: flex; gap: var(--space-2); }
+
 /* ═══════════ SETTINGS ═══════════ */
 /* overflow:visible: قائمة الموديلات المنسدلة يجب ألا تُقص بحافة الكرت */
 .settings-panel { width: 100%; max-width: 720px; margin-inline: auto; flex-shrink: 0; overflow: visible; }

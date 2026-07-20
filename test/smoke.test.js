@@ -20,10 +20,18 @@ const REQUIRED_API = [
   'parseCSV', 'getQueue', 'addPosts', 'bulkDelete', 'startPosting',
   'stopAutomation', 'openProfileForLogin', 'getProfiles', 'createProfile',
   'deleteProfile', 'renameProfile', 'generateAiPosts', 'onAiProgress',
-  'exportQueue', 'onStatusUpdate',
+  'exportQueue', 'onStatusUpdate', 'getRecoveryItems', 'requeueRecoveryItem', 'discardRecoveryItem',
 ];
 
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const SANDBOX = path.join(os.tmpdir(), `xposter-smoke-${process.pid}-${Date.now()}`);
+os.homedir = () => SANDBOX;
+fs.mkdirSync(SANDBOX, { recursive: true });
+process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 const { app } = require('electron');
+app.setPath('userData', path.join(SANDBOX, 'userData'));
 
 // Load the real main process — registers every ipcMain handler + creates window
 require('../dev/main.js');

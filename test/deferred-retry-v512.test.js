@@ -80,8 +80,8 @@ console.log('📋 queueManager: deferred-posts persistence');
   const beforeCap = networkBranch.slice(0, networkBranch.indexOf('if (attemptsSoFar'));
   assert(!/consumePost/.test(beforeCap),
     'a deferred post is NOT consumed — it stays in the queue so the next run retries it');
-  assert(/consumePost/.test(capMatch ? capMatch[1] : ''),
-    'only the over-the-cap escalation consumes the post (into dead-letters)');
+  assert(/moveToDeadLetter/.test(capMatch ? capMatch[1] : '') && !/consumePost/.test(capMatch ? capMatch[1] : ''),
+    'over-the-cap escalation uses the crash-safe moveToDeadLetter transaction');
 
   // Bug guard #2: selector/locator message check must run BEFORE the
   // TimeoutError-name catch-all in the classifier.
@@ -110,10 +110,10 @@ console.log('📋 queueManager: deferred-posts persistence');
   // Non-network failures: still unconditionally dead-lettered, and now also
   // consumed so a permanently-broken post can't block the head of the queue.
   const tailDeadLetter = code.slice(code.indexOf('continue;', code.indexOf("errorType === 'network'")));
-  assert(/await queueManager\.addDeadLetter\(itemText, errorType, errorMsg, profileName\);/.test(tailDeadLetter),
-    'non-network failures still call addDeadLetter unconditionally (unchanged behavior)');
-  assert(/await queueManager\.consumePost\(itemText\);/.test(tailDeadLetter),
-    'non-network failures consume the post (dead-letters keep the text — nothing is lost)');
+  assert(/await queueManager\.moveToDeadLetter\(itemText, errorType, errorMsg, profileName\);/.test(tailDeadLetter),
+    'non-network failures use one crash-safe move-to-dead-letter operation');
+  assert(!/await queueManager\.consumePost\(itemText\);/.test(tailDeadLetter),
+    'non-network dead-letter path no longer performs a separate destructive consume first');
 
   // ── 3. reportEngine 'deferred' status support ──
   console.log('📋 reportEngine: deferred status');

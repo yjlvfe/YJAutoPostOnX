@@ -1,6 +1,5 @@
 const fs = require('fs').promises;
 const path = require('path');
-const os = require('os');
 const { launchBrowser } = require('./browserManager');
 const queueManager = require('./queueManager');
 const { ReportEngine } = require('./reportEngine');
@@ -82,8 +81,61 @@ const RATE_LIMIT_PATTERNS = [
 // post URL and counted the post as a SUCCESS, silently burning the queue
 // against a limited account. Any captured URL matching this is a rate limit.
 const LIMIT_URL_RE = /premium_sign_up|daily_post_limit/i;
+const activeContexts = new Set();
+
+async function stopActive() {
+  global.isRunning = false;
+  await Promise.allSettled(Array.from(activeContexts, context => context.close()));
+}
 function isLimitUrl(url) {
   return typeof url === 'string' && LIMIT_URL_RE.test(url);
+}
+
+const TOAST_ERROR_RE = /something went wrong|failed|could not|unable to post|try again|duplicate|خطأ|فشل|تعذر|لم يتم/i;
+const TOAST_SUCCESS_RE = /post was sent|your post was sent|posted|تم النشر|تم الإرسال/i;
+
+async function inspectToast(toast) {
+  if (!toast) return null;
+  let text = '';
+  let href = null;
+  try { if (typeof toast.textContent === 'function') text = (await toast.textContent()) || ''; } catch {}
+  try {
+    const link = await toast.$('a');
+    if (link) href = await link.getAttribute('href');
+  } catch {}
+  if (href && !href.startsWith('http')) href = `https://x.com${href}`;
+  const signature = `${href || ''}|${text.trim()}`;
+  if (isLimitUrl(href) || RATE_LIMIT_PATTERNS.some(pattern => pattern.test(text))) {
+    return { kind: 'rate-limit', href, text, signature };
+  }
+  if (href && /\/status\//i.test(href)) return { kind: 'confirmed', href, text, signature };
+  if (TOAST_ERROR_RE.test(text)) return { kind: 'error', href, text, signature };
+  if (TOAST_SUCCESS_RE.test(text)) return { kind: 'unconfirmed', href, text, signature };
+  return { kind: 'unknown', href, text, signature };
+}
+
+async function getToastSnapshot(page) {
+  try { return await inspectToast(await page.$('[data-testid="toast"]')); }
+  catch { return null; }
+}
+
+async function waitForPostConfirmation(page, baseline, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!global.isRunning) throw new Error('STOPPED_BY_USER');
+    const snapshot = await getToastSnapshot(page);
+    if (snapshot && snapshot.signature !== baseline?.signature) {
+      if (snapshot.kind === 'confirmed' || snapshot.kind === 'unconfirmed') return snapshot;
+      if (snapshot.kind === 'rate-limit') {
+        const err = new Error('RATE_LIMIT_TOAST');
+        err.toastText = snapshot.text;
+        throw err;
+      }
+      if (snapshot.kind === 'error') throw new Error(`X_TOAST_ERROR: ${snapshot.text || 'unknown error'}`);
+    }
+    await interruptibleDelay(200);
+  }
+  throw new Error('Timeout waiting for a fresh post confirmation');
 }
 
 async function scanForRateLimit(page) {
@@ -109,11 +161,7 @@ function escCsv(value) {
 }
 
 function getReportDir(profileName) {
-  const name = profileName || 'Default';
-  if (name === 'Default') {
-    return path.join(os.homedir(), '.config', 'x-poster-bot-profile', 'reports');
-  }
-  return path.join(os.homedir(), '.config', 'x-poster-profiles', name, 'reports');
+  return path.join(queueManager.getProfileDataDir(profileName), 'reports');
 }
 
 // 🚨 Consecutive unrecognized-failure circuit breaker — see reportRateLimitAndThrow.
@@ -206,6 +254,7 @@ async function start(config, onStatus) {
   // interrupted.
   async function reportRateLimitAndThrow(pageContent, attemptNum, opts = {}, pendingPost = null) {
     global.isRateLimited = true;
+    if (pendingPost?.text) await queueManager.clearPosting(profileName, pendingPost.text);
     const parsedMs = pageContent ? rateLimitStore.parseCooldownFromText(pageContent) : null;
     const cd = rateLimitStore.setCooldown(profileName, parsedMs, {
       source: parsedMs ? 'x' : 'default',
@@ -247,6 +296,13 @@ async function start(config, onStatus) {
     // so the next run retries it at the head on its own. deferred-posts.json is
     // now only an attempt COUNTER (see the network branch below) — never a
     // re-injection source.
+    const interrupted = await queueManager.recoverInterruptedPosts(profileName);
+    if (interrupted.length > 0) {
+      onStatus({
+        type: 'warning',
+        message: `⚠️ تم عزل ${interrupted.length} منشور من تشغيل منقطع داخل "بانتظار التحقق" لمنع النشر المكرر.`,
+      });
+    }
     queue = await queueManager.getQueue();
     const queueTotalAtStart = queue.length;
     onStatus({
@@ -262,6 +318,7 @@ async function start(config, onStatus) {
     let sequentialPosted = 0;
 
     context = await launchBrowser(profile || 'Default');
+    activeContexts.add(context);
 
     const pages = context.pages();
     const page = pages.length > 0 ? pages[0] : await context.newPage();
@@ -332,7 +389,35 @@ async function start(config, onStatus) {
       let confirmedPostUrl = null;
       let attempts = 0;
       let lastError = null;
+      let postingAttempted = false;
       const maxRetries = 3;
+      let stoppedCleanupDone = false;
+
+      // Stopping is not a publishing failure. Keep an untouched post in the
+      // queue; if submit may have happened, quarantine it for verification.
+      // Shared by both exit paths below: a STOPPED_BY_USER thrown mid-attempt
+      // (e.g. during the toast-confirmation wait, right after Ctrl+Enter — the
+      // highest-risk window) unwinds straight past the loop via the catch
+      // blocks' rethrows, never reaching the "loop exited normally" code path,
+      // so that path alone used to miss this cleanup entirely.
+      async function handleStoppedDuringAttempt() {
+        if (stoppedCleanupDone) return;
+        stoppedCleanupDone = true;
+        if (postingAttempted) {
+          await queueManager.moveToPending(itemText, profileName, 'stopped_after_submit');
+          await queueManager.removeDeferred(profileName, itemText);
+          unconfirmedCount++;
+          report.recordPostResult({
+            postId: `post-${postedCount}`,
+            text: itemText,
+            status: 'unconfirmed',
+            attempts,
+            lastError: 'Stopped by user after submit',
+          });
+        } else {
+          await queueManager.clearPosting(profileName, itemText);
+        }
+      }
 
       while (!postSuccess && attempts < maxRetries && global.isRunning && !global.isRateLimited) {
         attempts++;
@@ -392,26 +477,26 @@ async function start(config, onStatus) {
             // Mouse movement before posting — human-like behavior
             await page.mouse.move(Math.random() * 500 + 100, Math.random() * 500 + 100, { steps: 10 });
             await interruptibleDelay(100 + Math.random() * 200);
+            const baselineToast = await getToastSnapshot(page);
+            await queueManager.markPosting(itemText, profileName);
             await page.keyboard.press('ControlOrMeta+Enter');
-            
+            postingAttempted = true;
+
             onStatus({ type: 'info', message: `Post triggered via ${PLATFORM_KEY_LABEL}+Enter, awaiting server confirmation...` });
             try {
-              const toast = await waitForSelectorInterruptible(page, '[data-testid="toast"]', 10000);
-              const link = await toast.$('a');
-              if (link) {
-                confirmedPostUrl = await link.getAttribute('href');
-                if (confirmedPostUrl && !confirmedPostUrl.startsWith('http')) {
-                  confirmedPostUrl = `https://x.com${confirmedPostUrl}`;
-                }
-              }
-              postSuccess = true;
+              const confirmation = await waitForPostConfirmation(page, baselineToast, 10000);
+              confirmedPostUrl = confirmation.href || null;
+              postSuccess = confirmation.kind === 'confirmed' ? true : 'unconfirmed';
             } catch (toastErr) {
               // 🛑 A stop request surfaces here as a STOPPED_BY_USER throw from the
               // interruptible toast wait — it must abort immediately, not be treated
               // as "toast missing, let's double-check and retry" (that silently kept
               // the run going for several more seconds/attempts after Stop was pressed).
               if (toastErr.message === 'STOPPED_BY_USER') throw toastErr;
-              onStatus({ type: 'warning', message: 'Toast not detected, performing double-check...' });
+              if (toastErr.message === 'RATE_LIMIT_TOAST') {
+                await reportRateLimitAndThrow(toastErr.toastText || null, attempts, {}, { text: itemText });
+              }
+              onStatus({ type: 'warning', message: 'لم يصل تأكيد نشر صالح — جاري التحقق من حالة المحرر...' });
 
               // 🔎 The composer content is the reliable "did it post?" signal:
               // X clears the textarea the instant a tweet is accepted. The old
@@ -431,61 +516,31 @@ async function start(config, onStatus) {
                 postSuccess = 'unconfirmed';
                 onStatus({ type: 'warning', message: 'Composer cleared but no confirmation toast - marking as unconfirmed' });
               } else {
-                // 🚫 Check for a rate-limit message BEFORE hammering another
-                // Ctrl+Enter at an already-limited account — this is the fast path
-                // that used to only run after all 3 retries were burned.
                 const earlyScan = await scanForRateLimit(page);
                 if (earlyScan.isRateLimited && global.isRunning) {
                   await reportRateLimitAndThrow(earlyScan.pageContent, attempts, {}, { text: itemText });
                 }
-                onStatus({ type: 'warning', message: `Attempt ${attempts}/${maxRetries}: trying Ctrl+Enter...` });
-                try {
-                  // Mouse movement before fallback post — human-like behavior
-                  await page.mouse.move(Math.random() * 500 + 100, Math.random() * 500 + 100, { steps: 10 });
-                  await interruptibleDelay(100 + Math.random() * 200);
-                  await page.keyboard.press('ControlOrMeta+Enter');
-                  const toast = await waitForSelectorInterruptible(page, '[data-testid="toast"]', 8000);
-                  const link = await toast.$('a');
-                  if (link) {
-                    confirmedPostUrl = await link.getAttribute('href');
-                    if (confirmedPostUrl && !confirmedPostUrl.startsWith('http')) {
-                      confirmedPostUrl = `https://x.com${confirmedPostUrl}`;
-                    }
-                  }
-                  postSuccess = true;
-                } catch (fallbackErr) {
-                  if (fallbackErr.message === 'STOPPED_BY_USER') throw fallbackErr;
-                  postSuccess = false;
-                }
+                lastError = toastErr;
+                postSuccess = 'unconfirmed';
+                onStatus({
+                  type: 'warning',
+                  message: '⚠️ محاولة النشر أصبحت غير محسومة؛ لن يُعاد الضغط تلقائياً وسيُنقل المنشور للتحقق اليدوي.',
+                });
               }
             }
           } catch (clickErr) {
-            // 🛑/🚫 Propagate a stop or an already-detected rate limit untouched —
-            // don't reinterpret it as "Control+Enter failed, retrying...".
             if (clickErr.message === 'STOPPED_BY_USER' || clickErr.message === 'RATE_LIMITED') throw clickErr;
-            onStatus({ type: 'warning', message: `Attempt ${attempts}/${maxRetries}: Control+Enter failed, retrying...` });
-            try {
-              // Mouse movement before retry post — human-like behavior
-              await page.mouse.move(Math.random() * 500 + 100, Math.random() * 500 + 100, { steps: 10 });
-              await interruptibleDelay(100 + Math.random() * 200);
-              await page.keyboard.press('ControlOrMeta+Enter');
-              const toast = await waitForSelectorInterruptible(page, '[data-testid="toast"]', 8000);
-              const link = await toast.$('a');
-              if (link) {
-                confirmedPostUrl = await link.getAttribute('href');
-                if (confirmedPostUrl && !confirmedPostUrl.startsWith('http')) {
-                  confirmedPostUrl = `https://x.com${confirmedPostUrl}`;
-                }
-              }
-              postSuccess = true;
-            } catch (fallbackErr) {
-              if (fallbackErr.message === 'STOPPED_BY_USER') throw fallbackErr;
-              postSuccess = false;
-            }
+            lastError = clickErr;
+            postSuccess = false;
+            onStatus({ type: 'warning', message: `Attempt ${attempts}/${maxRetries}: تعذر إطلاق النشر، ستُعاد المحاولة بأمان.` });
           }
 
         } catch (err) {
-          if (err.message === 'STOPPED_BY_USER' || err.message === 'RATE_LIMITED') throw err;
+          if (err.message === 'STOPPED_BY_USER') {
+            await handleStoppedDuringAttempt();
+            throw err;
+          }
+          if (err.message === 'RATE_LIMITED') throw err;
           lastError = err;
           onStatus({ type: 'warning', message: `Attempt ${attempts} failed: ${err.message}` });
           await page.evaluate(() => window.scrollTo(0, 0));
@@ -517,6 +572,16 @@ async function start(config, onStatus) {
           }
         }
       }
+
+      if (!global.isRunning) {
+        await handleStoppedDuringAttempt();
+        break;
+      }
+
+      // Once Ctrl+Enter was accepted by Playwright, a missing/unknown response is
+      // an ambiguous external side effect. Never retry it automatically or call
+      // it failed: park it for manual reconciliation to prevent duplicates.
+      if (!postSuccess && postingAttempted) postSuccess = 'unconfirmed';
 
       // Record post timing and log outcome
       const postDuration = Date.now() - (typeof postStartTime !== 'undefined' ? postStartTime : Date.now());
@@ -588,7 +653,7 @@ async function start(config, onStatus) {
         // a later failure can never resurrect an already-published post.
         // published: true also archives the text for the studio's semantic
         // dedup, which must keep seeing it long after it leaves the queue.
-        await queueManager.consumePost(itemText, { published: true });
+        await queueManager.consumePost(itemText, { published: true, profileName });
         // A post that had been network-deferred and finally went through — drop
         // its attempt counter so a future post never inherits a stale count.
         await queueManager.removeDeferred(profileName, itemText);
@@ -600,16 +665,11 @@ async function start(config, onStatus) {
           attempts: attempts
         });
       } else if (postSuccess === 'unconfirmed') {
-        // Published, but the link couldn't be captured — it most likely DID go
-        // out. Consume it anyway and park a copy in pending-verification:
-        // re-posting identical text risks X's duplicate-content block, and the
-        // user can verify from the pending list. It is not returned to the
-        // queue (that's the one thing it must never do). Archived as published
-        // for the same reason: assume it went out.
-        await queueManager.consumePost(itemText, { published: true });
+        // Remote outcome is ambiguous. Move atomically to the visible recovery
+        // list and never auto-retry; the user decides after checking X.
+        await queueManager.moveToPending(itemText, profileName, 'ambiguous_publish_result');
         await queueManager.removeDeferred(profileName, itemText);
         queue = queue.slice(1);
-        await queueManager.addToPending(itemText, profileName);
         unconfirmedCount++;
         consecutiveFailures = 0;
         onStatus({ type: 'warning', message: 'Post moved to pending verification (unconfirmed status)' });
@@ -652,12 +712,12 @@ async function start(config, onStatus) {
         // consumed into dead-letters instead of blocking the head of the queue
         // forever.
         if (errorType === 'network') {
+          await queueManager.clearPosting(profileName, itemText);
           const attemptsSoFar = await queueManager.addDeferred(itemText, errorMsg, profileName);
           queue = queue.slice(1);
           if (attemptsSoFar > DEFER_ATTEMPTS_LIMIT) {
-            await queueManager.consumePost(itemText);
             await queueManager.removeDeferred(profileName, itemText);
-            await queueManager.addDeadLetter(itemText, errorType, errorMsg, profileName);
+            await queueManager.moveToDeadLetter(itemText, errorType, errorMsg, profileName);
             onStatus({ type: 'error', message: `❌ فشل شبكي متكرر (${attemptsSoFar} مرات) — تم نقله للمحذوفات نهائياً.` });
             report.recordPostResult({
               postId: `post-${postedCount}`, text: itemText, status: 'dead_letter',
@@ -699,10 +759,17 @@ async function start(config, onStatus) {
         // itself on a retry. Consume it into dead-letters so it can't block the
         // head of the queue forever (Zero-Queue-Block) — dead-letters.json
         // keeps the text, so nothing is actually lost.
-        await queueManager.consumePost(itemText);
+        // Clear any stale posting-in-progress marker BEFORE dead-lettering (not
+        // just relying on moveToDeadLetter's own internal clear at the end of
+        // its multi-step write): if the process crashes between here and
+        // moveToDeadLetter finishing, recoverInterruptedPosts() on the next
+        // start unconditionally re-quarantines any surviving marker — clearing
+        // it first means a crash mid-write leaves this post to be retried
+        // once more, instead of surfacing as a duplicate recovery entry.
+        await queueManager.clearPosting(profileName, itemText);
         await queueManager.removeDeferred(profileName, itemText);
         queue = queue.slice(1);
-        await queueManager.addDeadLetter(itemText, errorType, errorMsg, profileName);
+        await queueManager.moveToDeadLetter(itemText, errorType, errorMsg, profileName);
         report.recordPostResult({
           postId: `post-${postedCount}`,
           text: itemText,
@@ -826,6 +893,7 @@ async function start(config, onStatus) {
     await report.endRun();
     throw error;
   } finally {
+    if (context) activeContexts.delete(context);
     try {
       if (context) await context.close();
     } catch (e) {
@@ -1006,4 +1074,4 @@ async function startMulti(config, onStatus) {
   return { results, summary };
 }
 
-module.exports = { start, startMulti, escCsv, isLimitUrl };
+module.exports = { start, startMulti, stopActive, escCsv, isLimitUrl, inspectToast };
