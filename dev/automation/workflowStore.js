@@ -732,19 +732,19 @@ class WorkflowStore {
         });
       }
       let fd;
-      let digest;
+      let actual;
       try {
         fd = fs.openSync(entry.managedPath, 'r');
-        digest = hashOpenFile(fd);
+        actual = hashOpenFile(fd);
       } finally {
         if (fd !== undefined) fs.closeSync(fd);
       }
-      if (digest !== entry.sha256) {
+      if (actual.sha256 !== entry.sha256) {
         conflict('MEDIA_INTEGRITY_FAILED', `Managed media digest changed: ${entry.managedPath}`, {
           itemId,
           ordinal: entry.ordinal,
           expectedSha256: entry.sha256,
-          actualSha256: digest,
+          actualSha256: actual.sha256,
         });
       }
     }
@@ -918,6 +918,50 @@ class WorkflowStore {
         return {
           id: normalizedProfileId,
           name: normalizedName,
+          status: 'active',
+          legacyPath: current.legacy_path,
+          createdAtMs: current.created_at_ms,
+          updatedAtMs: now,
+          deletedAtMs: null,
+        };
+      },
+    );
+  }
+
+  /**
+   * Reactivate a soft-deleted profile, keeping its original UUID.
+   *
+   * Recreating the name under a fresh UUID would orphan every item the old
+   * profile owned, so reuse of a deleted name must restore identity instead.
+   */
+  restoreProfile({ profileId, requestId }) {
+    const normalizedProfileId = assertNonEmptyString(profileId, 'profileId');
+    return this._mutate(
+      'restoreProfile',
+      requestId,
+      { profileId: normalizedProfileId },
+      () => {
+        const current = this.db.prepare('SELECT * FROM profiles WHERE id = ?').get(normalizedProfileId);
+        if (!current) conflict('PROFILE_NOT_FOUND', `Unknown profile: ${normalizedProfileId}`);
+        const now = Date.now();
+        if (current.status === 'active') {
+          return {
+            id: current.id,
+            name: current.name,
+            status: 'active',
+            legacyPath: current.legacy_path,
+            createdAtMs: current.created_at_ms,
+            updatedAtMs: current.updated_at_ms,
+            deletedAtMs: null,
+          };
+        }
+        this.db.prepare(`
+          UPDATE profiles SET status = 'active', deleted_at_ms = NULL, updated_at_ms = ?
+          WHERE id = ?
+        `).run(now, normalizedProfileId);
+        return {
+          id: current.id,
+          name: current.name,
           status: 'active',
           legacyPath: current.legacy_path,
           createdAtMs: current.created_at_ms,
@@ -1982,6 +2026,59 @@ class WorkflowStore {
           'discarded',
           nextRevision,
           { expectedRevision },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
+  /**
+   * Return a dead-lettered item to the queue.
+   *
+   * A 'dead' item failed BEFORE the dispatch boundary, so it was never sent and
+   * requeueing it cannot duplicate a post. The failure budget is reset so the
+   * retry gets a fair chance rather than dying again immediately.
+   */
+  requeueTerminal({ id, expectedRevision, requestId }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new TypeError('expectedRevision must be a non-negative integer');
+    }
+    return this._mutate(
+      'requeueTerminal',
+      requestId,
+      { id: normalizedId, expectedRevision },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'dead') {
+          conflict('INVALID_STATE', `Only a dead item can be requeued, got ${row.state}`);
+        }
+        if (row.revision !== expectedRevision) {
+          conflict('REVISION_CONFLICT', 'The item revision no longer matches');
+        }
+
+        const now = Date.now();
+        const queueSeq = this._nextQueueSequence();
+        const nextRevision = row.revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'queued', queue_seq = ?, available_at_ms = ?,
+              reason = 'requeued_from_dead', error_json = NULL,
+              pre_dispatch_failure_count = 0,
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'dead' AND revision = ?
+        `).run(queueSeq, now, nextRevision, now, normalizedId, expectedRevision);
+        if (update.changes !== 1) conflict('STATE_CONFLICT', 'The item changed before it could be requeued');
+
+        this._recordEvent(
+          normalizedId,
+          'requeued_from_dead',
+          'dead',
+          'queued',
+          nextRevision,
+          { queueSeq },
           now,
         );
         return this._rowToItem(this._getItemRow(normalizedId));

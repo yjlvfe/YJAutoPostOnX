@@ -187,20 +187,45 @@ function corruptManagedMediaFailsBeforeBoundary() {
     const stored = store.getItem(enqueued.id).media[0];
     const managedPath = stored.managedPath;
     assert.ok(fs.existsSync(managedPath), 'managed media must exist after enqueue');
-    fs.writeFileSync(managedPath, Buffer.from('tampered bytes'));
+
+    // INTACT media must pass the guard. This is the regression that matters
+    // most: a broken comparison here blocks every legitimate media post.
+    const okLease = store.leaseNext({ profileId, runId });
+    const okAttempt = store.beginDispatch({
+      id: okLease.id,
+      leaseToken: okLease.leaseToken,
+      renderedText: 'with media',
+      requestId: 'begin-intact',
+    });
+    assert.strictEqual(store.getItem(enqueued.id).state, 'dispatch_started',
+      'intact managed media must cross the boundary normally');
+    store.markPublished({
+      attemptId: okAttempt.attemptId,
+      externalUrl: 'https://x.com/status/7',
+      evidence: { confirmed: true },
+      requestId: 'publish-intact',
+    });
+
+    // Now corrupt a fresh item's blob and prove the guard fires.
+    const second = store.enqueue({
+      items: [{ text: 'second media', media_path: media }],
+      requestId: 'e2',
+    }).items[0];
+    const secondPath = store.getItem(second.id).media[0].managedPath;
+    fs.writeFileSync(secondPath, Buffer.from('tampered bytes'));
 
     const leased = store.leaseNext({ profileId, runId });
     assert.throws(
       () => store.beginDispatch({
         id: leased.id,
         leaseToken: leased.leaseToken,
-        renderedText: 'with media',
+        renderedText: 'second media',
         requestId: 'begin-media',
       }),
       (error) => error.code === 'MEDIA_INTEGRITY_FAILED',
       'tampered managed media must fail before the irreversible boundary',
     );
-    assert.notStrictEqual(store.getItem(enqueued.id).state, 'dispatch_started');
+    assert.notStrictEqual(store.getItem(second.id).state, 'dispatch_started');
   } finally {
     store.close();
   }

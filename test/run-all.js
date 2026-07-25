@@ -30,8 +30,11 @@ const BASELINE_TESTS = [
   'verify-edge-cases.test.js',
 ];
 
+// Durable-workflow tests are discovered, not listed, so a new gate can never be
+// silently left out of the suite. Both prefixes belong to the same slice.
 const workflowTests = fs.readdirSync(TEST_DIR)
-  .filter((name) => name.startsWith('workflow-') && name.endsWith('.test.js'))
+  .filter((name) => (name.startsWith('workflow-') || name.startsWith('durable-'))
+    && name.endsWith('.test.js'))
   .sort();
 const scope = process.env.XPOSTER_TEST_SCOPE || 'all';
 const tests = scope === 'baseline'
