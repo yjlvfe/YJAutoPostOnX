@@ -2222,6 +2222,11 @@ class WorkflowStore {
    * protection is only meaningful while the originating operation could still
    * be retried, so aged rows are pure overhead.
    *
+   * SAFETY: while ANY dispatch is unresolved, that operation is by definition
+   * still pending and its replay records must survive — pruning them would let
+   * a legitimate retry re-execute instead of replaying. Pruning therefore only
+   * runs when nothing is in flight.
+   *
    * Durable state, events, and attempts are untouched — only the replay cache.
    */
   pruneIdempotency({ olderThanMs = 7 * 86_400_000, now = Date.now() } = {}) {
@@ -2231,6 +2236,15 @@ class WorkflowStore {
     }
     const cutoffMs = now - olderThanMs;
     return this._immediate(() => {
+      const unresolved = this.db.prepare(`
+        SELECT COUNT(*) AS total FROM workflow_items
+        WHERE state IN ('dispatch_started', 'ambiguous', 'leased')
+          AND (state = 'leased' OR reconciliation_closed_at_ms IS NULL)
+      `).get().total;
+      if (unresolved > 0) {
+        return { deleted: 0, cutoffMs, skippedReason: 'unresolved_operations_in_flight', unresolved };
+      }
+
       // The retention trigger reads this cutoff, so deletion stays impossible
       // for anything newer even if some other code path attempts it.
       this.db.prepare(`

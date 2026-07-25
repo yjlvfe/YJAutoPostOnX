@@ -100,10 +100,30 @@ function resolveBoundaryGuardFailure({ store, item, error, backoffMs }) {
     };
   }
 
-  // A lost/expired lease means someone else may now own the item. Do not force
-  // a transition we cannot prove we still own; leave reclamation to the store.
+  // A lost/expired lease means we can no longer prove ownership, so we must not
+  // force a transition with a token that may be stale. But the item must never
+  // be left invisible in 'leased': reclaim it immediately (expired leases are
+  // pre-boundary by definition, so this cannot duplicate a post). If another
+  // worker legitimately owns it now, the reclaim is a no-op and they proceed.
   if (code === 'LEASE_EXPIRED' || code === 'LEASE_CONFLICT') {
-    return { status: 'lease_lost_pre_dispatch', state: null, item: null, error };
+    let reclaimed = null;
+    try {
+      reclaimed = store.reclaimExpiredLeases({
+        requestId: requestId('reclaim-lost-lease'),
+        graceMs: 0,
+      });
+    } catch (reclaimError) {
+      // Reclamation is best-effort here; startup reconciliation is the backstop.
+      reclaimed = { reclaimedIds: [], error: serializeError(reclaimError) };
+    }
+    const current = store.getItem(item.id);
+    return {
+      status: 'lease_lost_pre_dispatch',
+      state: current ? current.state : null,
+      item: current,
+      reclaimedIds: reclaimed ? reclaimed.reclaimedIds : [],
+      error,
+    };
   }
 
   // Unknown guard failure: back off rather than spin, but stay recoverable.
