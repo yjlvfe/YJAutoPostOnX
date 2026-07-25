@@ -296,22 +296,27 @@ async function start(config, onStatus) {
     // so the next run retries it at the head on its own. deferred-posts.json is
     // now only an attempt COUNTER (see the network branch below) — never a
     // re-injection source.
-    const interrupted = await queueManager.recoverInterruptedPosts(profileName);
-    if (interrupted.length > 0) {
+    // Durable session: the queue, recovery, and every state transition now live
+    // in the SQLite workflow store. Startup reconciliation already ran when the
+    // store opened, so anything left mid-flight by a previous process has been
+    // resolved into a durable state before we claim anything.
+    session = await DurableSession.open(profileName);
+    const unresolvedAtStart = session.unresolvedCount();
+    if (unresolvedAtStart > 0) {
       onStatus({
         type: 'warning',
-        message: `⚠️ تم عزل ${interrupted.length} منشور من تشغيل منقطع داخل "بانتظار التحقق" لمنع النشر المكرر.`,
+        message: `⚠️ يوجد ${unresolvedAtStart} منشور غير محسوم من تشغيل سابق — النشر متوقف حتى تراجعها في قائمة الاسترداد.`,
       });
     }
-    queue = await queueManager.getQueue();
-    const queueTotalAtStart = queue.length;
+    const queueTotalAtStart = session.queuedCount();
     onStatus({
       type: 'info',
       message: `Starting automation — البروفايل \"${profileName}\" يبدأ من المنشور #1 (${queueTotalAtStart} في الطابور)`,
-      queueCount: queue.length,
+      queueCount: queueTotalAtStart,
       queueStart: 1,
       queueTotal: queueTotalAtStart,
     });
+
     // 📍 How many posts this profile has worked through this run — drives the
     // live "المنشور رقم X من Y" message. Tracked separately from postedCount,
     // which counts attempts rather than queue slots.
@@ -334,21 +339,30 @@ async function start(config, onStatus) {
       throw new Error("AUTH_REQUIRED: Please log in first");
     }
 
-    while (queue.length > 0 && postedCount < maxPosts) {
+    // The worker no longer holds a publishable snapshot: every iteration claims
+    // the next post from the live store. A snapshot is exactly how a deleted or
+    // already-published post used to go out anyway.
+    while (postedCount < maxPosts) {
       if (!global.isRunning) break;
 
-      const rawItem = queue[0];
-      // The post EXACTLY as stored in queue.json. Every queue operation
-      // (consumePost / addDeferred / addDeadLetter / addToPending) must key off
-      // this — never off `postText` below, which spintax may have rewritten.
-      const itemText = typeof rawItem === 'string' ? rawItem : rawItem.text;
+      const claim = session.claimNext({ leaseMs: 180_000 });
+      if (!claim) break; // queue empty
+      if (claim.blocked) {
+        onStatus({
+          type: 'error',
+          message: '⛔ يوجد منشور سابق غير محسوم — لن يُنشر أي منشور جديد حتى تؤكد حالته في قائمة الاسترداد.',
+        });
+        break;
+      }
+
+      const itemText = claim.text;
       const rawText = parseSpintax(itemText);
 
       // 🔓 DECOUPLED: queue posts are published EXACTLY as stored. Referral
       // links (if any) were already baked in by the studio at generation
       // time — publishing never inspects, rewrites, or rejects post links.
       const postText = rawText;
-      const mediaPath = typeof rawItem === 'object' ? rawItem.media_path : null;
+      const mediaPath = claim.mediaPath;
       postedCount++;
       const postStartTime = Date.now();
       report.logEvent({ level: 'info', event: 'POST_START', postId: `post-${postedCount}`, attempt: 1, message: `Processing post ${postedCount}` });
@@ -364,7 +378,7 @@ async function start(config, onStatus) {
       onStatus({
         type: 'action',
         message: progressMessage,
-        queueCount: queue.length,
+        queueCount: session.queuedCount(),
         stats: liveStats()
       });
 
