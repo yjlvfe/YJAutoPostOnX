@@ -104,9 +104,37 @@ async function dispatchNext({
   }
 
   let prepared;
+  // Keep the lease alive while preparation runs. Losing it at the boundary
+  // would strand the item, and the global recovery gate would then wedge the
+  // whole queue until the user restarts.
+  // Renew well inside the window (a third of it) so a slow tick still lands
+  // before expiry. A fixed floor would be coarser than short leases.
+  const renewEveryMs = Math.max(25, Math.floor(leaseMs / 3));
+  let renewTimer = null;
+  const startRenewals = () => {
+    if (typeof store.renewLease !== 'function') return;
+    renewTimer = setInterval(() => {
+      try {
+        store.renewLease({ id: item.id, leaseToken: item.leaseToken, leaseMs });
+      } catch {
+        // Losing the renewal race is not fatal here: the boundary re-checks
+        // ownership and will refuse if the lease is genuinely gone.
+      }
+    }, renewEveryMs);
+    if (typeof renewTimer.unref === 'function') renewTimer.unref();
+  };
+  const stopRenewals = () => {
+    if (renewTimer !== null) {
+      clearInterval(renewTimer);
+      renewTimer = null;
+    }
+  };
+
   try {
+    startRenewals();
     prepared = await prepare(item);
   } catch (error) {
+    stopRenewals();
     // Snapshot cancellation once: calling isCancelled() twice can disagree.
     const cancelled = isCancelled();
     if (cancelled) {
@@ -141,6 +169,7 @@ async function dispatchNext({
     });
     return { ...deferred, status: 'retryable_error_pre_dispatch', error, item: deferred };
   }
+  stopRenewals();
 
   if (isCancelled()) {
     const released = store.releasePreDispatch({

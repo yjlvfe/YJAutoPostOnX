@@ -1116,6 +1116,96 @@ class WorkflowStore {
     `).get().total;
   }
 
+  /**
+   * Extend a lease that is still legitimately owned.
+   *
+   * Preparation (AI generation, media work) can outlast the initial window. The
+   * alternative — losing the lease at the boundary — strands the item, and with
+   * the global recovery gate a single stranded item wedges the whole queue.
+   */
+  renewLease({ id, leaseToken, leaseMs = 60_000 }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
+    if (!Number.isInteger(leaseMs) || leaseMs <= 0) {
+      throw new TypeError('leaseMs must be a positive integer');
+    }
+
+    return this._immediate(() => {
+      const row = this._getItemRow(normalizedId);
+      if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+      if (row.state !== 'leased') conflict('INVALID_STATE', `Cannot renew a lease from ${row.state}`);
+      if (row.lease_token !== normalizedLeaseToken) {
+        conflict('LEASE_CONFLICT', 'The lease token does not own this item');
+      }
+      // The owning run must still be alive, otherwise this is a zombie worker.
+      const run = this.db.prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(row.lease_owner_run_id);
+      if (!run || run.status !== 'active') {
+        conflict('RUN_NOT_ACTIVE', 'The owning run is no longer active; the lease cannot be renewed');
+      }
+
+      const now = Date.now();
+      const expiresAt = now + leaseMs;
+      const result = this.db.prepare(`
+        UPDATE workflow_items
+        SET lease_expires_at_ms = ?, updated_at_ms = ?
+        WHERE id = ? AND state = 'leased' AND lease_token = ?
+      `).run(expiresAt, now, normalizedId, normalizedLeaseToken);
+      if (result.changes !== 1) conflict('LEASE_CONFLICT', 'The lease changed before it could be renewed');
+      this.db.prepare(`
+        UPDATE workflow_runs SET heartbeat_at_ms = ? WHERE id = ? AND status = 'active'
+      `).run(now, row.lease_owner_run_id);
+      return { id: normalizedId, leaseToken: normalizedLeaseToken, leaseExpiresAtMs: expiresAt };
+    });
+  }
+
+  /**
+   * Return expired pre-dispatch leases whose owning run is no longer active.
+   *
+   * This is strictly pre-boundary: a 'leased' item never reached the transport,
+   * so requeueing it cannot duplicate a post. Live leases under active runs are
+   * never touched.
+   */
+  reclaimExpiredLeases({ requestId }) {
+    return this._mutate('reclaimExpiredLeases', requestId, {}, () => {
+      const now = Date.now();
+      const rows = this.db.prepare(`
+        SELECT i.* FROM workflow_items i
+        LEFT JOIN workflow_runs r ON r.id = i.lease_owner_run_id
+        WHERE i.state = 'leased'
+          AND i.lease_expires_at_ms <= ?
+          AND (r.id IS NULL OR r.status <> 'active')
+        ORDER BY i.updated_at_ms ASC, i.id ASC
+      `).all(now);
+
+      const reclaimedIds = [];
+      for (const row of rows) {
+        const queueSeq = this._nextQueueSequence();
+        const nextRevision = row.revision + 1;
+        const result = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'queued', queue_seq = ?, available_at_ms = ?,
+              lease_token = NULL, lease_owner_run_id = NULL, lease_profile_id = NULL,
+              lease_expires_at_ms = NULL, reason = 'reclaimed_expired_lease',
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'leased' AND revision = ?
+        `).run(queueSeq, now, nextRevision, now, row.id, row.revision);
+        if (result.changes !== 1) continue;
+        this._recordEvent(
+          row.id,
+          'expired_lease_reclaimed',
+          'leased',
+          'queued',
+          nextRevision,
+          { queueSeq, previousRunId: row.lease_owner_run_id },
+          now,
+        );
+        reclaimedIds.push(row.id);
+      }
+      return { reclaimedIds };
+    });
+  }
+
   leaseNext({ profileId, runId, leaseMs = 60_000, allowUnresolvedRecovery = false }) {
     const normalizedProfileId = assertNonEmptyString(profileId, 'profileId');
     const normalizedRunId = assertNonEmptyString(runId, 'runId');
@@ -1871,6 +1961,7 @@ class WorkflowStore {
       }
 
       const ambiguousIds = [];
+      const quarantinedIds = [];
       const dispatchRows = this.db.prepare(`
         SELECT * FROM workflow_items WHERE state = 'dispatch_started' ORDER BY updated_at_ms, id
       `).all();
@@ -1878,7 +1969,43 @@ class WorkflowStore {
         const attempt = this.db.prepare(`
           SELECT * FROM dispatch_attempts WHERE id = ? AND item_id = ? AND phase = 'started'
         `).get(row.current_attempt_id, row.id);
-        if (!attempt) conflict('INVARIANT_VIOLATION', 'dispatch_started item has no started attempt', { id: row.id });
+
+        if (!attempt) {
+          // A row whose attempt is missing/desynchronized must NOT abort recovery
+          // of every other item — that would make the app unstartable. Quarantine
+          // it conservatively as ambiguous: it may have been published, so it is
+          // never auto-eligible and always requires a human decision.
+          const nextRevision = row.revision + 1;
+          const update = this.db.prepare(`
+            UPDATE workflow_items
+            SET state = 'ambiguous', reason = 'startup_quarantined_inconsistent_attempt',
+                error_json = ?, revision = ?, updated_at_ms = ?
+            WHERE id = ? AND state = 'dispatch_started' AND revision = ?
+          `).run(
+            canonicalStringify({
+              message: 'dispatch_started item has no matching started attempt',
+              currentAttemptId: row.current_attempt_id,
+            }),
+            nextRevision,
+            now,
+            row.id,
+            row.revision,
+          );
+          if (update.changes === 1) {
+            this._recordEvent(
+              row.id,
+              'startup_quarantined',
+              'dispatch_started',
+              'ambiguous',
+              nextRevision,
+              { currentAttemptId: row.current_attempt_id },
+              now,
+            );
+            quarantinedIds.push(row.id);
+          }
+          continue;
+        }
+
         this.db.prepare(`
           UPDATE dispatch_attempts
           SET phase = 'ambiguous', reason = 'startup_recovered_after_dispatch_boundary',
@@ -1911,7 +2038,7 @@ class WorkflowStore {
         );
         ambiguousIds.push(row.id);
       }
-      return { requeuedLeaseIds, ambiguousIds };
+      return { requeuedLeaseIds, ambiguousIds, quarantinedIds };
     });
   }
 
