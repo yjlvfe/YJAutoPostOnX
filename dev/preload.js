@@ -38,8 +38,15 @@ contextBridge.exposeInMainWorld('api', {
   // publishing consumes a post. See queueManager.bulkDeleteByText.
   bulkDelete: (texts, profileName) => ipcRenderer.invoke('bulk-delete', texts, profileName),
   getRecoveryItems: (profileName) => ipcRenderer.invoke('get-recovery-items', profileName),
-  requeueRecoveryItem: (profileName, kind, text) => ipcRenderer.invoke('requeue-recovery-item', profileName, kind, text),
+  // `options.confirmedNotPublished` is REQUIRED to requeue a 'pending' item:
+  // it crossed the irreversible boundary, so requeueing it without the user
+  // verifying on X would publish it twice.
+  requeueRecoveryItem: (profileName, kind, text, options) =>
+    ipcRenderer.invoke('requeue-recovery-item', profileName, kind, text, options),
+  confirmRecoveryPublished: (text, proof) =>
+    ipcRenderer.invoke('confirm-recovery-published', text, proof),
   discardRecoveryItem: (profileName, kind, text) => ipcRenderer.invoke('discard-recovery-item', profileName, kind, text),
+  workflowHealth: () => ipcRenderer.invoke('workflow-health'),
 
   // Automation control
   startPosting: (config) => ipcRenderer.invoke('start-posting', config),

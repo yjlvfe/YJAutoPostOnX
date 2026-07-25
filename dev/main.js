@@ -335,6 +335,10 @@ ipcMain.handle('detect-provider', async (event, config) => {
 const xPoster = require('./automation/xPoster');
 const { escCsv } = require('./automation/xPoster');
 const queueManager = require('./automation/queueManager');
+// Durable publish workflow (SQLite + WAL). Replaces the split JSON queue for
+// every queue/recovery operation; queueManager is kept only for legacy paths
+// that have not been cut over yet (per-profile data dirs).
+const durableQueue = require('./automation/durableQueue');
 const { SemanticIndex } = require('./automation/semanticIndex');
 const { openProfileForLogin } = require('./automation/browserManager');
 const rateLimitStore = require('./automation/rateLimitStore');
@@ -357,7 +361,7 @@ ipcMain.handle('get-queue', async (event, profileName) => {
   // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
   try {
     // Shared queue — profileName ignored, returns full shared queue
-    return await queueManager.getQueue();
+    return await durableQueue.getQueue();
   } catch (e) {
     console.error('get-queue IPC error:', e?.message || e);
     return [];
@@ -390,7 +394,7 @@ ipcMain.handle('add-posts', async (event, newPosts, profileName) => {
       }
     }
 
-    const result = await queueManager.addPosts(sanitizedPosts, profileName);
+    const result = await durableQueue.addPosts(sanitizedPosts, profileName);
     return {
       success: true,
       successfullyAdded: result.added,
@@ -411,7 +415,10 @@ ipcMain.handle('bulk-delete', async (event, texts, profileName) => {
   // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
   try {
     if (!Array.isArray(texts)) return null;
-    return await queueManager.bulkDeleteByText(texts);
+    // Deletion is authoritative: an item already leased or past the dispatch
+    // boundary is reported as blocked rather than silently claimed as deleted,
+    // because that post may still go out.
+    return await durableQueue.bulkDeleteByText(texts);
   } catch (e) {
     console.error('bulk-delete IPC error:', e?.message || e);
     return null;
@@ -419,21 +426,43 @@ ipcMain.handle('bulk-delete', async (event, texts, profileName) => {
 });
 
 ipcMain.handle('get-recovery-items', async (_event, profileName) => {
-  try { return { success: true, ...(await queueManager.getRecoveryItems(profileName || 'Default')) }; }
+  try { return { success: true, ...(await durableQueue.getRecoveryItems(profileName || 'Default')) }; }
   catch (e) { return { success: false, error: e.message, pending: [], deadLetters: [] }; }
 });
 
-ipcMain.handle('requeue-recovery-item', async (_event, profileName, kind, text) => {
+ipcMain.handle('requeue-recovery-item', async (_event, profileName, kind, text, options) => {
   try {
     if (!['pending', 'dead'].includes(kind) || typeof text !== 'string' || !text.trim()) throw new Error('طلب استعادة غير صالح');
-    return { success: await queueManager.requeueRecovery(profileName || 'Default', kind, text) };
-  } catch (e) { return { success: false, error: e.message }; }
+    // A 'pending' item crossed the irreversible boundary with an unknown
+    // outcome. Requeueing it without the user confirming it was NOT published
+    // would post it twice, so the store demands explicit confirmation.
+    return {
+      success: await durableQueue.requeueRecovery(profileName || 'Default', kind, text, options || {}),
+    };
+  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
+});
+
+ipcMain.handle('confirm-recovery-published', async (_event, text, proof) => {
+  try {
+    if (typeof text !== 'string' || !text.trim()) throw new Error('طلب تأكيد غير صالح');
+    return { success: await durableQueue.confirmRecoveryPublished(text, proof || {}) };
+  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
 });
 
 ipcMain.handle('discard-recovery-item', async (_event, profileName, kind, text) => {
   try {
     if (!['pending', 'dead'].includes(kind) || typeof text !== 'string' || !text.trim()) throw new Error('طلب حذف غير صالح');
-    return { success: await queueManager.discardRecovery(profileName || 'Default', kind, text) };
+    return { success: await durableQueue.discardRecovery(profileName || 'Default', kind, text) };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('workflow-health', async () => {
+  try {
+    const [integrity, unresolved] = await Promise.all([
+      durableQueue.integrityCheck(),
+      durableQueue.countUnresolved(),
+    ]);
+    return { success: true, integrity, unresolved };
   } catch (e) { return { success: false, error: e.message }; }
 });
 
@@ -695,7 +724,7 @@ ipcMain.handle('rename-profile', async (event, oldName, newName) => {
 // Export Queue Handler
 ipcMain.handle('export-queue', async (event, exportPath, profileName) => {
   try {
-    const queue = await queueManager.getQueue(profileName);
+    const queue = await durableQueue.getQueue();
     const csvLines = queue.map(item => {
       const text = typeof item === 'string' ? item : item.text;
       const media = typeof item === 'object' ? (item.media_path || '') : '';
@@ -1365,10 +1394,10 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
     // queue alone is no longer the full history — without this archive the
     // corpus would shrink as posts publish and the studio could regenerate a
     // tweet already on X. This is what keeps "no time window" literally true.
-    for (const t of await queueManager.getPublishedTexts()) semIndex.add(t);
+    for (const t of await durableQueue.getPublishedTexts()) semIndex.add(t);
   } catch { /* archive unreadable — dedup still covers the queue below */ }
   try {
-    const diskQueue = await queueManager.getQueue();
+    const diskQueue = await durableQueue.getQueue();
     for (const item of (Array.isArray(diskQueue) ? diskQueue : [])) {
       const t = item && typeof item === 'object' ? item.text : item;
       if (typeof t === 'string' && t.trim()) semIndex.add(t);

@@ -212,6 +212,10 @@ function schemaSql() {
       current_attempt_id TEXT REFERENCES dispatch_attempts(id),
       last_profile_id TEXT REFERENCES profiles(id),
       pre_dispatch_failure_count INTEGER NOT NULL DEFAULT 0 CHECK (pre_dispatch_failure_count >= 0),
+      -- Queue position held before the current lease, so releasing a claim
+      -- (Stop, guard refusal) restores the user's ordering instead of sending
+      -- an untouched post to the back of the queue.
+      queue_seq_before_lease INTEGER,
       reason TEXT,
       error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json)),
       resolution_json TEXT CHECK (resolution_json IS NULL OR json_valid(resolution_json)),
@@ -1337,6 +1341,7 @@ class WorkflowStore {
         UPDATE workflow_items
         SET state = 'leased',
             queue_seq = NULL,
+            queue_seq_before_lease = ?,
             available_at_ms = NULL,
             lease_token = ?,
             lease_owner_run_id = ?,
@@ -1351,6 +1356,7 @@ class WorkflowStore {
             updated_at_ms = ?
         WHERE id = ? AND state = ? AND revision = ?
       `).run(
+        row.queue_seq,
         leaseToken,
         normalizedRunId,
         normalizedProfileId,
@@ -1436,18 +1442,24 @@ class WorkflowStore {
         if (row.state !== 'leased') conflict('INVALID_STATE', `Cannot release item from ${row.state}`);
         if (row.lease_token !== normalizedLeaseToken) conflict('LEASE_CONFLICT', 'The lease token does not own this item');
         const now = Date.now();
-        const queueSeq = this._nextQueueSequence();
+        // An operator action (Stop, guard refusal) must not reorder the user's
+        // queue: the post never went out, so it keeps its original position.
+        // A genuine pre-dispatch failure goes to the back instead, so a bad
+        // post cannot block the head of the queue run after run.
+        const queueSeq = countAsFailure ? this._nextQueueSequence() : row.queue_seq_before_lease;
+        const effectiveSeq = Number.isInteger(queueSeq) ? queueSeq : this._nextQueueSequence();
         const nextRevision = row.revision + 1;
         const result = this.db.prepare(`
           UPDATE workflow_items
           SET state = 'queued', queue_seq = ?, available_at_ms = ?,
+              queue_seq_before_lease = NULL,
               lease_token = NULL, lease_owner_run_id = NULL, lease_profile_id = NULL,
               lease_expires_at_ms = NULL, reason = ?, error_json = ?,
               pre_dispatch_failure_count = pre_dispatch_failure_count + ?,
               revision = ?, updated_at_ms = ?
           WHERE id = ? AND state = 'leased' AND revision = ? AND lease_token = ?
         `).run(
-          queueSeq,
+          effectiveSeq,
           now,
           normalizedReason,
           optionalJson(error),
