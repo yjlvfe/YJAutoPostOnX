@@ -8,6 +8,9 @@ const Database = require('better-sqlite3');
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_WAL_AUTOCHECKPOINT_PAGES = 1_000;
+// After this many pre-dispatch failures an item is considered poison and is
+// retired to 'dead' instead of cycling through the queue forever.
+const DEFAULT_MAX_PRE_DISPATCH_FAILURES = 5;
 const ITEM_STATES = new Set([
   'queued',
   'leased',
@@ -441,10 +444,19 @@ function schemaSql() {
     BEGIN
       SELECT RAISE(ABORT, 'api request records are immutable');
     END;
-    CREATE TRIGGER IF NOT EXISTS api_requests_immutable_delete
+    -- Idempotency records are immutable, but not eternal: replay only matters
+    -- while the originating operation could still be retried. Deleting an aged
+    -- record is safe and is the only defence against unbounded DB growth
+    -- (measured at >50% of total size). Recent records stay protected.
+    CREATE TRIGGER IF NOT EXISTS api_requests_retention_delete
     BEFORE DELETE ON api_requests
+    WHEN OLD.created_at_ms > COALESCE(
+      (SELECT CAST(json_extract(value_json, '$.cutoffMs') AS INTEGER)
+       FROM workflow_metadata WHERE key = 'api_requests_prune_cutoff'),
+      9223372036854775807
+    )
     BEGIN
-      SELECT RAISE(ABORT, 'api request records are immutable');
+      SELECT RAISE(ABORT, 'api request records are immutable until their retention cutoff');
     END;
     CREATE TRIGGER IF NOT EXISTS media_blobs_immutable_identity
     BEFORE UPDATE ON media_blobs
@@ -478,15 +490,20 @@ class WorkflowStore {
     const rootDir = path.resolve(options.rootDir || defaultRootDir());
     const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
     const walAutocheckpointPages = options.walAutocheckpointPages ?? DEFAULT_WAL_AUTOCHECKPOINT_PAGES;
+    const maxPreDispatchFailures = options.maxPreDispatchFailures ?? DEFAULT_MAX_PRE_DISPATCH_FAILURES;
     if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
       throw new TypeError('busyTimeoutMs must be a non-negative integer');
     }
     if (!Number.isInteger(walAutocheckpointPages) || walAutocheckpointPages <= 0) {
       throw new TypeError('walAutocheckpointPages must be a positive integer');
     }
+    if (!Number.isInteger(maxPreDispatchFailures) || maxPreDispatchFailures <= 0) {
+      throw new TypeError('maxPreDispatchFailures must be a positive integer');
+    }
     fs.mkdirSync(rootDir, { recursive: true });
 
     this.rootDir = rootDir;
+    this.maxPreDispatchFailures = maxPreDispatchFailures;
     this.mediaDir = path.join(rootDir, 'media');
     this.mediaTempDir = path.join(this.mediaDir, '.tmp');
     fs.mkdirSync(this.mediaTempDir, { recursive: true });
@@ -660,11 +677,14 @@ class WorkflowStore {
         status: 'ready',
       };
     } finally {
-      if (sourceFd !== undefined) fs.closeSync(sourceFd);
-      if (tempFd !== undefined) fs.closeSync(tempFd);
-      try { fs.unlinkSync(tempPath); } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
+      // Cleanup must never replace the in-flight exception. A throw here would
+      // surface e.g. an EPERM unlink instead of the real media-corruption error
+      // (common on Windows with antivirus/backup software holding the file).
+      // Each step is independent so one failure cannot skip the others.
+      try { if (sourceFd !== undefined) fs.closeSync(sourceFd); } catch { /* best effort */ }
+      try { if (tempFd !== undefined) fs.closeSync(tempFd); } catch { /* best effort */ }
+      // A leftover .part file is swept later by sweepOrphanMedia().
+      try { fs.unlinkSync(tempPath); } catch { /* best effort */ }
     }
   }
 
@@ -1160,23 +1180,30 @@ class WorkflowStore {
   }
 
   /**
-   * Return expired pre-dispatch leases whose owning run is no longer active.
+   * Return expired pre-dispatch leases to the queue.
    *
    * This is strictly pre-boundary: a 'leased' item never reached the transport,
-   * so requeueing it cannot duplicate a post. Live leases under active runs are
-   * never touched.
+   * so requeueing it cannot duplicate a post. A grace period protects leases
+   * whose renewal is merely running late.
    */
-  reclaimExpiredLeases({ requestId }) {
-    return this._mutate('reclaimExpiredLeases', requestId, {}, () => {
+  reclaimExpiredLeases({ requestId, graceMs = 30_000 }) {
+    if (!Number.isInteger(graceMs) || graceMs < 0) {
+      throw new TypeError('graceMs must be a non-negative integer');
+    }
+    return this._mutate('reclaimExpiredLeases', requestId, { graceMs }, () => {
       const now = Date.now();
+      // An EXPIRED lease is pre-boundary by definition: state='leased' means
+      // beginDispatch never committed, so requeueing cannot duplicate a post.
+      // Run liveness is therefore irrelevant — the common real case is a live
+      // run whose worker died at the boundary or blocked past the window. A
+      // grace period keeps a merely-slow renewal from being stolen.
       const rows = this.db.prepare(`
-        SELECT i.* FROM workflow_items i
-        LEFT JOIN workflow_runs r ON r.id = i.lease_owner_run_id
-        WHERE i.state = 'leased'
-          AND i.lease_expires_at_ms <= ?
-          AND (r.id IS NULL OR r.status <> 'active')
-        ORDER BY i.updated_at_ms ASC, i.id ASC
-      `).all(now);
+        SELECT * FROM workflow_items
+        WHERE state = 'leased'
+          AND lease_expires_at_ms IS NOT NULL
+          AND lease_expires_at_ms <= ?
+        ORDER BY updated_at_ms ASC, id ASC
+      `).all(now - graceMs);
 
       const reclaimedIds = [];
       for (const row of rows) {
@@ -1309,6 +1336,41 @@ class WorkflowStore {
     });
   }
 
+  /**
+   * Retire an item that has exhausted its pre-dispatch failure budget.
+   *
+   * Called after a failure is recorded, inside the same transaction. This is
+   * strictly pre-boundary, so retiring can never hide a published post — it
+   * only stops a poison item from cycling through the queue forever.
+   */
+  _retireIfExhausted(itemId, now) {
+    const row = this._getItemRow(itemId);
+    if (!row) return null;
+    if (row.state !== 'queued' && row.state !== 'deferred') return null;
+    if (row.pre_dispatch_failure_count < this.maxPreDispatchFailures) return null;
+
+    const nextRevision = row.revision + 1;
+    const update = this.db.prepare(`
+      UPDATE workflow_items
+      SET state = 'dead', queue_seq = NULL, available_at_ms = NULL,
+          reason = 'exhausted_pre_dispatch_attempts',
+          revision = ?, updated_at_ms = ?
+      WHERE id = ? AND state = ? AND revision = ?
+    `).run(nextRevision, now, itemId, row.state, row.revision);
+    if (update.changes !== 1) return null;
+
+    this._recordEvent(
+      itemId,
+      'retired_exhausted',
+      row.state,
+      'dead',
+      nextRevision,
+      { failureCount: row.pre_dispatch_failure_count, limit: this.maxPreDispatchFailures },
+      now,
+    );
+    return this._rowToItem(this._getItemRow(itemId));
+  }
+
   releasePreDispatch({ id, leaseToken, reason, error = null, countAsFailure = true, requestId }) {
     const normalizedId = assertNonEmptyString(id, 'id');
     const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
@@ -1362,7 +1424,9 @@ class WorkflowStore {
           { queueSeq, reason: normalizedReason, error, countAsFailure },
           now,
         );
-        return this._rowToItem(this._getItemRow(normalizedId));
+        // A failure budget is only meaningful if it is enforced.
+        const retired = countAsFailure ? this._retireIfExhausted(normalizedId, now) : null;
+        return retired || this._rowToItem(this._getItemRow(normalizedId));
       },
     );
   }
@@ -1425,7 +1489,8 @@ class WorkflowStore {
           { queueSeq, availableAtMs: effectiveAvailableAt, reason: normalizedReason, error },
           now,
         );
-        return this._rowToItem(this._getItemRow(normalizedId));
+        const retired = this._retireIfExhausted(normalizedId, now);
+        return retired || this._rowToItem(this._getItemRow(normalizedId));
       },
     );
   }
@@ -1475,10 +1540,13 @@ class WorkflowStore {
     );
   }
 
-  beginDispatch({ id, leaseToken, renderedText, requestId }) {
+  beginDispatch({ id, leaseToken, renderedText, requestId, allowUnresolvedRecovery = false }) {
     const normalizedId = assertNonEmptyString(id, 'id');
     const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
     if (typeof renderedText !== 'string') throw new TypeError('renderedText must be a string');
+    if (typeof allowUnresolvedRecovery !== 'boolean') {
+      throw new TypeError('allowUnresolvedRecovery must be a boolean');
+    }
 
     return this._mutate(
       'beginDispatch',
@@ -1497,6 +1565,28 @@ class WorkflowStore {
         const now = Date.now();
         if (row.lease_expires_at_ms <= now) {
           conflict('LEASE_EXPIRED', 'The lease expired before dispatch could begin');
+        }
+
+        // Re-check the GLOBAL recovery gate at the boundary itself.
+        //
+        // Gating only leaseNext is insufficient: a worker that leased BEFORE an
+        // ambiguity appeared is already holding a valid lease and would sail
+        // across the irreversible boundary. Excluding this item's own row keeps
+        // a legitimate retry of the same item possible.
+        const unresolvedOther = allowUnresolvedRecovery ? null : this.db.prepare(`
+          SELECT id FROM workflow_items
+          WHERE state IN ('dispatch_started', 'ambiguous')
+            AND reconciliation_closed_at_ms IS NULL
+            AND id <> ?
+          ORDER BY updated_at_ms ASC
+          LIMIT 1
+        `).get(normalizedId);
+        if (unresolvedOther) {
+          conflict(
+            'RECOVERY_REQUIRED',
+            'An unresolved dispatch must be reconciled before any further publishing',
+            { unresolvedItemId: unresolvedOther.id },
+          );
         }
 
         // The owning run and profile must still be alive AT the boundary. A Stop
@@ -1651,6 +1741,19 @@ class WorkflowStore {
     const normalizedAttemptId = assertNonEmptyString(attemptId, 'attemptId');
     if (externalId !== null && typeof externalId !== 'string') throw new TypeError('externalId must be a string or null');
     if (externalUrl !== null && typeof externalUrl !== 'string') throw new TypeError('externalUrl must be a string or null');
+    // Defense in depth: publishing is an irreversible tombstone, so the store
+    // itself refuses it without authoritative proof — not only the orchestrator.
+    // Manual recovery paths call this directly.
+    const trimmedId = typeof externalId === 'string' ? externalId.trim() : '';
+    const trimmedUrl = typeof externalUrl === 'string' ? externalUrl.trim() : '';
+    if (trimmedId.length === 0 && trimmedUrl.length === 0) {
+      conflict(
+        'PROOF_REQUIRED',
+        'Marking an item published requires a non-empty externalId or externalUrl',
+      );
+    }
+    externalId = trimmedId.length > 0 ? trimmedId : null;
+    externalUrl = trimmedUrl.length > 0 ? trimmedUrl : null;
     const evidenceJson = optionalJson(evidence);
 
     return this._mutate(
@@ -2042,6 +2145,106 @@ class WorkflowStore {
     });
   }
 
+  /**
+   * Delete managed media files that no `media_blobs` row references.
+   *
+   * _stageMedia() writes and fsyncs the blob BEFORE the enqueue transaction, so
+   * a failed transaction (SQLITE_BUSY, crash, I/O error) leaves bytes on disk
+   * with nothing pointing at them. Without a sweep these accumulate forever.
+   *
+   * The grace period is essential: a concurrent enqueue may have just written
+   * its blob and not yet committed, and deleting it would corrupt that item.
+   */
+  sweepOrphanMedia({ graceMs = 3_600_000, now = Date.now() } = {}) {
+    this._assertOpen();
+    if (!Number.isInteger(graceMs) || graceMs < 0) {
+      throw new TypeError('graceMs must be a non-negative integer');
+    }
+    const { orphanedMediaFiles, orphanedTempFiles } = this._findOrphanMedia();
+    const cutoff = now - graceMs;
+    const deleted = [];
+    let reclaimedBytes = 0;
+
+    for (const orphan of [...orphanedMediaFiles, ...orphanedTempFiles]) {
+      if (orphan.modifiedAtMs > cutoff) continue;
+      try {
+        fs.unlinkSync(orphan.path);
+        deleted.push(orphan.path);
+        reclaimedBytes += orphan.byteSize;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+    if (deleted.length > 0) fsyncDirectory(this.mediaDir);
+    return { deleted, reclaimedBytes };
+  }
+
+  _findOrphanMedia() {
+    const referenced = new Set(
+      this.db.prepare('SELECT relative_path FROM media_blobs').all().map((row) => row.relative_path),
+    );
+    const orphanedMediaFiles = [];
+    const orphanedTempFiles = [];
+
+    const scan = (directory, bucket, isTemp) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === 'ENOENT') return;
+        throw error;
+      }
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const fullPath = path.join(directory, entry.name);
+        if (!isTemp && referenced.has(entry.name)) continue;
+        let stat;
+        try {
+          stat = fs.statSync(fullPath);
+        } catch (error) {
+          if (error.code === 'ENOENT') continue;
+          throw error;
+        }
+        bucket.push({ path: fullPath, byteSize: stat.size, modifiedAtMs: stat.mtimeMs });
+      }
+    };
+
+    scan(this.mediaDir, orphanedMediaFiles, false);
+    scan(this.mediaTempDir, orphanedTempFiles, true);
+    return { orphanedMediaFiles, orphanedTempFiles };
+  }
+
+  /**
+   * Delete idempotency records older than the retention window.
+   *
+   * `api_requests` stores a full copy of every response and was measured at
+   * ~53% of total database size (~102MB projected at 10k posts). Replay
+   * protection is only meaningful while the originating operation could still
+   * be retried, so aged rows are pure overhead.
+   *
+   * Durable state, events, and attempts are untouched — only the replay cache.
+   */
+  pruneIdempotency({ olderThanMs = 7 * 86_400_000, now = Date.now() } = {}) {
+    this._assertOpen();
+    if (!Number.isInteger(olderThanMs) || olderThanMs < 0) {
+      throw new TypeError('olderThanMs must be a non-negative integer');
+    }
+    const cutoffMs = now - olderThanMs;
+    return this._immediate(() => {
+      // The retention trigger reads this cutoff, so deletion stays impossible
+      // for anything newer even if some other code path attempts it.
+      this.db.prepare(`
+        INSERT INTO workflow_metadata(key, value_json, updated_at_ms)
+        VALUES ('api_requests_prune_cutoff', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                       updated_at_ms = excluded.updated_at_ms
+      `).run(canonicalStringify({ cutoffMs }), now);
+      const result = this.db.prepare('DELETE FROM api_requests WHERE created_at_ms <= ?').run(cutoffMs);
+      this.db.prepare(`DELETE FROM workflow_metadata WHERE key = 'api_requests_prune_cutoff'`).run();
+      return { deleted: result.changes, cutoffMs };
+    });
+  }
+
   integrityCheck({ verifyMedia = true } = {}) {
     this._assertOpen();
     const quickCheck = this.db.pragma('quick_check', { simple: true });
@@ -2078,11 +2281,36 @@ class WorkflowStore {
         }
       }
     }
+    // Item/attempt split-brain: the per-table triggers validate transitions
+    // within each table, but nothing links workflow_items.state to
+    // dispatch_attempts.phase. Raw SQL or an older build can desynchronize
+    // them, and that stays invisible for months without this check.
+    const stateConsistencyViolations = this.db.prepare(`
+      SELECT i.id AS itemId, i.state AS itemState, a.id AS attemptId, a.phase AS attemptPhase
+      FROM workflow_items i
+      JOIN dispatch_attempts a ON a.id = i.current_attempt_id
+      WHERE (i.state = 'dispatch_started' AND a.phase <> 'started')
+         OR (i.state = 'ambiguous' AND a.phase <> 'ambiguous')
+         OR (i.state = 'published' AND a.phase <> 'published')
+         OR (a.item_id <> i.id)
+      ORDER BY i.id
+    `).all();
+
+    // Managed media bytes with no referencing row: pure disk leak.
+    const { orphanedMediaFiles, orphanedTempFiles } = this._findOrphanMedia();
+
     return {
-      ok: quickCheck === 'ok' && foreignKeyViolations.length === 0 && mediaProblems.length === 0,
+      ok: quickCheck === 'ok'
+        && foreignKeyViolations.length === 0
+        && mediaProblems.length === 0
+        && stateConsistencyViolations.length === 0
+        && orphanedMediaFiles.length === 0,
       quickCheck,
       foreignKeyViolations,
       mediaProblems,
+      stateConsistencyViolations,
+      orphanedMediaFiles,
+      orphanedTempFiles,
     };
   }
 

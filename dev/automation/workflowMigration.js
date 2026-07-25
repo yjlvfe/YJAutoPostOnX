@@ -442,16 +442,27 @@ function importCandidate({ store, candidate, profileId, runId, index }) {
     });
   }
 
+  // Offline import reconstructs historical states and never calls a transport,
+  // so the live global recovery gate does not apply.
   const attempt = store.beginDispatch({
     id: item.id,
     leaseToken: lease.leaseToken,
     renderedText: payload.text,
     requestId: `migration-dispatch:${index}`,
+    allowUnresolvedRecovery: true,
   });
   if (candidate.state === 'published') {
+    // Legacy published.json records carry no external URL/ID, but they ARE the
+    // historical record of a real publication. Give them an explicit, traceable
+    // provenance identifier instead of weakening the proof requirement.
     return store.markPublished({
       attemptId: attempt.attemptId,
-      evidence: { source: 'legacy_migration', reason: candidate.reason },
+      externalId: `legacy:${item.id}`,
+      evidence: {
+        source: 'legacy_migration',
+        reason: candidate.reason,
+        proof: 'imported_from_legacy_published_json',
+      },
       requestId: `migration-published:${index}`,
     });
   }

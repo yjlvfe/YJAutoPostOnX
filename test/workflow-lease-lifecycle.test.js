@@ -40,11 +40,12 @@ async function slowPreparationRenewsInsteadOfStranding() {
       store,
       profileId,
       runId,
-      leaseMs: 40,
+      leaseMs: 400,
       // Preparation outlives the lease window; the workflow must keep the lease
-      // alive rather than lose the item at the boundary.
+      // alive rather than lose the item at the boundary. The margin is a full
+      // order of magnitude so GC/scheduling jitter cannot flake this.
       prepare: async (item) => {
-        await new Promise((resolve) => setTimeout(resolve, 160));
+        await new Promise((resolve) => setTimeout(resolve, 1_200));
         return { renderedText: item.payload.text };
       },
       dispatch: async () => { dispatched += 1; return { confirmed: true, externalId: 'ok-1' }; },
@@ -73,7 +74,7 @@ function expiredLeaseOfDeadRunIsReclaimed() {
 
     // Without restarting the whole app, a new run must be able to reclaim it.
     const run2 = store.startRun({ requestId: 'r2' });
-    const reclaimed = store.reclaimExpiredLeases({ requestId: 'reclaim-1' });
+    const reclaimed = store.reclaimExpiredLeases({ requestId: 'reclaim-1', graceMs: 0 });
     assert.strictEqual(reclaimed.reclaimedIds.length, 1,
       'an expired lease owned by a dead run must be reclaimable in-process');
 
@@ -129,6 +130,9 @@ function reconcileQuarantinesBadRowInsteadOfAborting() {
       leaseToken: badLease.leaseToken,
       renderedText: 'corrupt',
       requestId: 'begin-bad',
+      // Fixture setup only: deliberately builds a second unresolved row so we
+      // can prove recovery quarantines it instead of aborting.
+      allowUnresolvedRecovery: true,
     });
     const bad = { id: badLease.id };
     // Desynchronize only the attempt side, leaving the item at dispatch_started.

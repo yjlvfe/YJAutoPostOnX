@@ -50,6 +50,73 @@ function hasAuthoritativeProof(evidence) {
 }
 
 /**
+ * Turn a pre-boundary guard failure into a durable, visible state.
+ *
+ * The item is still 'leased' at this point and the transport was never called,
+ * so nothing here can duplicate a post. What matters is that the item never
+ * stays leased: that state is invisible in both the queue and recovery views.
+ */
+function resolveBoundaryGuardFailure({ store, item, error, backoffMs }) {
+  const code = error && error.code;
+  const details = { id: item.id, leaseToken: item.leaseToken, error: serializeError(error) };
+
+  // Locally provable corruption cannot repair itself by retrying.
+  if (code === 'MEDIA_INTEGRITY_FAILED') {
+    const dead = store.markTerminal({
+      ...details,
+      reason: 'media_integrity_failed',
+      requestId: requestId('terminal-media-integrity'),
+    });
+    return { ...dead, status: 'terminal_error_pre_dispatch', error, item: dead };
+  }
+
+  // Stop / profile deletion / lost lease: the operator or another worker won.
+  // Release without penalising the item.
+  if (code === 'RUN_NOT_ACTIVE' || code === 'PROFILE_NOT_ACTIVE') {
+    const released = store.releasePreDispatch({
+      ...details,
+      reason: code === 'RUN_NOT_ACTIVE' ? 'run_closed_before_dispatch' : 'profile_deleted_before_dispatch',
+      countAsFailure: false,
+      requestId: requestId('release-boundary-guard'),
+    });
+    return { ...released, status: 'cancelled_pre_dispatch', error, item: released };
+  }
+
+  // Another item became unresolved while we prepared: hold this one back.
+  if (code === 'RECOVERY_REQUIRED') {
+    const released = store.releasePreDispatch({
+      ...details,
+      reason: 'blocked_by_unresolved_recovery',
+      countAsFailure: false,
+      requestId: requestId('release-recovery-required'),
+    });
+    return {
+      ...released,
+      status: 'blocked',
+      reason: 'recovery_required',
+      details: error.details || null,
+      error,
+      item: released,
+    };
+  }
+
+  // A lost/expired lease means someone else may now own the item. Do not force
+  // a transition we cannot prove we still own; leave reclamation to the store.
+  if (code === 'LEASE_EXPIRED' || code === 'LEASE_CONFLICT') {
+    return { status: 'lease_lost_pre_dispatch', state: null, item: null, error };
+  }
+
+  // Unknown guard failure: back off rather than spin, but stay recoverable.
+  const deferred = store.markDeferred({
+    ...details,
+    reason: 'unknown_boundary_guard_failure',
+    availableAtMs: Date.now() + backoffMs,
+    requestId: requestId('defer-boundary-guard'),
+  });
+  return { ...deferred, status: 'retryable_error_pre_dispatch', error, item: deferred };
+}
+
+/**
  * Dispatch at most one queue item.
  *
  * The irreversible boundary is WorkflowStore.beginDispatch(). After it commits,
@@ -197,12 +264,21 @@ async function dispatchNext({
 
   // Durable boundary: this transaction must commit before the transport receives
   // the command. Any failure here propagates and dispatch is never called.
-  const attempt = store.beginDispatch({
-    id: item.id,
-    leaseToken: item.leaseToken,
-    renderedText: prepared.renderedText,
-    requestId: requestId('begin-dispatch'),
-  });
+  //
+  // Every guard error must be resolved into a durable state here. Letting it
+  // escape would leave the item stranded in 'leased': invisible to both the
+  // queue and the recovery screen, so the user believes it was published.
+  let attempt;
+  try {
+    attempt = store.beginDispatch({
+      id: item.id,
+      leaseToken: item.leaseToken,
+      renderedText: prepared.renderedText,
+      requestId: requestId('begin-dispatch'),
+    });
+  } catch (error) {
+    return resolveBoundaryGuardFailure({ store, item, error, backoffMs });
+  }
 
   let evidence;
   try {
