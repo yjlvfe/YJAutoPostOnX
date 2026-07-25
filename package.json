@@ -8,7 +8,11 @@
     "build:linux": "electron-builder --linux AppImage",
     "build-deploy": "electron-builder --linux AppImage",
     "audit": "node -e \"const {runAudit,printReport}=require('./dev/security/auditor');printReport(runAudit());\"",
-    "test": "node test/referral-toggle.test.js && node test/e2e-generation.test.js && node test/reportEngine.test.js && node test/session-manager.test.js && node test/api-key-leak.test.js && node test/rate-limit-persist.test.js && node test/max-tokens-cap.test.js && node test/security-logs.test.js && node test/profile-numbering.test.js && node test/semantic-dedup.test.js && node test/publish-decoupling.test.js && node test/publish-fixes-v511.test.js && node test/dynamic-prompt-v512.test.js && node test/deferred-retry-v512.test.js && node test/auditor-comments.test.js && node test/queue-consume.test.js && node test/resilience-v518.test.js && node test/stop-during-toast-wait.test.js && node test/detect-format.test.js && node test/opencode-go-format.test.js && node test/diagnostic-pipeline.test.js && node test/verify-edge-cases.test.js && echo '  ALL TESTS PASSED'",
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild:electron": "electron-builder install-app-deps",
+    "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron test/run-all.js",
+    "test:baseline": "cross-env ELECTRON_RUN_AS_NODE=1 XPOSTER_TEST_SCOPE=baseline electron test/run-all.js",
+    "test:workflow": "cross-env ELECTRON_RUN_AS_NODE=1 XPOSTER_TEST_SCOPE=workflow electron test/run-all.js",
     "test:electron": "xvfb-run -a electron --no-sandbox test/smoke.test.js && xvfb-run -a electron --no-sandbox test/ipc-generation.test.js && xvfb-run -a electron --no-sandbox test/full-ui.test.js"
   },
   "keywords": [
@@ -21,6 +25,7 @@
   "author": "Antigravity",
   "license": "ISC",
   "dependencies": {
+    "better-sqlite3": "12.4.1",
     "csv-parser": "^3.0.0",
     "playwright": "^1.43.0",
     "playwright-extra": "^4.3.6",
@@ -28,6 +33,7 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
   "devDependencies": {
+    "cross-env": "10.1.0",
     "electron": "30.0.0",
     "electron-builder": "^24.13.3"
   },
@@ -41,6 +47,10 @@
       "dev/**/*",
       "package.json",
       "!test/**/*"
+    ],
+    "asarUnpack": [
+      "**/*.node",
+      "**/node_modules/better-sqlite3/**/*"
     ],
     "linux": {
       "target": "AppImage",

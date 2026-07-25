@@ -1,0 +1,1986 @@
+'use strict';
+
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const Database = require('better-sqlite3');
+
+const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+const DEFAULT_WAL_AUTOCHECKPOINT_PAGES = 1_000;
+const ITEM_STATES = new Set([
+  'queued',
+  'leased',
+  'dispatch_started',
+  'published',
+  'ambiguous',
+  'deferred',
+  'dead',
+  'discarded',
+]);
+
+class WorkflowConflictError extends Error {
+  constructor(code, message, details = undefined) {
+    super(message);
+    this.name = 'WorkflowConflictError';
+    this.code = code;
+    if (details !== undefined) this.details = details;
+  }
+}
+
+class WorkflowValidationError extends Error {
+  constructor(code, message, details = undefined) {
+    super(message);
+    this.name = 'WorkflowValidationError';
+    this.code = code;
+    if (details !== undefined) this.details = details;
+  }
+}
+
+function validation(code, message, details) {
+  throw new WorkflowValidationError(code, message, details);
+}
+
+function conflict(code, message, details) {
+  throw new WorkflowConflictError(code, message, details);
+}
+
+function assertNonEmptyString(value, label) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function canonicalize(value, stack = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('JSON values must contain only finite numbers');
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (typeof value !== 'object') {
+    throw new TypeError(`Unsupported JSON value: ${typeof value}`);
+  }
+  if (stack.has(value)) throw new TypeError('JSON values must not contain cycles');
+
+  stack.add(value);
+  let result;
+  if (Array.isArray(value)) {
+    result = value.map((entry) => canonicalize(entry, stack));
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('JSON objects must be plain objects');
+    }
+    result = {};
+    for (const key of Object.keys(value).sort()) {
+      result[key] = canonicalize(value[key], stack);
+    }
+  }
+  stack.delete(value);
+  return result;
+}
+
+function canonicalStringify(value) {
+  return JSON.stringify(canonicalize(value));
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function serializeObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be a JSON object`);
+  }
+  canonicalStringify(value);
+  return JSON.stringify(value);
+}
+
+function optionalJson(value) {
+  if (value === undefined || value === null) return null;
+  return canonicalStringify(value);
+}
+
+function parseJson(value) {
+  return value === null || value === undefined ? null : JSON.parse(value);
+}
+
+function fsyncDirectory(directory) {
+  let fd;
+  try {
+    fd = fs.openSync(directory, 'r');
+    fs.fsyncSync(fd);
+  } catch (error) {
+    if (!['EINVAL', 'EPERM', 'EISDIR', 'ENOTSUP'].includes(error.code)) throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function hashOpenFile(fd) {
+  const hash = crypto.createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let position = 0;
+  let bytesRead;
+  do {
+    bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+    if (bytesRead > 0) {
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+  } while (bytesRead > 0);
+  return { sha256: hash.digest('hex'), byteSize: position };
+}
+
+function defaultRootDir() {
+  // Resolve HOME at construction time so tests can isolate it before creating a store.
+  return path.join(os.homedir(), '.config', 'x-poster-shared');
+}
+
+const UUID_CHECK = `
+  length(%s) = 36
+  AND substr(%s, 9, 1) = '-'
+  AND substr(%s, 14, 1) = '-'
+  AND substr(%s, 19, 1) = '-'
+  AND substr(%s, 24, 1) = '-'
+  AND lower(%s) NOT GLOB '*[^0-9a-f-]*'
+`;
+
+function uuidCheck(column) {
+  return UUID_CHECK.replaceAll('%s', column);
+}
+
+function schemaSql() {
+  const itemUuid = uuidCheck('id');
+  const profileUuid = uuidCheck('id');
+  const runUuid = uuidCheck('id');
+  const attemptUuid = uuidCheck('id');
+  const requestUuid = uuidCheck('id');
+  const eventUuid = uuidCheck('id');
+
+  return `
+    CREATE TABLE IF NOT EXISTS profiles (
+      id TEXT PRIMARY KEY CHECK (${profileUuid}),
+      name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+      status TEXT NOT NULL CHECK (status IN ('active', 'deleted')),
+      legacy_path TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      deleted_at_ms INTEGER,
+      CHECK ((status = 'active' AND deleted_at_ms IS NULL)
+        OR (status = 'deleted' AND deleted_at_ms IS NOT NULL))
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+      id TEXT PRIMARY KEY CHECK (${runUuid}),
+      status TEXT NOT NULL CHECK (status IN ('active', 'closed', 'crashed')),
+      started_at_ms INTEGER NOT NULL,
+      heartbeat_at_ms INTEGER NOT NULL,
+      finished_at_ms INTEGER,
+      CHECK ((status = 'active' AND finished_at_ms IS NULL)
+        OR (status IN ('closed', 'crashed') AND finished_at_ms IS NOT NULL))
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS workflow_counters (
+      name TEXT PRIMARY KEY,
+      value INTEGER NOT NULL CHECK (value >= 0)
+    ) STRICT;
+    INSERT OR IGNORE INTO workflow_counters(name, value) VALUES ('queue_seq', 0);
+
+    CREATE TABLE IF NOT EXISTS workflow_items (
+      id TEXT PRIMARY KEY CHECK (${itemUuid}),
+      state TEXT NOT NULL CHECK (state IN (
+        'queued', 'leased', 'dispatch_started', 'published',
+        'ambiguous', 'deferred', 'dead', 'discarded'
+      )),
+      payload_json TEXT NOT NULL
+        CHECK (json_valid(payload_json) AND json_type(payload_json, '$') = 'object'),
+      payload_sha256 TEXT NOT NULL
+        CHECK (length(payload_sha256) = 64 AND lower(payload_sha256) NOT GLOB '*[^0-9a-f]*'),
+      payload_text TEXT GENERATED ALWAYS AS (json_extract(payload_json, '$.text')) VIRTUAL,
+      queue_seq INTEGER UNIQUE,
+      available_at_ms INTEGER,
+      revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      lease_token TEXT,
+      lease_owner_run_id TEXT REFERENCES workflow_runs(id),
+      lease_profile_id TEXT REFERENCES profiles(id),
+      lease_expires_at_ms INTEGER,
+      current_attempt_id TEXT REFERENCES dispatch_attempts(id),
+      last_profile_id TEXT REFERENCES profiles(id),
+      pre_dispatch_failure_count INTEGER NOT NULL DEFAULT 0 CHECK (pre_dispatch_failure_count >= 0),
+      reason TEXT,
+      error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json)),
+      resolution_json TEXT CHECK (resolution_json IS NULL OR json_valid(resolution_json)),
+      reconciliation_closed_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      published_at_ms INTEGER,
+      discarded_at_ms INTEGER,
+      CHECK (
+        (state IN ('queued', 'deferred')
+          AND queue_seq IS NOT NULL AND available_at_ms IS NOT NULL
+          AND lease_token IS NULL AND lease_owner_run_id IS NULL
+          AND lease_profile_id IS NULL AND lease_expires_at_ms IS NULL
+          AND current_attempt_id IS NULL)
+        OR
+        (state = 'leased'
+          AND queue_seq IS NULL AND available_at_ms IS NULL
+          AND lease_token IS NOT NULL AND lease_owner_run_id IS NOT NULL
+          AND lease_profile_id IS NOT NULL AND lease_expires_at_ms IS NOT NULL
+          AND current_attempt_id IS NULL)
+        OR
+        (state IN ('dispatch_started', 'published', 'ambiguous')
+          AND queue_seq IS NULL AND available_at_ms IS NULL
+          AND lease_token IS NULL AND lease_owner_run_id IS NULL
+          AND lease_profile_id IS NULL AND lease_expires_at_ms IS NULL
+          AND current_attempt_id IS NOT NULL)
+        OR
+        (state IN ('dead', 'discarded')
+          AND queue_seq IS NULL AND available_at_ms IS NULL
+          AND lease_token IS NULL AND lease_owner_run_id IS NULL
+          AND lease_profile_id IS NULL AND lease_expires_at_ms IS NULL
+          AND current_attempt_id IS NULL)
+      ),
+      CHECK ((state = 'published' AND published_at_ms IS NOT NULL)
+        OR (state <> 'published' AND published_at_ms IS NULL)),
+      CHECK ((state = 'discarded' AND discarded_at_ms IS NOT NULL)
+        OR (state <> 'discarded' AND discarded_at_ms IS NULL))
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS dispatch_attempts (
+      id TEXT PRIMARY KEY CHECK (${attemptUuid}),
+      item_id TEXT NOT NULL REFERENCES workflow_items(id),
+      profile_id TEXT NOT NULL REFERENCES profiles(id),
+      run_id TEXT NOT NULL REFERENCES workflow_runs(id),
+      attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+      rendered_text TEXT NOT NULL,
+      payload_sha256 TEXT NOT NULL
+        CHECK (length(payload_sha256) = 64 AND lower(payload_sha256) NOT GLOB '*[^0-9a-f]*'),
+      phase TEXT NOT NULL CHECK (phase IN (
+        'started', 'ambiguous', 'published', 'confirmed_not_published'
+      )),
+      external_id TEXT,
+      external_url TEXT,
+      reason TEXT,
+      error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json)),
+      evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+      resolution_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      UNIQUE (item_id, attempt_number),
+      CHECK ((phase IN ('published', 'confirmed_not_published') AND resolution_at_ms IS NOT NULL)
+        OR (phase IN ('started', 'ambiguous') AND resolution_at_ms IS NULL))
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS media_blobs (
+      sha256 TEXT PRIMARY KEY
+        CHECK (length(sha256) = 64 AND lower(sha256) NOT GLOB '*[^0-9a-f]*'),
+      relative_path TEXT NOT NULL UNIQUE CHECK (length(trim(relative_path)) > 0),
+      byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+      status TEXT NOT NULL CHECK (status IN ('ready', 'missing', 'corrupt')),
+      created_at_ms INTEGER NOT NULL,
+      verified_at_ms INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS item_media (
+      item_id TEXT NOT NULL REFERENCES workflow_items(id),
+      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+      blob_sha256 TEXT NOT NULL REFERENCES media_blobs(sha256),
+      original_path TEXT NOT NULL CHECK (length(original_path) > 0),
+      PRIMARY KEY (item_id, ordinal)
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS item_media_blob_idx ON item_media(blob_sha256);
+
+    CREATE TABLE IF NOT EXISTS api_requests (
+      id TEXT PRIMARY KEY CHECK (${requestUuid}),
+      request_id TEXT NOT NULL UNIQUE CHECK (length(trim(request_id)) > 0),
+      operation TEXT NOT NULL CHECK (length(trim(operation)) > 0),
+      payload_sha256 TEXT NOT NULL
+        CHECK (length(payload_sha256) = 64 AND lower(payload_sha256) NOT GLOB '*[^0-9a-f]*'),
+      response_json TEXT NOT NULL CHECK (json_valid(response_json)),
+      created_at_ms INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS workflow_metadata (
+      key TEXT PRIMARY KEY CHECK (length(trim(key)) > 0),
+      value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+      updated_at_ms INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS migration_sources (
+      id TEXT PRIMARY KEY CHECK (${requestUuid}),
+      logical_name TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+      sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+      record_count INTEGER NOT NULL CHECK (record_count >= 0),
+      backup_relative_path TEXT NOT NULL,
+      imported_at_ms INTEGER NOT NULL,
+      UNIQUE(source_path, sha256)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS migration_rows (
+      source_id TEXT NOT NULL REFERENCES migration_sources(id),
+      source_ordinal INTEGER NOT NULL CHECK (source_ordinal >= 0),
+      item_id TEXT REFERENCES workflow_items(id),
+      disposition TEXT NOT NULL,
+      PRIMARY KEY(source_id, source_ordinal)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS migration_conflicts (
+      id TEXT PRIMARY KEY CHECK (${requestUuid}),
+      conflict_type TEXT NOT NULL,
+      details_json TEXT NOT NULL CHECK (json_valid(details_json)),
+      created_at_ms INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS workflow_events (
+      id TEXT PRIMARY KEY CHECK (${eventUuid}),
+      item_id TEXT NOT NULL REFERENCES workflow_items(id),
+      event_type TEXT NOT NULL CHECK (length(trim(event_type)) > 0),
+      from_state TEXT CHECK (from_state IS NULL OR from_state IN (
+        'queued', 'leased', 'dispatch_started', 'published',
+        'ambiguous', 'deferred', 'dead', 'discarded'
+      )),
+      to_state TEXT NOT NULL CHECK (to_state IN (
+        'queued', 'leased', 'dispatch_started', 'published',
+        'ambiguous', 'deferred', 'dead', 'discarded'
+      )),
+      revision INTEGER NOT NULL CHECK (revision >= 0),
+      data_json TEXT NOT NULL CHECK (json_valid(data_json)),
+      created_at_ms INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS workflow_items_ready_idx
+      ON workflow_items (available_at_ms, queue_seq)
+      WHERE state IN ('queued', 'deferred');
+    CREATE INDEX IF NOT EXISTS workflow_items_lease_expiry_idx
+      ON workflow_items (lease_expires_at_ms)
+      WHERE state = 'leased';
+    CREATE INDEX IF NOT EXISTS workflow_items_recovery_idx
+      ON workflow_items (state, reconciliation_closed_at_ms, updated_at_ms)
+      WHERE state IN ('dispatch_started', 'ambiguous');
+    CREATE INDEX IF NOT EXISTS workflow_items_last_profile_idx
+      ON workflow_items (last_profile_id, state);
+    CREATE INDEX IF NOT EXISTS workflow_events_item_idx
+      ON workflow_events (item_id, created_at_ms, id);
+    CREATE UNIQUE INDEX IF NOT EXISTS dispatch_attempts_unresolved_item_idx
+      ON dispatch_attempts (item_id)
+      WHERE phase IN ('started', 'ambiguous');
+    CREATE UNIQUE INDEX IF NOT EXISTS dispatch_attempts_external_id_idx
+      ON dispatch_attempts (external_id)
+      WHERE external_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS dispatch_attempts_external_url_idx
+      ON dispatch_attempts (external_url)
+      WHERE external_url IS NOT NULL;
+
+    CREATE TRIGGER IF NOT EXISTS workflow_items_immutable_identity
+    BEFORE UPDATE ON workflow_items
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.payload_json IS NOT OLD.payload_json
+      OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+      OR NEW.created_at_ms IS NOT OLD.created_at_ms
+    BEGIN
+      SELECT RAISE(ABORT, 'workflow item identity and payload are immutable');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS workflow_items_valid_transition
+    BEFORE UPDATE OF state ON workflow_items
+    WHEN NEW.state <> OLD.state AND NOT (
+      (OLD.state = 'queued' AND NEW.state IN ('leased', 'discarded'))
+      OR (OLD.state = 'deferred' AND NEW.state IN ('leased', 'dead', 'discarded'))
+      OR (OLD.state = 'leased' AND NEW.state IN (
+        'queued', 'deferred', 'dead', 'discarded', 'dispatch_started'
+      ))
+      OR (OLD.state = 'dispatch_started' AND NEW.state IN ('published', 'ambiguous'))
+      OR (OLD.state = 'ambiguous' AND NEW.state IN ('queued', 'published'))
+      OR (OLD.state = 'dead' AND NEW.state IN ('queued', 'discarded', 'published'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid state transition');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS dispatch_attempts_immutable_identity
+    BEFORE UPDATE ON dispatch_attempts
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.item_id IS NOT OLD.item_id
+      OR NEW.profile_id IS NOT OLD.profile_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.attempt_number IS NOT OLD.attempt_number
+      OR NEW.rendered_text IS NOT OLD.rendered_text
+      OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+      OR NEW.created_at_ms IS NOT OLD.created_at_ms
+    BEGIN
+      SELECT RAISE(ABORT, 'dispatch attempt identity and payload are immutable');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS dispatch_attempts_valid_transition
+    BEFORE UPDATE OF phase ON dispatch_attempts
+    WHEN NEW.phase <> OLD.phase AND NOT (
+      (OLD.phase = 'started' AND NEW.phase IN ('ambiguous', 'published'))
+      OR (OLD.phase = 'ambiguous' AND NEW.phase IN ('published', 'confirmed_not_published'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid dispatch attempt transition');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS workflow_events_append_only_update
+    BEFORE UPDATE ON workflow_events
+    BEGIN
+      SELECT RAISE(ABORT, 'workflow events are append-only');
+    END;
+    CREATE TRIGGER IF NOT EXISTS workflow_events_append_only_delete
+    BEFORE DELETE ON workflow_events
+    BEGIN
+      SELECT RAISE(ABORT, 'workflow events are append-only');
+    END;
+    CREATE TRIGGER IF NOT EXISTS api_requests_immutable_update
+    BEFORE UPDATE ON api_requests
+    BEGIN
+      SELECT RAISE(ABORT, 'api request records are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS api_requests_immutable_delete
+    BEFORE DELETE ON api_requests
+    BEGIN
+      SELECT RAISE(ABORT, 'api request records are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS media_blobs_immutable_identity
+    BEFORE UPDATE ON media_blobs
+    WHEN NEW.sha256 IS NOT OLD.sha256
+      OR NEW.relative_path IS NOT OLD.relative_path
+      OR NEW.byte_size IS NOT OLD.byte_size
+      OR NEW.created_at_ms IS NOT OLD.created_at_ms
+    BEGIN
+      SELECT RAISE(ABORT, 'media blob identity is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS media_blobs_no_delete
+    BEFORE DELETE ON media_blobs
+    BEGIN
+      SELECT RAISE(ABORT, 'media blobs are durable tombstones');
+    END;
+    CREATE TRIGGER IF NOT EXISTS item_media_no_update
+    BEFORE UPDATE ON item_media
+    BEGIN
+      SELECT RAISE(ABORT, 'item media links are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS item_media_no_delete
+    BEFORE DELETE ON item_media
+    BEGIN
+      SELECT RAISE(ABORT, 'item media links are durable');
+    END;
+  `;
+}
+
+class WorkflowStore {
+  constructor(options = {}) {
+    const rootDir = path.resolve(options.rootDir || defaultRootDir());
+    const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
+    const walAutocheckpointPages = options.walAutocheckpointPages ?? DEFAULT_WAL_AUTOCHECKPOINT_PAGES;
+    if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
+      throw new TypeError('busyTimeoutMs must be a non-negative integer');
+    }
+    if (!Number.isInteger(walAutocheckpointPages) || walAutocheckpointPages <= 0) {
+      throw new TypeError('walAutocheckpointPages must be a positive integer');
+    }
+    fs.mkdirSync(rootDir, { recursive: true });
+
+    this.rootDir = rootDir;
+    this.mediaDir = path.join(rootDir, 'media');
+    this.mediaTempDir = path.join(this.mediaDir, '.tmp');
+    fs.mkdirSync(this.mediaTempDir, { recursive: true });
+    this.dbPath = path.resolve(options.dbPath || path.join(rootDir, 'workflow.sqlite'));
+    fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
+    this.closed = false;
+    this.db = new Database(this.dbPath);
+
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('synchronous = FULL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+      this.db.pragma(`wal_autocheckpoint = ${walAutocheckpointPages}`);
+      this.db.transaction(() => this.db.exec(schemaSql())).immediate();
+    } catch (error) {
+      this.db.close();
+      this.closed = true;
+      throw error;
+    }
+  }
+
+  _assertOpen() {
+    if (this.closed) throw new Error('WorkflowStore is closed');
+  }
+
+  _immediate(work) {
+    this._assertOpen();
+    return this.db.transaction(work).immediate();
+  }
+
+  _mutate(operation, requestId, requestPayload, work) {
+    const normalizedRequestId = assertNonEmptyString(requestId, 'requestId');
+    const payloadHash = sha256(canonicalStringify({ operation, payload: requestPayload }));
+
+    return this._immediate(() => {
+      const existing = this.db.prepare(`
+        SELECT operation, payload_sha256, response_json
+        FROM api_requests
+        WHERE request_id = ?
+      `).get(normalizedRequestId);
+
+      if (existing) {
+        if (existing.operation !== operation || existing.payload_sha256 !== payloadHash) {
+          conflict(
+            'IDEMPOTENCY_KEY_REUSED',
+            `requestId ${normalizedRequestId} was already used with a different payload`,
+          );
+        }
+        return JSON.parse(existing.response_json);
+      }
+
+      const response = work();
+      const responseJson = canonicalStringify(response);
+      this.db.prepare(`
+        INSERT INTO api_requests (
+          id, request_id, operation, payload_sha256, response_json, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        crypto.randomUUID(),
+        normalizedRequestId,
+        operation,
+        payloadHash,
+        responseJson,
+        Date.now(),
+      );
+      return response;
+    });
+  }
+
+  _getReplay(operation, requestId, requestPayload) {
+    this._assertOpen();
+    const normalizedRequestId = assertNonEmptyString(requestId, 'requestId');
+    const payloadHash = sha256(canonicalStringify({ operation, payload: requestPayload }));
+    const existing = this.db.prepare(`
+      SELECT operation, payload_sha256, response_json
+      FROM api_requests
+      WHERE request_id = ?
+    `).get(normalizedRequestId);
+    if (!existing) return null;
+    if (existing.operation !== operation || existing.payload_sha256 !== payloadHash) {
+      conflict(
+        'IDEMPOTENCY_KEY_REUSED',
+        `requestId ${normalizedRequestId} was already used with a different payload`,
+      );
+    }
+    return JSON.parse(existing.response_json);
+  }
+
+  _stageMedia(originalPath) {
+    if (typeof originalPath !== 'string' || originalPath.trim() === '') {
+      validation('INVALID_MEDIA_PATH', 'media_path must be a non-empty string');
+    }
+    const resolvedSource = path.resolve(originalPath);
+    let sourceFd;
+    let tempFd;
+    const tempPath = path.join(this.mediaTempDir, `${crypto.randomUUID()}.part`);
+    try {
+      try {
+        sourceFd = fs.openSync(resolvedSource, 'r');
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          validation('MEDIA_NOT_FOUND', `Media file does not exist: ${resolvedSource}`, { path: resolvedSource });
+        }
+        throw error;
+      }
+      const sourceStat = fs.fstatSync(sourceFd);
+      if (!sourceStat.isFile()) {
+        validation('MEDIA_NOT_FILE', `Media path is not a regular file: ${resolvedSource}`, { path: resolvedSource });
+      }
+
+      tempFd = fs.openSync(tempPath, 'wx', 0o600);
+      const hash = crypto.createHash('sha256');
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      let position = 0;
+      let bytesRead;
+      do {
+        bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, position);
+        if (bytesRead > 0) {
+          hash.update(buffer.subarray(0, bytesRead));
+          let written = 0;
+          while (written < bytesRead) {
+            written += fs.writeSync(tempFd, buffer, written, bytesRead - written, position + written);
+          }
+          position += bytesRead;
+        }
+      } while (bytesRead > 0);
+      fs.fsyncSync(tempFd);
+      fs.closeSync(tempFd);
+      tempFd = undefined;
+
+      const digest = hash.digest('hex');
+      const sourceExtension = path.extname(resolvedSource).toLowerCase();
+      const extension = /^\.[a-z0-9]{1,10}$/.test(sourceExtension) ? sourceExtension : '';
+      const existingBlob = this.db.prepare(`
+        SELECT relative_path, byte_size FROM media_blobs WHERE sha256 = ?
+      `).get(digest);
+      if (existingBlob && existingBlob.byte_size !== position) {
+        validation('MEDIA_CORRUPT', 'Managed media size conflicts with its content hash', {
+          sha256: digest,
+        });
+      }
+      const relativePath = existingBlob ? existingBlob.relative_path : `${digest}${extension}`;
+      const managedPath = path.join(this.mediaDir, relativePath);
+
+      if (fs.existsSync(managedPath)) {
+        const existingFd = fs.openSync(managedPath, 'r');
+        try {
+          const existing = hashOpenFile(existingFd);
+          if (existing.sha256 !== digest || existing.byteSize !== position) {
+            validation('MEDIA_CORRUPT', `Managed media hash mismatch: ${managedPath}`, {
+              path: managedPath,
+              expectedSha256: digest,
+            });
+          }
+        } finally {
+          fs.closeSync(existingFd);
+        }
+        fs.unlinkSync(tempPath);
+      } else {
+        fs.renameSync(tempPath, managedPath);
+        fsyncDirectory(this.mediaDir);
+      }
+
+      return {
+        sha256: digest,
+        byteSize: position,
+        relativePath,
+        managedPath,
+        originalPath: resolvedSource,
+        status: 'ready',
+      };
+    } finally {
+      if (sourceFd !== undefined) fs.closeSync(sourceFd);
+      if (tempFd !== undefined) fs.closeSync(tempFd);
+      try { fs.unlinkSync(tempPath); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
+
+  _mediaForItem(itemId) {
+    return this.db.prepare(`
+      SELECT im.ordinal, im.original_path, mb.sha256, mb.relative_path,
+             mb.byte_size, mb.status
+      FROM item_media im
+      JOIN media_blobs mb ON mb.sha256 = im.blob_sha256
+      WHERE im.item_id = ?
+      ORDER BY im.ordinal ASC
+    `).all(itemId).map((row) => ({
+      ordinal: row.ordinal,
+      originalPath: row.original_path,
+      sha256: row.sha256,
+      byteSize: row.byte_size,
+      status: row.status,
+      managedPath: path.join(this.mediaDir, row.relative_path),
+    }));
+  }
+
+  /**
+   * Verify every managed blob for an item still matches its recorded size and
+   * digest. Used at the dispatch boundary so corrupt/missing media can never be
+   * published, and is never misreported as remote ambiguity.
+   */
+  _assertMediaIntegrity(itemId) {
+    for (const entry of this._mediaForItem(itemId)) {
+      let stat;
+      try {
+        stat = fs.statSync(entry.managedPath);
+      } catch (error) {
+        conflict('MEDIA_INTEGRITY_FAILED', `Managed media is unreadable: ${entry.managedPath}`, {
+          itemId,
+          ordinal: entry.ordinal,
+          reason: error.code === 'ENOENT' ? 'missing' : 'unreadable',
+        });
+      }
+      if (stat.size !== entry.byteSize) {
+        conflict('MEDIA_INTEGRITY_FAILED', `Managed media size changed: ${entry.managedPath}`, {
+          itemId,
+          ordinal: entry.ordinal,
+          expectedBytes: entry.byteSize,
+          actualBytes: stat.size,
+        });
+      }
+      let fd;
+      let digest;
+      try {
+        fd = fs.openSync(entry.managedPath, 'r');
+        digest = hashOpenFile(fd);
+      } finally {
+        if (fd !== undefined) fs.closeSync(fd);
+      }
+      if (digest !== entry.sha256) {
+        conflict('MEDIA_INTEGRITY_FAILED', `Managed media digest changed: ${entry.managedPath}`, {
+          itemId,
+          ordinal: entry.ordinal,
+          expectedSha256: entry.sha256,
+          actualSha256: digest,
+        });
+      }
+    }
+  }
+
+  _nextQueueSequence() {
+    const row = this.db.prepare(`
+      UPDATE workflow_counters
+      SET value = value + 1
+      WHERE name = 'queue_seq'
+      RETURNING value
+    `).get();
+    if (!row) throw new Error('queue sequence counter is missing');
+    return row.value;
+  }
+
+  _recordEvent(itemId, eventType, fromState, toState, revision, data = {}, now = Date.now()) {
+    if (!ITEM_STATES.has(toState) || (fromState !== null && !ITEM_STATES.has(fromState))) {
+      throw new Error('Cannot record an event with an unknown workflow state');
+    }
+    this.db.prepare(`
+      INSERT INTO workflow_events (
+        id, item_id, event_type, from_state, to_state, revision, data_json, created_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      itemId,
+      eventType,
+      fromState,
+      toState,
+      revision,
+      canonicalStringify(data),
+      now,
+    );
+  }
+
+  _rowToItem(row) {
+    if (!row) return null;
+    const lastProfile = row.last_profile_id
+      ? this.db.prepare(`
+        SELECT id, name, status, legacy_path, created_at_ms, updated_at_ms, deleted_at_ms
+        FROM profiles WHERE id = ?
+      `).get(row.last_profile_id)
+      : null;
+    return {
+      id: row.id,
+      state: row.state,
+      payload: JSON.parse(row.payload_json),
+      payloadSha256: row.payload_sha256,
+      text: row.payload_text,
+      queueSeq: row.queue_seq,
+      availableAtMs: row.available_at_ms,
+      revision: row.revision,
+      leaseToken: row.lease_token,
+      leaseOwnerRunId: row.lease_owner_run_id,
+      leaseProfileId: row.lease_profile_id,
+      leaseExpiresAtMs: row.lease_expires_at_ms,
+      currentAttemptId: row.current_attempt_id,
+      lastProfileId: row.last_profile_id,
+      lastProfile: lastProfile ? {
+        id: lastProfile.id,
+        name: lastProfile.name,
+        status: lastProfile.status,
+        legacyPath: lastProfile.legacy_path,
+        createdAtMs: lastProfile.created_at_ms,
+        updatedAtMs: lastProfile.updated_at_ms,
+        deletedAtMs: lastProfile.deleted_at_ms,
+      } : null,
+      media: this._mediaForItem(row.id),
+      preDispatchFailureCount: row.pre_dispatch_failure_count,
+      reason: row.reason,
+      error: parseJson(row.error_json),
+      resolution: parseJson(row.resolution_json),
+      // The exact attempted content and evidence, so an operator reconciling an
+      // ambiguous item can see what was actually sent before deciding.
+      currentAttempt: row.current_attempt_id ? this._attemptSummary(row.current_attempt_id) : null,
+      reconciliationClosedAtMs: row.reconciliation_closed_at_ms,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      publishedAtMs: row.published_at_ms,
+      discardedAtMs: row.discarded_at_ms,
+    };
+  }
+
+  /**
+   * Immutable record of what was actually attempted: the exact rendered text,
+   * who owned it, the phase, and any external identifiers/evidence. Manual
+   * reconciliation is unsafe without this.
+   */
+  _attemptSummary(attemptId) {
+    const row = this.db.prepare(`
+      SELECT id, item_id, profile_id, run_id, attempt_number, rendered_text,
+             phase, external_id, external_url, reason, error_json, evidence_json,
+             resolution_at_ms, created_at_ms, updated_at_ms
+      FROM dispatch_attempts WHERE id = ?
+    `).get(attemptId);
+    if (!row) return null;
+    return {
+      id: row.id,
+      itemId: row.item_id,
+      profileId: row.profile_id,
+      runId: row.run_id,
+      attemptNumber: row.attempt_number,
+      renderedText: row.rendered_text,
+      phase: row.phase,
+      externalId: row.external_id,
+      externalUrl: row.external_url,
+      reason: row.reason,
+      error: parseJson(row.error_json),
+      evidence: parseJson(row.evidence_json),
+      resolutionAtMs: row.resolution_at_ms,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+    };
+  }
+
+  _getItemRow(id) {
+    return this.db.prepare('SELECT * FROM workflow_items WHERE id = ?').get(id);
+  }
+
+  createProfile({ name, requestId, legacyPath = null }) {
+    const normalizedName = assertNonEmptyString(name, 'name');
+    if (legacyPath !== null && typeof legacyPath !== 'string') {
+      throw new TypeError('legacyPath must be a string or null');
+    }
+
+    return this._mutate(
+      'createProfile',
+      requestId,
+      { name: normalizedName, legacyPath },
+      () => {
+        if (this.db.prepare('SELECT 1 FROM profiles WHERE name = ?').get(normalizedName)) {
+          conflict('PROFILE_NAME_EXISTS', `Profile name already exists: ${normalizedName}`);
+        }
+        const now = Date.now();
+        const profile = {
+          id: crypto.randomUUID(),
+          name: normalizedName,
+          status: 'active',
+          legacyPath,
+          createdAtMs: now,
+          updatedAtMs: now,
+        };
+        this.db.prepare(`
+          INSERT INTO profiles (
+            id, name, status, legacy_path, created_at_ms, updated_at_ms, deleted_at_ms
+          ) VALUES (?, ?, 'active', ?, ?, ?, NULL)
+        `).run(profile.id, profile.name, legacyPath, now, now);
+        return profile;
+      },
+    );
+  }
+
+  renameProfile({ profileId, newName, requestId }) {
+    const normalizedProfileId = assertNonEmptyString(profileId, 'profileId');
+    const normalizedName = assertNonEmptyString(newName, 'newName');
+    return this._mutate(
+      'renameProfile',
+      requestId,
+      { profileId: normalizedProfileId, newName: normalizedName },
+      () => {
+        const current = this.db.prepare('SELECT * FROM profiles WHERE id = ?').get(normalizedProfileId);
+        if (!current) conflict('PROFILE_NOT_FOUND', `Unknown profile: ${normalizedProfileId}`);
+        if (current.status !== 'active') conflict('PROFILE_NOT_ACTIVE', 'Deleted profiles cannot be renamed');
+        const duplicate = this.db.prepare('SELECT id FROM profiles WHERE name = ? AND id <> ?')
+          .get(normalizedName, normalizedProfileId);
+        if (duplicate) conflict('PROFILE_NAME_EXISTS', `Profile name already exists: ${normalizedName}`);
+        const now = Date.now();
+        this.db.prepare(`UPDATE profiles SET name = ?, updated_at_ms = ? WHERE id = ? AND status = 'active'`)
+          .run(normalizedName, now, normalizedProfileId);
+        return {
+          id: normalizedProfileId,
+          name: normalizedName,
+          status: 'active',
+          legacyPath: current.legacy_path,
+          createdAtMs: current.created_at_ms,
+          updatedAtMs: now,
+          deletedAtMs: null,
+        };
+      },
+    );
+  }
+
+  softDeleteProfile({ profileId, requestId }) {
+    const normalizedProfileId = assertNonEmptyString(profileId, 'profileId');
+    return this._mutate(
+      'softDeleteProfile',
+      requestId,
+      { profileId: normalizedProfileId },
+      () => {
+        const current = this.db.prepare('SELECT * FROM profiles WHERE id = ?').get(normalizedProfileId);
+        if (!current) conflict('PROFILE_NOT_FOUND', `Unknown profile: ${normalizedProfileId}`);
+        if (current.status !== 'active') conflict('INVALID_STATE', 'Profile is already deleted');
+        const now = Date.now();
+        this.db.prepare(`
+          UPDATE profiles
+          SET status = 'deleted', deleted_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND status = 'active'
+        `).run(now, now, normalizedProfileId);
+        return {
+          id: normalizedProfileId,
+          name: current.name,
+          status: 'deleted',
+          legacyPath: current.legacy_path,
+          createdAtMs: current.created_at_ms,
+          updatedAtMs: now,
+          deletedAtMs: now,
+        };
+      },
+    );
+  }
+
+  startRun({ requestId }) {
+    return this._mutate('startRun', requestId, {}, () => {
+      const now = Date.now();
+      const run = {
+        id: crypto.randomUUID(),
+        status: 'active',
+        startedAtMs: now,
+        heartbeatAtMs: now,
+        finishedAtMs: null,
+      };
+      this.db.prepare(`
+        INSERT INTO workflow_runs (
+          id, status, started_at_ms, heartbeat_at_ms, finished_at_ms
+        ) VALUES (?, 'active', ?, ?, NULL)
+      `).run(run.id, now, now);
+      return run;
+    });
+  }
+
+  finishRun({ runId, status = 'closed', requestId }) {
+    const normalizedRunId = assertNonEmptyString(runId, 'runId');
+    if (!['closed', 'crashed'].includes(status)) throw new TypeError('status must be closed or crashed');
+    return this._mutate('finishRun', requestId, { runId: normalizedRunId, status }, () => {
+      const run = this.db.prepare('SELECT * FROM workflow_runs WHERE id = ?').get(normalizedRunId);
+      if (!run) conflict('RUN_NOT_FOUND', `Unknown workflow run: ${normalizedRunId}`);
+      if (run.status !== 'active') conflict('INVALID_STATE', `Cannot finish run from ${run.status}`);
+      const now = Date.now();
+      this.db.prepare(`
+        UPDATE workflow_runs
+        SET status = ?, heartbeat_at_ms = ?, finished_at_ms = ?
+        WHERE id = ? AND status = 'active'
+      `).run(status, now, now, normalizedRunId);
+      return {
+        id: normalizedRunId,
+        status,
+        startedAtMs: run.started_at_ms,
+        heartbeatAtMs: now,
+        finishedAtMs: now,
+      };
+    });
+  }
+
+  enqueue({ items, requestId }) {
+    if (!Array.isArray(items)) throw new TypeError('items must be an array');
+    const prepared = items.map((payload, index) => {
+      const payloadJson = serializeObject(payload, `items[${index}]`);
+      if (typeof payload.text !== 'string' || payload.text.trim() === '') {
+        validation('INVALID_PAYLOAD', `items[${index}].text must be a non-empty string`);
+      }
+      if (payload.media_path !== undefined
+        && payload.media_path !== null
+        && typeof payload.media_path !== 'string') {
+        validation('INVALID_MEDIA_PATH', `items[${index}].media_path must be a string or null`);
+      }
+      return {
+        payload,
+        payloadJson,
+        payloadSha256: sha256(canonicalStringify(payload)),
+      };
+    });
+    const requestPayload = { items: prepared.map((entry) => entry.payload) };
+    const replay = this._getReplay('enqueue', requestId, requestPayload);
+    if (replay) return replay;
+
+    for (const entry of prepared) {
+      entry.media = entry.payload.media_path
+        ? [this._stageMedia(entry.payload.media_path)]
+        : [];
+    }
+
+    return this._mutate(
+      'enqueue',
+      requestId,
+      requestPayload,
+      () => {
+        const inserted = [];
+        for (const entry of prepared) {
+          const now = Date.now();
+          const id = crypto.randomUUID();
+          const queueSeq = this._nextQueueSequence();
+          this.db.prepare(`
+            INSERT INTO workflow_items (
+              id, state, payload_json, payload_sha256, queue_seq, available_at_ms,
+              revision, lease_token, lease_owner_run_id, lease_profile_id,
+              lease_expires_at_ms, current_attempt_id, last_profile_id,
+              pre_dispatch_failure_count, reason, error_json, resolution_json,
+              reconciliation_closed_at_ms, created_at_ms, updated_at_ms,
+              published_at_ms, discarded_at_ms
+            ) VALUES (
+              ?, 'queued', ?, ?, ?, ?,
+              0, NULL, NULL, NULL,
+              NULL, NULL, NULL,
+              0, NULL, NULL, NULL,
+              NULL, ?, ?,
+              NULL, NULL
+            )
+          `).run(id, entry.payloadJson, entry.payloadSha256, queueSeq, now, now, now);
+
+          entry.media.forEach((media, ordinal) => {
+            this.db.prepare(`
+              INSERT INTO media_blobs (
+                sha256, relative_path, byte_size, status, created_at_ms, verified_at_ms
+              ) VALUES (?, ?, ?, 'ready', ?, ?)
+              ON CONFLICT(sha256) DO UPDATE SET
+                status = 'ready',
+                verified_at_ms = excluded.verified_at_ms
+              WHERE media_blobs.relative_path = excluded.relative_path
+                AND media_blobs.byte_size = excluded.byte_size
+            `).run(media.sha256, media.relativePath, media.byteSize, now, now);
+            const blob = this.db.prepare(`
+              SELECT relative_path, byte_size, status FROM media_blobs WHERE sha256 = ?
+            `).get(media.sha256);
+            if (!blob
+              || blob.relative_path !== media.relativePath
+              || blob.byte_size !== media.byteSize
+              || blob.status !== 'ready') {
+              validation('MEDIA_CORRUPT', 'Managed media metadata conflicts with its content hash', {
+                sha256: media.sha256,
+              });
+            }
+            this.db.prepare(`
+              INSERT INTO item_media (item_id, ordinal, blob_sha256, original_path)
+              VALUES (?, ?, ?, ?)
+            `).run(id, ordinal, media.sha256, media.originalPath);
+          });
+
+          this._recordEvent(id, 'enqueued', null, 'queued', 0, {
+            queueSeq,
+            media: entry.media.map((media) => ({ sha256: media.sha256, byteSize: media.byteSize })),
+          }, now);
+          inserted.push(this._rowToItem(this._getItemRow(id)));
+        }
+        return { items: inserted };
+      },
+    );
+  }
+
+  listQueued({ after = null, limit = 100 } = {}) {
+    this._assertOpen();
+    const normalizedLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 1_000) : 100;
+    const afterSequence = after === null
+      ? -1
+      : (typeof after === 'object' && after !== null ? after.queueSeq : after);
+    if (!Number.isInteger(afterSequence)) throw new TypeError('after must be a queue sequence integer or null');
+
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM workflow_items
+      WHERE state IN ('queued', 'deferred')
+        AND available_at_ms <= ?
+        AND queue_seq > ?
+      ORDER BY queue_seq ASC
+      LIMIT ?
+    `).all(Date.now(), afterSequence, normalizedLimit);
+    return rows.map((row) => this._rowToItem(row));
+  }
+
+  getItem(id) {
+    this._assertOpen();
+    return this._rowToItem(this._getItemRow(assertNonEmptyString(id, 'id')));
+  }
+
+  /**
+   * Count unresolved dispatches across the WHOLE store.
+   *
+   * Publishing is irreversible, so any item that crossed the dispatch boundary
+   * without a confirmed outcome blocks every further automatic dispatch — for
+   * every profile and every run. Ownership is global, never per profile.
+   */
+  countUnresolvedRecovery() {
+    this._assertOpen();
+    return this.db.prepare(`
+      SELECT COUNT(*) AS total
+      FROM workflow_items
+      WHERE state IN ('dispatch_started', 'ambiguous')
+        AND reconciliation_closed_at_ms IS NULL
+    `).get().total;
+  }
+
+  leaseNext({ profileId, runId, leaseMs = 60_000, allowUnresolvedRecovery = false }) {
+    const normalizedProfileId = assertNonEmptyString(profileId, 'profileId');
+    const normalizedRunId = assertNonEmptyString(runId, 'runId');
+    if (!Number.isInteger(leaseMs) || leaseMs <= 0) {
+      throw new TypeError('leaseMs must be a positive integer');
+    }
+    if (typeof allowUnresolvedRecovery !== 'boolean') {
+      throw new TypeError('allowUnresolvedRecovery must be a boolean');
+    }
+
+    return this._immediate(() => {
+      const profile = this.db.prepare('SELECT status FROM profiles WHERE id = ?').get(normalizedProfileId);
+      if (!profile || profile.status !== 'active') {
+        conflict('PROFILE_NOT_ACTIVE', 'The requested profile does not exist or is not active');
+      }
+      const run = this.db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(normalizedRunId);
+      if (!run || run.status !== 'active') {
+        conflict('RUN_NOT_ACTIVE', 'The requested workflow run does not exist or is not active');
+      }
+
+      // Global recovery gate, inside the same IMMEDIATE transaction as the CAS
+      // so a concurrent ambiguity cannot slip in between check and lease.
+      //
+      // allowUnresolvedRecovery is ONLY for offline bulk import (legacy
+      // migration), which reconstructs historical states and never calls a
+      // transport. Live dispatch must never set it.
+      if (!allowUnresolvedRecovery) {
+        const unresolved = this.db.prepare(`
+          SELECT id FROM workflow_items
+          WHERE state IN ('dispatch_started', 'ambiguous')
+            AND reconciliation_closed_at_ms IS NULL
+          ORDER BY updated_at_ms ASC
+          LIMIT 1
+        `).get();
+        if (unresolved) {
+          conflict(
+            'RECOVERY_REQUIRED',
+            'An unresolved dispatch must be reconciled before any further publishing',
+            { unresolvedItemId: unresolved.id },
+          );
+        }
+      }
+
+      const now = Date.now();
+      const row = this.db.prepare(`
+        SELECT *
+        FROM workflow_items
+        WHERE state IN ('queued', 'deferred')
+          AND available_at_ms <= ?
+        ORDER BY queue_seq ASC
+        LIMIT 1
+      `).get(now);
+      if (!row) return null;
+
+      const leaseToken = crypto.randomUUID();
+      const nextRevision = row.revision + 1;
+      const result = this.db.prepare(`
+        UPDATE workflow_items
+        SET state = 'leased',
+            queue_seq = NULL,
+            available_at_ms = NULL,
+            lease_token = ?,
+            lease_owner_run_id = ?,
+            lease_profile_id = ?,
+            lease_expires_at_ms = ?,
+            last_profile_id = ?,
+            reason = NULL,
+            error_json = NULL,
+            resolution_json = NULL,
+            reconciliation_closed_at_ms = NULL,
+            revision = ?,
+            updated_at_ms = ?
+        WHERE id = ? AND state = ? AND revision = ?
+      `).run(
+        leaseToken,
+        normalizedRunId,
+        normalizedProfileId,
+        now + leaseMs,
+        normalizedProfileId,
+        nextRevision,
+        now,
+        row.id,
+        row.state,
+        row.revision,
+      );
+      if (result.changes !== 1) conflict('LEASE_CONFLICT', 'The queue item changed before it could be leased');
+
+      this.db.prepare(`
+        UPDATE workflow_runs SET heartbeat_at_ms = ? WHERE id = ? AND status = 'active'
+      `).run(now, normalizedRunId);
+      this._recordEvent(
+        row.id,
+        'leased',
+        row.state,
+        'leased',
+        nextRevision,
+        { leaseToken, profileId: normalizedProfileId, runId: normalizedRunId },
+        now,
+      );
+      return this._rowToItem(this._getItemRow(row.id));
+    });
+  }
+
+  releasePreDispatch({ id, leaseToken, reason, error = null, countAsFailure = true, requestId }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
+    const normalizedReason = assertNonEmptyString(reason, 'reason');
+    if (typeof countAsFailure !== 'boolean') throw new TypeError('countAsFailure must be a boolean');
+    return this._mutate(
+      'releasePreDispatch',
+      requestId,
+      {
+        id: normalizedId,
+        leaseToken: normalizedLeaseToken,
+        reason: normalizedReason,
+        error,
+        countAsFailure,
+      },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'leased') conflict('INVALID_STATE', `Cannot release item from ${row.state}`);
+        if (row.lease_token !== normalizedLeaseToken) conflict('LEASE_CONFLICT', 'The lease token does not own this item');
+        const now = Date.now();
+        const queueSeq = this._nextQueueSequence();
+        const nextRevision = row.revision + 1;
+        const result = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'queued', queue_seq = ?, available_at_ms = ?,
+              lease_token = NULL, lease_owner_run_id = NULL, lease_profile_id = NULL,
+              lease_expires_at_ms = NULL, reason = ?, error_json = ?,
+              pre_dispatch_failure_count = pre_dispatch_failure_count + ?,
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'leased' AND revision = ? AND lease_token = ?
+        `).run(
+          queueSeq,
+          now,
+          normalizedReason,
+          optionalJson(error),
+          countAsFailure ? 1 : 0,
+          nextRevision,
+          now,
+          normalizedId,
+          row.revision,
+          normalizedLeaseToken,
+        );
+        if (result.changes !== 1) conflict('LEASE_CONFLICT', 'The lease changed before it could be released');
+        this._recordEvent(
+          normalizedId,
+          'released_pre_dispatch',
+          'leased',
+          'queued',
+          nextRevision,
+          { queueSeq, reason: normalizedReason, error, countAsFailure },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
+  markDeferred({
+    id,
+    leaseToken,
+    reason,
+    error = null,
+    availableAtMs = null,
+    requestId,
+  }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
+    const normalizedReason = assertNonEmptyString(reason, 'reason');
+    if (availableAtMs !== null && (!Number.isInteger(availableAtMs) || availableAtMs < 0)) {
+      throw new TypeError('availableAtMs must be a non-negative integer or null');
+    }
+    return this._mutate(
+      'markDeferred',
+      requestId,
+      // Keep the request payload free of wall-clock defaults, otherwise two
+      // identical replays hash differently and idempotent retry breaks.
+      { id: normalizedId, leaseToken: normalizedLeaseToken, reason: normalizedReason, error, availableAtMs },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'leased') conflict('INVALID_STATE', `Cannot defer item from ${row.state}`);
+        if (row.lease_token !== normalizedLeaseToken) conflict('LEASE_CONFLICT', 'The lease token does not own this item');
+        const now = Date.now();
+        const effectiveAvailableAt = availableAtMs === null ? now : availableAtMs;
+        const queueSeq = this._nextQueueSequence();
+        const nextRevision = row.revision + 1;
+        const result = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'deferred', queue_seq = ?, available_at_ms = ?,
+              lease_token = NULL, lease_owner_run_id = NULL, lease_profile_id = NULL,
+              lease_expires_at_ms = NULL, reason = ?, error_json = ?,
+              pre_dispatch_failure_count = pre_dispatch_failure_count + 1,
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'leased' AND revision = ? AND lease_token = ?
+        `).run(
+          queueSeq,
+          effectiveAvailableAt,
+          normalizedReason,
+          optionalJson(error),
+          nextRevision,
+          now,
+          normalizedId,
+          row.revision,
+          normalizedLeaseToken,
+        );
+        if (result.changes !== 1) conflict('LEASE_CONFLICT', 'The lease changed before it could be deferred');
+        this._recordEvent(
+          normalizedId,
+          'deferred',
+          'leased',
+          'deferred',
+          nextRevision,
+          { queueSeq, availableAtMs: effectiveAvailableAt, reason: normalizedReason, error },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
+  markTerminal({ id, leaseToken, reason, error = null, requestId }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
+    const normalizedReason = assertNonEmptyString(reason, 'reason');
+    return this._mutate(
+      'markTerminal',
+      requestId,
+      { id: normalizedId, leaseToken: normalizedLeaseToken, reason: normalizedReason, error },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'leased') conflict('INVALID_STATE', `Cannot terminate item from ${row.state}`);
+        if (row.lease_token !== normalizedLeaseToken) conflict('LEASE_CONFLICT', 'The lease token does not own this item');
+        const now = Date.now();
+        const nextRevision = row.revision + 1;
+        const result = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'dead', lease_token = NULL, lease_owner_run_id = NULL,
+              lease_profile_id = NULL, lease_expires_at_ms = NULL,
+              reason = ?, error_json = ?, revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'leased' AND revision = ? AND lease_token = ?
+        `).run(
+          normalizedReason,
+          optionalJson(error),
+          nextRevision,
+          now,
+          normalizedId,
+          row.revision,
+          normalizedLeaseToken,
+        );
+        if (result.changes !== 1) conflict('LEASE_CONFLICT', 'The lease changed before it could become terminal');
+        this._recordEvent(
+          normalizedId,
+          'terminal',
+          'leased',
+          'dead',
+          nextRevision,
+          { reason: normalizedReason, error },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
+  beginDispatch({ id, leaseToken, renderedText, requestId }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    const normalizedLeaseToken = assertNonEmptyString(leaseToken, 'leaseToken');
+    if (typeof renderedText !== 'string') throw new TypeError('renderedText must be a string');
+
+    return this._mutate(
+      'beginDispatch',
+      requestId,
+      { id: normalizedId, leaseToken: normalizedLeaseToken, renderedText },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'leased') {
+          conflict('INVALID_STATE', `Cannot begin dispatch from state ${row.state}`);
+        }
+        if (row.lease_token !== normalizedLeaseToken) {
+          conflict('LEASE_CONFLICT', 'The lease token does not own this item');
+        }
+
+        const now = Date.now();
+        if (row.lease_expires_at_ms <= now) {
+          conflict('LEASE_EXPIRED', 'The lease expired before dispatch could begin');
+        }
+
+        // The owning run and profile must still be alive AT the boundary. A Stop
+        // or profile deletion that wins during preparation must prevent the
+        // irreversible action, not merely be ignored.
+        const owningRun = this.db.prepare('SELECT status FROM workflow_runs WHERE id = ?')
+          .get(row.lease_owner_run_id);
+        if (!owningRun || owningRun.status !== 'active') {
+          conflict('RUN_NOT_ACTIVE', 'The owning run is no longer active; dispatch is refused');
+        }
+        const owningProfile = this.db.prepare('SELECT status FROM profiles WHERE id = ?')
+          .get(row.lease_profile_id);
+        if (!owningProfile || owningProfile.status !== 'active') {
+          conflict('PROFILE_NOT_ACTIVE', 'The owning profile is no longer active; dispatch is refused');
+        }
+
+        // Managed media must still match the bytes recorded at enqueue time.
+        // A locally provable corruption is a pre-boundary failure, never a
+        // post-boundary ambiguity, and must never publish wrong bytes.
+        this._assertMediaIntegrity(normalizedId);
+
+        const attemptNumber = this.db.prepare(`
+          SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next_number
+          FROM dispatch_attempts
+          WHERE item_id = ?
+        `).get(normalizedId).next_number;
+        const attemptId = crypto.randomUUID();
+        this.db.prepare(`
+          INSERT INTO dispatch_attempts (
+            id, item_id, profile_id, run_id, attempt_number, rendered_text,
+            payload_sha256, phase, external_id, external_url, reason,
+            error_json, evidence_json, resolution_at_ms, created_at_ms, updated_at_ms
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, 'started', NULL, NULL, NULL,
+            NULL, NULL, NULL, ?, ?
+          )
+        `).run(
+          attemptId,
+          normalizedId,
+          row.lease_profile_id,
+          row.lease_owner_run_id,
+          attemptNumber,
+          renderedText,
+          row.payload_sha256,
+          now,
+          now,
+        );
+
+        const nextRevision = row.revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'dispatch_started',
+              lease_token = NULL,
+              lease_owner_run_id = NULL,
+              lease_profile_id = NULL,
+              lease_expires_at_ms = NULL,
+              current_attempt_id = ?,
+              revision = ?,
+              updated_at_ms = ?
+          WHERE id = ? AND state = 'leased' AND revision = ? AND lease_token = ?
+        `).run(attemptId, nextRevision, now, normalizedId, row.revision, normalizedLeaseToken);
+        if (update.changes !== 1) {
+          conflict('LEASE_CONFLICT', 'The lease changed before dispatch could begin');
+        }
+
+        this._recordEvent(
+          normalizedId,
+          'dispatch_started',
+          'leased',
+          'dispatch_started',
+          nextRevision,
+          { attemptId, renderedText },
+          now,
+        );
+        return {
+          attemptId,
+          id: normalizedId,
+          state: 'dispatch_started',
+          revision: nextRevision,
+        };
+      },
+    );
+  }
+
+  markAmbiguous({ attemptId, reason, error = null, evidence = null, requestId }) {
+    const normalizedAttemptId = assertNonEmptyString(attemptId, 'attemptId');
+    const normalizedReason = assertNonEmptyString(reason, 'reason');
+    const errorJson = optionalJson(error);
+    const evidenceJson = optionalJson(evidence);
+
+    return this._mutate(
+      'markAmbiguous',
+      requestId,
+      { attemptId: normalizedAttemptId, reason: normalizedReason, error, evidence },
+      () => {
+        const attempt = this.db.prepare(`
+          SELECT a.*, i.state AS item_state, i.revision AS item_revision,
+                 i.current_attempt_id AS item_current_attempt_id
+          FROM dispatch_attempts a
+          JOIN workflow_items i ON i.id = a.item_id
+          WHERE a.id = ?
+        `).get(normalizedAttemptId);
+        if (!attempt) conflict('ATTEMPT_NOT_FOUND', `Unknown dispatch attempt: ${normalizedAttemptId}`);
+        if (attempt.phase !== 'started'
+          || attempt.item_state !== 'dispatch_started'
+          || attempt.item_current_attempt_id !== normalizedAttemptId) {
+          conflict('INVALID_STATE', 'Only the current started dispatch can become ambiguous');
+        }
+
+        const now = Date.now();
+        this.db.prepare(`
+          UPDATE dispatch_attempts
+          SET phase = 'ambiguous', reason = ?, error_json = ?, evidence_json = ?, updated_at_ms = ?
+          WHERE id = ? AND phase = 'started'
+        `).run(normalizedReason, errorJson, evidenceJson, now, normalizedAttemptId);
+
+        const nextRevision = attempt.item_revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'ambiguous', reason = ?, error_json = ?,
+              resolution_json = NULL, reconciliation_closed_at_ms = NULL,
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'dispatch_started'
+            AND revision = ? AND current_attempt_id = ?
+        `).run(
+          normalizedReason,
+          errorJson,
+          nextRevision,
+          now,
+          attempt.item_id,
+          attempt.item_revision,
+          normalizedAttemptId,
+        );
+        if (update.changes !== 1) conflict('STATE_CONFLICT', 'The item changed while marking it ambiguous');
+
+        this._recordEvent(
+          attempt.item_id,
+          'dispatch_ambiguous',
+          'dispatch_started',
+          'ambiguous',
+          nextRevision,
+          { attemptId: normalizedAttemptId, reason: normalizedReason, error, evidence },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(attempt.item_id));
+      },
+    );
+  }
+
+  markPublished({ attemptId, externalId = null, externalUrl = null, evidence = null, requestId }) {
+    const normalizedAttemptId = assertNonEmptyString(attemptId, 'attemptId');
+    if (externalId !== null && typeof externalId !== 'string') throw new TypeError('externalId must be a string or null');
+    if (externalUrl !== null && typeof externalUrl !== 'string') throw new TypeError('externalUrl must be a string or null');
+    const evidenceJson = optionalJson(evidence);
+
+    return this._mutate(
+      'markPublished',
+      requestId,
+      { attemptId: normalizedAttemptId, externalId, externalUrl, evidence },
+      () => {
+        const attempt = this.db.prepare(`
+          SELECT a.*, i.state AS item_state, i.revision AS item_revision,
+                 i.current_attempt_id AS item_current_attempt_id
+          FROM dispatch_attempts a
+          JOIN workflow_items i ON i.id = a.item_id
+          WHERE a.id = ?
+        `).get(normalizedAttemptId);
+        if (!attempt) conflict('ATTEMPT_NOT_FOUND', `Unknown dispatch attempt: ${normalizedAttemptId}`);
+        const validPair = (
+          attempt.phase === 'started' && attempt.item_state === 'dispatch_started'
+        ) || (
+          attempt.phase === 'ambiguous' && attempt.item_state === 'ambiguous'
+        );
+        if (!validPair || attempt.item_current_attempt_id !== normalizedAttemptId) {
+          conflict('INVALID_STATE', 'Only the current started or ambiguous attempt can be published');
+        }
+
+        const now = Date.now();
+        this.db.prepare(`
+          UPDATE dispatch_attempts
+          SET phase = 'published', external_id = ?, external_url = ?, evidence_json = ?,
+              resolution_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND phase = ?
+        `).run(externalId, externalUrl, evidenceJson, now, now, normalizedAttemptId, attempt.phase);
+
+        const nextRevision = attempt.item_revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'published', published_at_ms = ?, reason = NULL,
+              error_json = NULL, resolution_json = ?,
+              reconciliation_closed_at_ms = NULL, revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = ? AND revision = ? AND current_attempt_id = ?
+        `).run(
+          now,
+          canonicalStringify({ externalId, externalUrl, evidence }),
+          nextRevision,
+          now,
+          attempt.item_id,
+          attempt.item_state,
+          attempt.item_revision,
+          normalizedAttemptId,
+        );
+        if (update.changes !== 1) conflict('STATE_CONFLICT', 'The item changed while marking it published');
+
+        this._recordEvent(
+          attempt.item_id,
+          'published',
+          attempt.item_state,
+          'published',
+          nextRevision,
+          { attemptId: normalizedAttemptId, externalId, externalUrl, evidence },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(attempt.item_id));
+      },
+    );
+  }
+
+  listRecovery({ includeClosed = false } = {}) {
+    this._assertOpen();
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM workflow_items
+      WHERE state IN ('dispatch_started', 'ambiguous')
+        AND (? = 1 OR reconciliation_closed_at_ms IS NULL)
+      ORDER BY updated_at_ms ASC, id ASC
+    `).all(includeClosed ? 1 : 0);
+    return rows.map((row) => this._rowToItem(row));
+  }
+
+  resolveRecovery({
+    id,
+    action,
+    confirmedNotPublished = false,
+    evidence = null,
+    requestId,
+  }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    const normalizedAction = assertNonEmptyString(action, 'action');
+
+    return this._mutate(
+      'resolveRecovery',
+      requestId,
+      { id: normalizedId, action: normalizedAction, confirmedNotPublished, evidence },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'ambiguous') {
+          conflict('INVALID_STATE', `Cannot resolve recovery from state ${row.state}`);
+        }
+
+        if (normalizedAction === 'close') {
+          const now = Date.now();
+          const nextRevision = row.revision + 1;
+          const update = this.db.prepare(`
+            UPDATE workflow_items
+            SET reconciliation_closed_at_ms = ?, resolution_json = ?,
+                revision = ?, updated_at_ms = ?
+            WHERE id = ? AND state = 'ambiguous' AND revision = ?
+          `).run(
+            now,
+            canonicalStringify({ action: 'close', evidence }),
+            nextRevision,
+            now,
+            normalizedId,
+            row.revision,
+          );
+          if (update.changes !== 1) conflict('STATE_CONFLICT', 'The recovery item changed before review could close');
+          this._recordEvent(
+            normalizedId,
+            'recovery_review_closed',
+            'ambiguous',
+            'ambiguous',
+            nextRevision,
+            { evidence },
+            now,
+          );
+          return this._rowToItem(this._getItemRow(normalizedId));
+        }
+
+        if (normalizedAction !== 'requeue') {
+          conflict('UNSUPPORTED_RECOVERY_ACTION', `Unsupported recovery action: ${normalizedAction}`);
+        }
+        if (confirmedNotPublished !== true) {
+          conflict(
+            'CONFIRMATION_REQUIRED',
+            'Requeueing an ambiguous item requires confirmedNotPublished=true',
+          );
+        }
+
+        const attempt = this.db.prepare(`
+          SELECT * FROM dispatch_attempts WHERE id = ? AND item_id = ?
+        `).get(row.current_attempt_id, normalizedId);
+        if (!attempt || attempt.phase !== 'ambiguous') {
+          conflict('INVALID_STATE', 'The ambiguous item has no matching unresolved attempt');
+        }
+
+        const now = Date.now();
+        const queueSeq = this._nextQueueSequence(now);
+        this.db.prepare(`
+          UPDATE dispatch_attempts
+          SET phase = 'confirmed_not_published', evidence_json = ?,
+              resolution_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND phase = 'ambiguous'
+        `).run(optionalJson(evidence), now, now, attempt.id);
+
+        const nextRevision = row.revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'queued', queue_seq = ?, available_at_ms = ?,
+              current_attempt_id = NULL, reason = NULL, error_json = NULL,
+              resolution_json = ?, reconciliation_closed_at_ms = NULL,
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'ambiguous' AND revision = ?
+            AND current_attempt_id = ?
+        `).run(
+          queueSeq,
+          now,
+          canonicalStringify({ action: 'requeue', confirmedNotPublished: true, evidence }),
+          nextRevision,
+          now,
+          normalizedId,
+          row.revision,
+          attempt.id,
+        );
+        if (update.changes !== 1) conflict('STATE_CONFLICT', 'The recovery item changed before it could be requeued');
+
+        this._recordEvent(
+          normalizedId,
+          'recovery_requeued',
+          'ambiguous',
+          'queued',
+          nextRevision,
+          { attemptId: attempt.id, queueSeq, confirmedNotPublished: true, evidence },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
+  discardQueued({ id, expectedRevision, requestId }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new TypeError('expectedRevision must be a non-negative integer');
+    }
+
+    return this._mutate(
+      'discardQueued',
+      requestId,
+      { id: normalizedId, expectedRevision },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        // Deferred items are still user-visible backlog; the schema allows
+        // deferred -> discarded, so the API must too.
+        if (row.state !== 'queued' && row.state !== 'deferred') {
+          conflict('INVALID_STATE', `Cannot discard an item in state ${row.state}`);
+        }
+        if (row.revision !== expectedRevision) {
+          conflict('REVISION_CONFLICT', 'The queue item revision no longer matches');
+        }
+
+        const now = Date.now();
+        const nextRevision = row.revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'discarded', queue_seq = NULL, available_at_ms = NULL,
+              reason = 'discarded_by_user', discarded_at_ms = ?,
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = ? AND revision = ?
+        `).run(now, nextRevision, now, normalizedId, row.state, expectedRevision);
+        if (update.changes !== 1) conflict('STATE_CONFLICT', 'The queue item changed before it could be discarded');
+
+        this._recordEvent(
+          normalizedId,
+          'discarded',
+          row.state,
+          'discarded',
+          nextRevision,
+          { expectedRevision },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
+  listItems({ states = [...ITEM_STATES], limit = 100, after = null, afterUpdatedAtMs = null } = {}) {
+    this._assertOpen();
+    if (!Array.isArray(states) || states.length === 0 || states.some((state) => !ITEM_STATES.has(state))) {
+      throw new TypeError('states must be a non-empty array of valid workflow states');
+    }
+    const normalizedLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 10_000) : 100;
+    const placeholders = states.map(() => '?').join(', ');
+
+    // Composite keyset cursor: a bare timestamp cursor silently skips every row
+    // that shares the boundary timestamp, which is common for bulk enqueues.
+    let cursor = null;
+    if (after !== null && after !== undefined) {
+      if (typeof after !== 'object' || !Number.isInteger(after.updatedAtMs) || typeof after.id !== 'string') {
+        throw new TypeError('after must be { updatedAtMs: integer, id: string }');
+      }
+      cursor = after;
+    } else if (afterUpdatedAtMs !== null) {
+      if (!Number.isInteger(afterUpdatedAtMs)) throw new TypeError('afterUpdatedAtMs must be an integer or null');
+      cursor = { updatedAtMs: afterUpdatedAtMs, id: '' };
+    }
+
+    const rows = cursor === null
+      ? this.db.prepare(`
+        SELECT * FROM workflow_items
+        WHERE state IN (${placeholders})
+        ORDER BY updated_at_ms ASC, id ASC
+        LIMIT ?
+      `).all(...states, normalizedLimit)
+      : this.db.prepare(`
+        SELECT * FROM workflow_items
+        WHERE state IN (${placeholders})
+          AND (updated_at_ms > ? OR (updated_at_ms = ? AND id > ?))
+        ORDER BY updated_at_ms ASC, id ASC
+        LIMIT ?
+      `).all(...states, cursor.updatedAtMs, cursor.updatedAtMs, cursor.id, normalizedLimit);
+    return rows.map((row) => this._rowToItem(row));
+  }
+
+  reconcileStartup({ requestId }) {
+    return this._mutate('reconcileStartup', requestId, {}, () => {
+      const now = Date.now();
+      this.db.prepare(`
+        UPDATE workflow_runs
+        SET status = 'crashed', finished_at_ms = ?, heartbeat_at_ms = ?
+        WHERE status = 'active'
+      `).run(now, now);
+
+      const requeuedLeaseIds = [];
+      const leasedRows = this.db.prepare(`
+        SELECT * FROM workflow_items WHERE state = 'leased' ORDER BY updated_at_ms, id
+      `).all();
+      for (const row of leasedRows) {
+        const queueSeq = this._nextQueueSequence();
+        const nextRevision = row.revision + 1;
+        this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'queued', queue_seq = ?, available_at_ms = ?,
+              lease_token = NULL, lease_owner_run_id = NULL, lease_profile_id = NULL,
+              lease_expires_at_ms = NULL, reason = 'startup_recovered_pre_dispatch_lease',
+              revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'leased' AND revision = ?
+        `).run(queueSeq, now, nextRevision, now, row.id, row.revision);
+        this._recordEvent(
+          row.id,
+          'startup_lease_requeued',
+          'leased',
+          'queued',
+          nextRevision,
+          { queueSeq },
+          now,
+        );
+        requeuedLeaseIds.push(row.id);
+      }
+
+      const ambiguousIds = [];
+      const dispatchRows = this.db.prepare(`
+        SELECT * FROM workflow_items WHERE state = 'dispatch_started' ORDER BY updated_at_ms, id
+      `).all();
+      for (const row of dispatchRows) {
+        const attempt = this.db.prepare(`
+          SELECT * FROM dispatch_attempts WHERE id = ? AND item_id = ? AND phase = 'started'
+        `).get(row.current_attempt_id, row.id);
+        if (!attempt) conflict('INVARIANT_VIOLATION', 'dispatch_started item has no started attempt', { id: row.id });
+        this.db.prepare(`
+          UPDATE dispatch_attempts
+          SET phase = 'ambiguous', reason = 'startup_recovered_after_dispatch_boundary',
+              error_json = ?, updated_at_ms = ?
+          WHERE id = ? AND phase = 'started'
+        `).run(canonicalStringify({ message: 'Previous process ended after dispatch_started' }), now, attempt.id);
+        const nextRevision = row.revision + 1;
+        this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'ambiguous', reason = 'startup_recovered_after_dispatch_boundary',
+              error_json = ?, revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'dispatch_started' AND revision = ?
+            AND current_attempt_id = ?
+        `).run(
+          canonicalStringify({ message: 'Previous process ended after dispatch_started' }),
+          nextRevision,
+          now,
+          row.id,
+          row.revision,
+          attempt.id,
+        );
+        this._recordEvent(
+          row.id,
+          'startup_dispatch_ambiguous',
+          'dispatch_started',
+          'ambiguous',
+          nextRevision,
+          { attemptId: attempt.id },
+          now,
+        );
+        ambiguousIds.push(row.id);
+      }
+      return { requeuedLeaseIds, ambiguousIds };
+    });
+  }
+
+  integrityCheck({ verifyMedia = true } = {}) {
+    this._assertOpen();
+    const quickCheck = this.db.pragma('quick_check', { simple: true });
+    const foreignKeyViolations = this.db.pragma('foreign_key_check');
+    const mediaProblems = [];
+    if (verifyMedia) {
+      const blobs = this.db.prepare(`
+        SELECT sha256, relative_path, byte_size, status FROM media_blobs ORDER BY sha256
+      `).all();
+      for (const blob of blobs) {
+        const managedPath = path.resolve(this.mediaDir, blob.relative_path);
+        if (!managedPath.startsWith(`${path.resolve(this.mediaDir)}${path.sep}`)) {
+          mediaProblems.push({ sha256: blob.sha256, code: 'PATH_ESCAPE' });
+          continue;
+        }
+        let fd;
+        try {
+          fd = fs.openSync(managedPath, 'r');
+          const actual = hashOpenFile(fd);
+          if (actual.sha256 !== blob.sha256 || actual.byteSize !== blob.byte_size || blob.status !== 'ready') {
+            mediaProblems.push({
+              sha256: blob.sha256,
+              code: 'HASH_OR_SIZE_MISMATCH',
+              actualSha256: actual.sha256,
+              actualByteSize: actual.byteSize,
+              expectedByteSize: blob.byte_size,
+              status: blob.status,
+            });
+          }
+        } catch (error) {
+          mediaProblems.push({ sha256: blob.sha256, code: error.code || 'MEDIA_READ_FAILED' });
+        } finally {
+          if (fd !== undefined) fs.closeSync(fd);
+        }
+      }
+    }
+    return {
+      ok: quickCheck === 'ok' && foreignKeyViolations.length === 0 && mediaProblems.length === 0,
+      quickCheck,
+      foreignKeyViolations,
+      mediaProblems,
+    };
+  }
+
+  checkpoint(mode = 'TRUNCATE') {
+    this._assertOpen();
+    const normalizedMode = assertNonEmptyString(mode, 'mode').toUpperCase();
+    if (!['PASSIVE', 'FULL', 'RESTART', 'TRUNCATE'].includes(normalizedMode)) {
+      throw new TypeError('Unsupported WAL checkpoint mode');
+    }
+    return this.db.pragma(`wal_checkpoint(${normalizedMode})`);
+  }
+
+  close() {
+    if (this.closed) return;
+    try {
+      this.checkpoint('TRUNCATE');
+    } finally {
+      this.db.close();
+      this.closed = true;
+    }
+  }
+}
+
+module.exports = {
+  WorkflowStore,
+  WorkflowConflictError,
+  WorkflowValidationError,
+};
