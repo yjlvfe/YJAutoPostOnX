@@ -1,0 +1,45 @@
+name: Apply remaining audit repair
+
+on:
+  push:
+    branches:
+      - fix/remaining-audit-20260726
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-build:
+    if: ${{ !contains(github.event.head_commit.message, '[remaining-repair]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/remaining-audit-20260726
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply guarded source transformations
+        run: node scripts/apply-remaining-repair.cjs
+      - name: Bump package version
+        run: npm version 5.20.0 --no-git-tag-version
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Run complete test suite
+        run: npm test
+      - name: Run Electron/UI tests
+        run: npm run test:electron
+      - name: Build AppImage
+        run: npm run build:linux
+      - name: Capture production audit
+        run: npm audit --omit=dev --json > audit-prod.json || true
+      - name: Commit verified repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dev test package.json package-lock.json .github/workflows/ci.yml audit-prod.json
+          git commit -m "fix: finish durable workflow audit [remaining-repair]"
+          git push origin HEAD:fix/remaining-audit-20260726
