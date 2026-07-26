@@ -35,6 +35,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Apply audited source transformations
+        id: apply_repair
         if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
@@ -45,7 +46,7 @@ jobs:
             node scripts/apply-xposter-followup.cjs
           } 2>&1 | tee xposter-ci-apply.log
       - name: Upload apply failure diagnostic
-        if: failure()
+        if: ${{ failure() && steps.apply_repair.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: xposter-apply-failure-log
@@ -58,24 +59,54 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: npm ci
       - name: Run complete test suite
+        id: unit_tests
         if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           set -o pipefail
           npm test 2>&1 | tee xposter-ci-test.log
       - name: Upload unit-test failure diagnostic
-        if: failure()
+        if: ${{ failure() && steps.unit_tests.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: xposter-test-failure-log
           path: xposter-ci-test.log
           if-no-files-found: error
       - name: Run Electron and renderer integration tests
+        id: electron_tests
         if: steps.guard.outputs.skip != 'true'
-        run: npm run test:electron
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            echo '=== smoke.test.js ==='
+            timeout --signal=TERM --kill-after=10s 60s xvfb-run -a electron --no-sandbox test/smoke.test.js
+            echo '=== ipc-generation.test.js ==='
+            timeout --signal=TERM --kill-after=10s 90s xvfb-run -a electron --no-sandbox test/ipc-generation.test.js
+            echo '=== full-ui.test.js ==='
+            timeout --signal=TERM --kill-after=10s 90s xvfb-run -a electron --no-sandbox test/full-ui.test.js
+          } 2>&1 | tee xposter-ci-electron.log
+      - name: Upload Electron-test failure diagnostic
+        if: ${{ failure() && steps.electron_tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-electron-failure-log
+          path: xposter-ci-electron.log
+          if-no-files-found: error
       - name: Build Linux AppImage
+        id: build_appimage
         if: steps.guard.outputs.skip != 'true'
-        run: npm run build:linux
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build:linux 2>&1 | tee xposter-ci-build.log
+      - name: Upload build failure diagnostic
+        if: ${{ failure() && steps.build_appimage.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-build-failure-log
+          path: xposter-ci-build.log
+          if-no-files-found: error
       - name: Boot built AppImage in an isolated HOME
         if: steps.guard.outputs.skip != 'true'
         shell: bash
