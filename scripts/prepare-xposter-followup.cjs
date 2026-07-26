@@ -100,6 +100,17 @@ const textExtractorPatch =
   ");\n";
 source = source.slice(0, dqWriteAt) + textExtractorPatch + source.slice(dqWriteAt);
 
+// Both repair passes replace a block whose end marker is the declaration itself.
+// replaceBetween deliberately preserves the marker, so a replacement that also
+// emits it can leave two or three declarations concatenated. Collapse them before
+// writing main.js; this is a generated-source invariant, not a runtime workaround.
+const mainWriteMarker = "write('dev/main.js', main);";
+const mainWriteAt = source.indexOf(mainWriteMarker);
+if (mainWriteAt === -1) throw new Error('Missing main.js write marker');
+const automationDeclarationCleanup =
+  "main = main.replace(/(?:let automationRunning = false;\\s*){2,}/g, 'let automationRunning = false;\\n');\n";
+source = source.slice(0, mainWriteAt) + automationDeclarationCleanup + source.slice(mainWriteAt);
+
 // Stable queue IDs intentionally changed getQueue's row shape. Update the old
 // behavioural test to compare text through the canonical extractor, not shape.
 const finalLog = "console.log('xposter follow-up repair applied successfully.');";
