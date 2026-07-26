@@ -86,6 +86,20 @@ replaceRawBetween(
   'safe legacy recovery compatibility',
 );
 
+// One canonical extractor supports both a durable DB row ({payload:{text}})
+// and an IPC/display row ({text}) without weakening durable identity.
+const dqWriteMarker = "write('dev/automation/durableQueue.js', dq);";
+const dqWriteAt = source.indexOf(dqWriteMarker);
+if (dqWriteAt === -1) throw new Error('Missing durableQueue write marker');
+const textExtractorPatch =
+  "dq = replaceOnce(\n" +
+  "  dq,\n" +
+  "  \"function textOf(item) {\\n  return item && item.payload && typeof item.payload.text === 'string' ? item.payload.text : '';\\n}\",\n" +
+  "  \"function textOf(item) {\\n  if (item && item.payload && typeof item.payload.text === 'string') return item.payload.text;\\n  if (item && typeof item.text === 'string') return item.text;\\n  return '';\\n}\",\n" +
+  "  'durableQueue display text compatibility',\n" +
+  ");\n";
+source = source.slice(0, dqWriteAt) + textExtractorPatch + source.slice(dqWriteAt);
+
 // Stable queue IDs intentionally changed getQueue's row shape. Update the old
 // behavioural test to compare text through the canonical extractor, not shape.
 const finalLog = "console.log('xposter follow-up repair applied successfully.');";
