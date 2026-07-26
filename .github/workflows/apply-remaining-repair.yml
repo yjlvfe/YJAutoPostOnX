@@ -1,45 +1,75 @@
-name: Apply remaining audit repair
+name: Apply xposter audit completion
 
 on:
   push:
     branches:
-      - fix/remaining-audit-20260726
+      - fix/xposter-completion-20260726
 
 permissions:
   contents: write
 
 jobs:
   apply-test-build:
-    if: ${{ !contains(github.event.head_commit.message, '[remaining-repair]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[xposter-complete]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: fix/remaining-audit-20260726
+          ref: fix/xposter-completion-20260726
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Apply guarded source transformations
-        run: node scripts/apply-remaining-repair.cjs
+      - name: Apply audited source transformations
+        run: |
+          node scripts/apply-remaining-repair.cjs
+          node scripts/apply-xposter-followup.cjs
       - name: Bump package version
         run: npm version 5.20.0 --no-git-tag-version
       - name: Install exact dependencies
         run: npm ci
       - name: Run complete test suite
         run: npm test
-      - name: Run Electron/UI tests
+      - name: Run Electron and renderer integration tests
         run: npm run test:electron
-      - name: Build AppImage
+      - name: Build Linux AppImage
         run: npm run build:linux
-      - name: Capture production audit
+      - name: Boot built AppImage in an isolated HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(find dist -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          test -n "$APPIMAGE"
+          chmod +x "$APPIMAGE"
+          ISO_HOME="$(mktemp -d)"
+          export HOME="$ISO_HOME"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+          set +e
+          timeout 30s xvfb-run -a "$APPIMAGE" --no-sandbox
+          CODE=$?
+          set -e
+          if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 124 ]; then
+            echo "AppImage exited unexpectedly with $CODE"
+            exit "$CODE"
+          fi
+          test -f "$HOME/.config/x-poster-shared/workflow.sqlite"
+      - name: Capture production dependency audit
         run: npm audit --omit=dev --json > audit-prod.json || true
       - name: Commit verified repair
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dev test package.json package-lock.json .github/workflows/ci.yml audit-prod.json
-          git commit -m "fix: finish durable workflow audit [remaining-repair]"
-          git push origin HEAD:fix/remaining-audit-20260726
+          git commit -m "fix: complete xposter durable workflow repair [xposter-complete]"
+          git push origin HEAD:fix/xposter-completion-20260726
+      - name: Upload verified AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: YJAutoPostOnX-5.20.0-AppImage
+          path: dist/*.AppImage
+          if-no-files-found: error
