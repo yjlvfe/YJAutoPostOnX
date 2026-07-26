@@ -78,13 +78,15 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          ELECTRON=./node_modules/.bin/electron
+          test -x "$ELECTRON"
           {
             echo '=== smoke.test.js ==='
-            timeout --signal=TERM --kill-after=10s 60s xvfb-run -a electron --no-sandbox test/smoke.test.js
+            timeout --signal=TERM --kill-after=10s 60s xvfb-run -a "$ELECTRON" --no-sandbox test/smoke.test.js
             echo '=== ipc-generation.test.js ==='
-            timeout --signal=TERM --kill-after=10s 90s xvfb-run -a electron --no-sandbox test/ipc-generation.test.js
+            timeout --signal=TERM --kill-after=10s 90s xvfb-run -a "$ELECTRON" --no-sandbox test/ipc-generation.test.js
             echo '=== full-ui.test.js ==='
-            timeout --signal=TERM --kill-after=10s 90s xvfb-run -a electron --no-sandbox test/full-ui.test.js
+            timeout --signal=TERM --kill-after=10s 90s xvfb-run -a "$ELECTRON" --no-sandbox test/full-ui.test.js
           } 2>&1 | tee xposter-ci-electron.log
       - name: Upload Electron-test failure diagnostic
         if: ${{ failure() && steps.electron_tests.outcome == 'failure' }}
