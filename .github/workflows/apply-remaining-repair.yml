@@ -123,6 +123,7 @@ jobs:
           path: appimage-build.log
           if-no-files-found: error
       - name: Boot AppImage in isolated HOME
+        id: boot
         shell: bash
         run: |
           set -euo pipefail
@@ -134,15 +135,23 @@ jobs:
           export XDG_CONFIG_HOME="$HOME/.config"
           export XDG_CACHE_HOME="$HOME/.cache"
           export XDG_DATA_HOME="$HOME/.local/share"
+          export APPIMAGE_EXTRACT_AND_RUN=1
           mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
           set +e
-          timeout --signal=TERM --kill-after=10s 30s xvfb-run -a "$APPIMAGE" --no-sandbox
-          CODE=$?
+          timeout --signal=TERM --kill-after=10s 30s xvfb-run -a "$APPIMAGE" --no-sandbox 2>&1 | tee appimage-boot.log
+          CODE=${PIPESTATUS[0]}
           set -e
           if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 124 ]; then
             exit "$CODE"
           fi
           test -f "$HOME/.config/x-poster-shared/workflow.sqlite"
+      - name: Upload AppImage boot failure log
+        if: ${{ failure() && steps.boot.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-appimage-boot-failure-log
+          path: appimage-boot.log
+          if-no-files-found: warn
       - name: Audit production dependencies
         shell: bash
         run: |
