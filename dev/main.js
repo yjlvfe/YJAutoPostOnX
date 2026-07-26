@@ -425,6 +425,28 @@ ipcMain.handle('get-queue', async (event, profileName) => {
   }
 });
 
+ipcMain.handle('get-queue-state', async () => {
+  try {
+    const [items, counts, integrity, unresolved] = await Promise.all([
+      durableQueue.getQueueDetailed(),
+      durableQueue.getBacklogCounts(),
+      durableQueue.integrityCheck(),
+      durableQueue.countUnresolved(),
+    ]);
+    return { success: true, items, counts, integrity, unresolved };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || 'تعذر قراءة مخزن العمل',
+      code: error?.code || 'WORKFLOW_READ_FAILED',
+      items: [],
+      counts: null,
+      integrity: error?.health || null,
+      unresolved: null,
+    };
+  }
+});
+
 ipcMain.handle('add-posts', async (event, newPosts, profileName) => {
   // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
   try {
@@ -465,66 +487,80 @@ ipcMain.handle('add-posts', async (event, newPosts, profileName) => {
   }
 });
 
-// Deletes by post TEXT, not by row position — a position captured when the UI
-// last loaded the list goes stale the moment publishing consumes a post, and
-// would delete a different post than the one the user picked.
-ipcMain.handle('bulk-delete', async (event, texts, profileName) => {
-  // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
+// Destructive operations use durable UUID + expected revision + request ID.
+ipcMain.handle('bulk-delete', async (_event, mutations) => {
   try {
-    if (!Array.isArray(texts)) return null;
-    // Deletion is authoritative: an item already leased or past the dispatch
-    // boundary is reported as blocked rather than silently claimed as deleted,
-    // because that post may still go out.
-    return await durableQueue.bulkDeleteByText(texts);
-  } catch (e) {
-    console.error('bulk-delete IPC error:', e?.message || e);
-    return null;
+    if (!Array.isArray(mutations)) throw new Error('mutations must be an array');
+    return await durableQueue.bulkDeleteById(mutations);
+  } catch (error) {
+    return { deleted: 0, blocked: [], error: error?.message || 'unknown error', code: error?.code || null };
   }
 });
 
 ipcMain.handle('get-recovery-items', async (_event, profileName) => {
   try { return { success: true, ...(await durableQueue.getRecoveryItems(profileName || 'Default')) }; }
-  catch (e) { return { success: false, error: e.message, pending: [], deadLetters: [] }; }
+  catch (error) {
+    return { success: false, error: error.message, code: error.code || null, pending: [], deadLetters: [] };
+  }
 });
 
-ipcMain.handle('requeue-recovery-item', async (_event, profileName, kind, text, options) => {
+ipcMain.handle('recovery-confirm-published', async (_event, mutation, proof) => {
+  try { return { success: await durableQueue.confirmPublished(mutation, proof || {}) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
+});
+
+ipcMain.handle('recovery-confirm-not-published', async (_event, mutation, acknowledgement) => {
   try {
-    if (!['pending', 'dead'].includes(kind) || typeof text !== 'string' || !text.trim()) throw new Error('طلب استعادة غير صالح');
-    // A 'pending' item crossed the irreversible boundary with an unknown
-    // outcome. Requeueing it without the user confirming it was NOT published
-    // would post it twice, so the store demands explicit confirmation.
     return {
-      success: await durableQueue.requeueRecovery(profileName || 'Default', kind, text, options || {}),
+      success: await durableQueue.confirmNotPublishedAndRequeue(mutation, acknowledgement || {}),
     };
-  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
+  } catch (error) { return { success: false, error: error.message, code: error.code || null }; }
 });
 
-ipcMain.handle('confirm-recovery-published', async (_event, text, proof) => {
-  try {
-    if (typeof text !== 'string' || !text.trim()) throw new Error('طلب تأكيد غير صالح');
-    return { success: await durableQueue.confirmRecoveryPublished(text, proof || {}) };
-  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
+ipcMain.handle('recovery-requeue-dead', async (_event, mutation) => {
+  try { return { success: await durableQueue.requeueDead(mutation) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
 });
 
-ipcMain.handle('discard-recovery-item', async (_event, profileName, kind, text) => {
-  try {
-    if (!['pending', 'dead'].includes(kind) || typeof text !== 'string' || !text.trim()) throw new Error('طلب حذف غير صالح');
-    return { success: await durableQueue.discardRecovery(profileName || 'Default', kind, text) };
-  } catch (e) { return { success: false, error: e.message }; }
+ipcMain.handle('recovery-discard-dead', async (_event, mutation) => {
+  try { return { success: await durableQueue.discardDead(mutation) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
+});
+
+// Backward-compatible channels fail safely and still require explicit evidence.
+ipcMain.handle('requeue-recovery-item', async (_event, profileName, kind, identity, options) => {
+  try { return { success: await durableQueue.requeueRecovery(profileName, kind, identity, options || {}) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
+});
+ipcMain.handle('confirm-recovery-published', async (_event, identity, proof) => {
+  try { return { success: await durableQueue.confirmRecoveryPublished(identity, proof || {}) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
+});
+ipcMain.handle('discard-recovery-item', async (_event, profileName, kind, identity) => {
+  try { return { success: await durableQueue.discardRecovery(profileName, kind, identity) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
 });
 
 ipcMain.handle('workflow-health', async () => {
   try {
-    const [integrity, unresolved] = await Promise.all([
+    const [integrity, unresolved, backups, counts] = await Promise.all([
       durableQueue.integrityCheck(),
       durableQueue.countUnresolved(),
+      durableQueue.listWorkflowSnapshots(),
+      durableQueue.getBacklogCounts(),
     ]);
-    return { success: true, integrity, unresolved };
-  } catch (e) { return { success: false, error: e.message }; }
+    return { success: true, integrity, unresolved, backups, counts };
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code || null, health: error.health || null };
+  }
+});
+
+ipcMain.handle('create-workflow-backup', async () => {
+  try { return { success: true, snapshot: await durableQueue.createWorkflowSnapshot({ force: true }) }; }
+  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
 });
 
 let automationRunning = false;
-
 ipcMain.handle('start-posting', async (event, config) => {
   // Fail closed. After a fatal fault this process is on its way down and its
   // in-memory state is not trustworthy enough to own an irreversible action.
@@ -533,6 +569,16 @@ ipcMain.handle('start-posting', async (event, config) => {
   }
   if (stopInProgress) {
     return { success: false, error: 'جارٍ إيقاف تشغيل سابق — انتظر حتى يكتمل.', code: 'STOP_IN_PROGRESS' };
+  }
+  try {
+    await durableQueue.assertHealthy();
+  } catch (error) {
+    return {
+      success: false,
+      error: 'فشل فحص سلامة مخزن العمل. أُوقف النشر لحماية الطابور؛ افتح فحص الصحة أو استعد نسخة احتياطية.',
+      code: error.code || 'WORKFLOW_HEALTH_FAILED',
+      health: error.health || null,
+    };
   }
   if (automationRunning) {
     mainWindow.webContents.send('status-update', { type: 'warning', message: 'Automation already running' });

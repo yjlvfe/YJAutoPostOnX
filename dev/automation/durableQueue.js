@@ -22,6 +22,7 @@ const log = require('../utils/logger');
 const { WorkflowStore } = require('./workflowStore');
 const { migrateLegacyWorkflow } = require('./workflowMigration');
 const { listProfilesOrdered, profileDataDir } = require('./profileRegistry');
+const workflowBackup = require('./workflowBackup');
 
 const SHARED_DIR = path.join(os.homedir(), '.config', 'x-poster-shared');
 
@@ -51,10 +52,21 @@ async function getStore() {
         throw error;
       }
       const store = new WorkflowStore({ rootDir: SHARED_DIR });
-      // Anything left mid-flight by a previous process is resolved before the
-      // first lease of this session.
-      store.reconcileStartup({ requestId: `startup:${Date.now()}` });
-      store.reclaimExpiredLeases({ requestId: `startup-reclaim:${Date.now()}` });
+      try {
+        // Fail closed before the first mutation. Cleanup-only findings (orphaned
+        // bytes) are intentionally not startup blockers; corruption, FK errors,
+        // missing media and item/attempt split-brain are.
+        assertHealthyResult(store.integrityCheck(), 'startup_pre_recovery');
+
+        // Anything left mid-flight by a previous process is resolved before the
+        // first lease of this session.
+        store.reconcileStartup({ requestId: `startup:${Date.now()}` });
+        store.reclaimExpiredLeases({ requestId: `startup-reclaim:${Date.now()}` });
+        assertHealthyResult(store.integrityCheck(), 'startup_post_recovery');
+      } catch (error) {
+        try { store.close(); } catch { /* best effort */ }
+        throw error;
+      }
       cachedStore = store;
       return store;
     })();
@@ -64,10 +76,37 @@ async function getStore() {
 }
 
 function textOf(item) {
-  return item && item.payload && typeof item.payload.text === 'string' ? item.payload.text : '';
+  if (item && item.payload && typeof item.payload.text === 'string') return item.payload.text;
+  if (item && typeof item.text === 'string') return item.text;
+  return '';
 }
 
-// ── Paginating reads ─────────────────────────────────────────────────────────
+function criticalHealthProblems(health) {
+  if (!health || typeof health !== 'object') return ['missing_health_result'];
+  const problems = [];
+  if (health.quickCheck !== 'ok') problems.push('quick_check');
+  if (Array.isArray(health.foreignKeyViolations) && health.foreignKeyViolations.length) problems.push('foreign_keys');
+  if (Array.isArray(health.mediaProblems) && health.mediaProblems.length) problems.push('managed_media');
+  if (Array.isArray(health.stateConsistencyViolations) && health.stateConsistencyViolations.length) problems.push('state_consistency');
+  return problems;
+}
+
+function assertHealthyResult(health, phase = 'runtime') {
+  const problems = criticalHealthProblems(health);
+  if (problems.length === 0) return health;
+  const error = new Error(`Workflow store health gate failed at ${phase}: ${problems.join(', ')}`);
+  error.code = 'WORKFLOW_HEALTH_FAILED';
+  error.phase = phase;
+  error.health = health;
+  throw error;
+}
+
+async function assertHealthy(options = {}) {
+  const store = await getStore();
+  return assertHealthyResult(store.integrityCheck(options), 'runtime');
+}
+
+// ── Paginating reads// ── Paginating reads ─────────────────────────────────────────────────────────
 //
 // WorkflowStore.listQueued hard-clamps `limit` to 1000 and listItems to 10000,
 // so a single call can never see a queue larger than that. Every read below
@@ -151,12 +190,17 @@ function collectQueuedTexts(store) {
 /** Shape a durable item like the legacy queue entry the UI expects. */
 function toLegacyEntry(item) {
   const media = item.media && item.media.length > 0 ? item.media[0] : null;
-  const text = textOf(item);
-  if (!media) return text;
-  return { text, media_path: media.managedPath || media.originalPath };
+  return {
+    id: item.id,
+    text: textOf(item),
+    media_path: media ? (media.managedPath || media.originalPath) : null,
+    state: item.state,
+    revision: item.revision,
+  };
 }
 
 /**
+ * Resolve a profile name/**
  * Resolve a profile name to its stable UUID, creating it if needed.
  *
  * Profile identity must never be the display name: renaming or deleting a
@@ -288,44 +332,99 @@ async function addPosts(newPosts, _profileName) {
 }
 
 /**
- * Delete by text, addressed against live state.
- *
- * A queued item is discarded into a non-resurrectable tombstone. An item that
- * is already leased or past the dispatch boundary is NOT silently reported as
- * deleted — that was the old bug where the UI claimed success while the post
- * still went out.
+ * Delete by durable item ID. IDs do not change when the queue is consumed,
+ * reordered, deferred, or when two rows happen to contain identical text.
  */
-async function bulkDeleteByText(texts) {
-  const store = await getStore();
-  const wanted = new Set((texts || []).filter((t) => typeof t === 'string'));
-  if (wanted.size === 0) return { deleted: 0, blocked: [], remaining: (await getQueue()).length };
-
-  let deleted = 0;
-  const blocked = [];
-  // Paged: an item past position 1000 was previously neither deleted nor
-  // reported as blocked, so the UI showed a silent no-op.
-  for (const item of readAllItems(store, ['queued', 'deferred', 'leased', 'dispatch_started'])) {
-    const text = textOf(item);
-    if (!wanted.has(text)) continue;
-    if (item.state === 'queued' || item.state === 'deferred') {
-      try {
-        store.discardQueued({
-          id: item.id,
-          expectedRevision: item.revision,
-          requestId: `bulk-delete:${item.id}:${item.revision}`,
-        });
-        deleted += 1;
-      } catch (error) {
-        blocked.push({ text, reason: error.code || 'CONFLICT' });
-      }
-    } else {
-      blocked.push({ text, reason: `IN_FLIGHT_${item.state.toUpperCase()}` });
-    }
+function mutationRequest(raw, prefix) {
+  if (typeof raw === 'string') {
+    return { id: raw, expectedRevision: null, requestId: `${prefix}:legacy:${raw}` };
   }
-  return { deleted, blocked, remaining: readAllQueuedItems(store).length };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  const expectedRevision = Number.isInteger(raw.expectedRevision) && raw.expectedRevision >= 0
+    ? raw.expectedRevision
+    : null;
+  const requestId = typeof raw.requestId === 'string' && raw.requestId.trim()
+    ? raw.requestId.trim()
+    : `${prefix}:${id}:${expectedRevision ?? 'live'}`;
+  return id ? { id, expectedRevision, requestId } : null;
 }
 
-// ── Recovery ─────────────────────────────────────────────────────────────────
+/** Delete queue rows by stable UUID with compare-and-swap revision checks. */
+async function bulkDeleteById(requests) {
+  const store = await getStore();
+  const normalized = (requests || []).map((entry) => mutationRequest(entry, 'bulk-delete-id')).filter(Boolean);
+  if (normalized.length === 0) {
+    return { deleted: 0, blocked: [], remaining: readAllBacklogItems(store).length };
+  }
+
+  const live = new Map(
+    readAllItems(store, ['queued', 'deferred', 'leased', 'dispatch_started'])
+      .map((item) => [item.id, item]),
+  );
+  let deleted = 0;
+  const blocked = [];
+
+  for (const request of normalized) {
+    const item = live.get(request.id);
+    if (!item) {
+      blocked.push({ id: request.id, reason: 'NOT_FOUND' });
+      continue;
+    }
+    if (request.expectedRevision !== null && request.expectedRevision !== item.revision) {
+      blocked.push({
+        id: item.id,
+        text: textOf(item),
+        reason: 'REVISION_CONFLICT',
+        expectedRevision: request.expectedRevision,
+        actualRevision: item.revision,
+      });
+      continue;
+    }
+    if (item.state !== 'queued' && item.state !== 'deferred') {
+      blocked.push({ id: item.id, text: textOf(item), reason: `IN_FLIGHT_${item.state.toUpperCase()}` });
+      continue;
+    }
+    try {
+      store.discardQueued({
+        id: item.id,
+        expectedRevision: item.revision,
+        requestId: request.requestId,
+      });
+      deleted += 1;
+    } catch (error) {
+      blocked.push({ id: item.id, text: textOf(item), reason: error.code || 'CONFLICT' });
+    }
+  }
+
+  return { deleted, blocked, remaining: readAllBacklogItems(store).length };
+}
+
+/** Compatibility only: refuse duplicate text instead of guessing a row. */
+async function bulkDeleteByText(texts) {
+  const store = await getStore();
+  const live = readAllItems(store, ['queued', 'deferred', 'leased', 'dispatch_started']);
+  const requests = [];
+  const blocked = [];
+  for (const text of new Set((texts || []).filter((value) => typeof value === 'string'))) {
+    const matches = live.filter((item) => textOf(item) === text);
+    if (matches.length === 1) {
+      requests.push({
+        id: matches[0].id,
+        expectedRevision: matches[0].revision,
+        requestId: `bulk-delete-text-compat:${matches[0].id}:${matches[0].revision}`,
+      });
+    } else if (matches.length > 1) {
+      blocked.push({ text, reason: 'AMBIGUOUS_TEXT_ADDRESS', ids: matches.map((item) => item.id) });
+    } else {
+      blocked.push({ text, reason: 'NOT_FOUND' });
+    }
+  }
+  const result = await bulkDeleteById(requests);
+  return { ...result, blocked: [...blocked, ...result.blocked] };
+}
+
+// ── Recovery// ── Recovery// ── Recovery ─────────────────────────────────────────────────────────────────
 
 /**
  * Everything awaiting a human decision.
@@ -336,89 +435,155 @@ async function bulkDeleteByText(texts) {
  */
 async function getRecoveryItems(_profileName) {
   const store = await getStore();
-  const pending = store.listRecovery().map((item) => ({
+  const describe = (item) => ({
     id: item.id,
+    revision: item.revision,
     text: textOf(item),
+    media: (item.media || []).map((entry) => ({
+      ordinal: entry.ordinal,
+      sha256: entry.sha256,
+      byteSize: entry.byteSize,
+      managedPath: entry.managedPath,
+    })),
     reason: item.reason,
     profileName: item.lastProfile ? item.lastProfile.name : null,
     attemptedText: item.currentAttempt ? item.currentAttempt.renderedText : null,
     evidence: item.currentAttempt ? item.currentAttempt.evidence : null,
+    attemptId: item.currentAttempt ? item.currentAttempt.id : null,
     at: item.updatedAtMs ? new Date(item.updatedAtMs).toISOString() : null,
-  }));
-  const deadLetters = readAllItems(store, ['dead']).map((item) => ({
-    id: item.id,
-    text: textOf(item),
-    reason: item.reason,
-    error: item.error,
-    at: item.updatedAtMs ? new Date(item.updatedAtMs).toISOString() : null,
-  }));
+  });
+  const pending = store.listRecovery().map(describe);
+  const deadLetters = readAllItems(store, ['dead']).map(describe);
   return { pending, deadLetters };
 }
 
-/**
- * Put a recovery item back in the queue.
- *
- * For an ambiguous item this REQUIRES the user to confirm it was not published,
- * because requeueing something already live on X duplicates it irreversibly.
- */
-async function requeueRecovery(_profileName, kind, postText, options = {}) {
-  const store = await getStore();
-  const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
-  // Paged, and deliberately so: an unresolved ambiguous item blocks publishing
-  // for EVERY profile, so one that fell outside the old 500-row window could
-  // never be resolved from the UI and the whole app stayed wedged.
-  const match = readAllItems(store, states).find((item) => textOf(item) === postText);
-  if (!match) return false;
-
-  if (kind === 'dead') {
-    store.requeueTerminal({
-      id: match.id,
-      expectedRevision: match.revision,
-      requestId: `requeue-dead:${match.id}:${match.revision}`,
-    });
-    return true;
+function recoveryMatch(store, states, identity) {
+  let request = mutationRequest(identity, 'recovery');
+  if (typeof identity === 'string') {
+    const direct = store.getItem(identity);
+    if (direct && states.includes(direct.state)) {
+      request = { id: direct.id, expectedRevision: direct.revision, requestId: 'recovery-id:' + direct.id + ':' + direct.revision };
+    } else {
+      const matches = readAllItems(store, states).filter((item) => textOf(item) === identity);
+      if (matches.length > 1) {
+        const error = new Error('Recovery text matches more than one durable item; refresh and use its ID.');
+        error.code = 'AMBIGUOUS_TEXT_ADDRESS';
+        error.ids = matches.map((item) => item.id);
+        throw error;
+      }
+      if (matches.length === 0) return null;
+      const item = matches[0];
+      request = { id: item.id, expectedRevision: item.revision, requestId: 'recovery-text-compat:' + item.id + ':' + item.revision };
+    }
   }
-
-  store.resolveRecovery({
-    id: match.id,
-    action: 'requeue',
-    confirmedNotPublished: options.confirmedNotPublished === true,
-    evidence: options.evidence || null,
-    requestId: `requeue-ambiguous:${match.id}:${match.revision}`,
-  });
-  return true;
+  if (!request) return null;
+  if (typeof identity !== 'string' && request.expectedRevision === null) {
+    const error = new Error('expectedRevision is required for recovery mutations.');
+    error.code = 'REVISION_REQUIRED';
+    throw error;
+  }
+  const item = store.getItem(request.id);
+  if (!item || !states.includes(item.state)) return null;
+  if (request.expectedRevision !== null && request.expectedRevision !== item.revision) {
+    const error = new Error('The recovery item revision no longer matches. Refresh before acting.');
+    error.code = 'REVISION_CONFLICT';
+    error.expectedRevision = request.expectedRevision;
+    error.actualRevision = item.revision;
+    throw error;
+  }
+  return { request, item };
 }
 
-async function discardRecovery(_profileName, kind, postText) {
-  const store = await getStore();
-  const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
-  const match = readAllItems(store, states).find((item) => textOf(item) === postText);
-  if (!match) return false;
-  store.resolveRecovery({
-    id: match.id,
-    action: 'close',
-    evidence: { closedBy: 'user' },
-    requestId: `discard-recovery:${match.id}:${match.revision}`,
-  });
-  return true;
+function requirePublishedProof(proof) {
+  const externalUrl = typeof proof?.externalUrl === 'string' ? proof.externalUrl.trim() : '';
+  const externalId = typeof proof?.externalId === 'string' ? proof.externalId.trim() : '';
+  if (!externalUrl && !externalId) {
+    const error = new Error('A status URL or external post ID is required to confirm publication.');
+    error.code = 'PROOF_REQUIRED';
+    throw error;
+  }
+  return { ...proof, externalUrl: externalUrl || null, externalId: externalId || null };
 }
 
-/** Confirm an ambiguous item really was published, with proof. */
-async function confirmRecoveryPublished(postText, proof = {}) {
+async function confirmPublished(identity, proof = {}) {
   const store = await getStore();
-  const match = store.listRecovery().find((item) => textOf(item) === postText);
-  if (!match || !match.currentAttemptId) return false;
+  const match = recoveryMatch(store, ['ambiguous'], identity);
+  if (!match || !match.item.currentAttemptId) return false;
+  const verifiedProof = requirePublishedProof(proof);
   store.markPublished({
-    attemptId: match.currentAttemptId,
-    externalId: proof.externalId || null,
-    externalUrl: proof.externalUrl || null,
-    evidence: { confirmed: true, source: 'manual_operator_check', ...proof },
-    requestId: `confirm-published:${match.id}:${match.revision}`,
+    attemptId: match.item.currentAttemptId,
+    externalId: verifiedProof.externalId,
+    externalUrl: verifiedProof.externalUrl,
+    evidence: { confirmed: true, source: 'manual_operator_check', ...verifiedProof },
+    requestId: match.request.requestId,
   });
   return true;
 }
 
-// ── Maintenance ──────────────────────────────────────────────────────────────
+async function confirmNotPublishedAndRequeue(identity, acknowledgement = {}) {
+  const store = await getStore();
+  const match = recoveryMatch(store, ['ambiguous'], identity);
+  if (!match) return false;
+  if (acknowledgement.confirmedNotPublished !== true) {
+    const error = new Error('Explicit confirmedNotPublished=true is required.');
+    error.code = 'CONFIRMATION_REQUIRED';
+    throw error;
+  }
+  store.resolveRecovery({
+    id: match.item.id,
+    action: 'requeue',
+    confirmedNotPublished: true,
+    evidence: acknowledgement.evidence || null,
+    requestId: match.request.requestId,
+  });
+  return true;
+}
+
+async function requeueDead(identity) {
+  const store = await getStore();
+  const match = recoveryMatch(store, ['dead'], identity);
+  if (!match) return false;
+  store.requeueTerminal({
+    id: match.item.id,
+    expectedRevision: match.item.revision,
+    requestId: match.request.requestId,
+  });
+  return true;
+}
+
+async function discardDead(identity) {
+  const store = await getStore();
+  const match = recoveryMatch(store, ['dead'], identity);
+  if (!match) return false;
+  store.discardTerminal({
+    id: match.item.id,
+    expectedRevision: match.item.revision,
+    requestId: match.request.requestId,
+  });
+  return true;
+}
+
+// Compatibility wrappers for older callers. Ambiguous rows may only be resolved
+// by an explicit published/not-published decision; they cannot be generically closed.
+async function requeueRecovery(_profileName, kind, identity, options = {}) {
+  if (kind === 'dead') return requeueDead(identity);
+  return confirmNotPublishedAndRequeue(identity, options);
+}
+
+async function discardRecovery(_profileName, kind, identity) {
+  if (kind !== 'dead') {
+    const error = new Error('Ambiguous publishing evidence cannot be discarded. Confirm published or confirm not published.');
+    error.code = 'UNSAFE_RECOVERY_ACTION';
+    throw error;
+  }
+  return discardDead(identity);
+}
+
+async function confirmRecoveryPublished(identity, proof = {}) {
+  return confirmPublished(identity, proof);
+}
+
+// ── Maintenance// ── Maintenance// ── Maintenance ──────────────────────────────────────────────────────────────
 
 /**
  * Bounded housekeeping for long-lived installs: reclaim stale leases, drop
@@ -430,18 +595,31 @@ async function runMaintenance() {
   const reclaimed = store.reclaimExpiredLeases({ requestId: `maint-reclaim:${Date.now()}` });
   const media = store.sweepOrphanMedia();
   const pruned = store.pruneIdempotency({});
+  const snapshot = await workflowBackup.maybeCreateSnapshot(store);
   return {
     reclaimedLeases: reclaimed.reclaimedIds.length,
     mediaFilesRemoved: media.deleted.length,
     mediaBytesReclaimed: media.reclaimedBytes,
     idempotencyPruned: pruned.deleted,
     prunedSkippedReason: pruned.skippedReason || null,
+    snapshot,
   };
 }
 
 async function integrityCheck() {
   const store = await getStore();
   return store.integrityCheck();
+}
+
+async function createWorkflowSnapshot(options = {}) {
+  const store = await getStore();
+  assertHealthyResult(store.integrityCheck(), 'backup');
+  return workflowBackup.createSnapshot(store, options);
+}
+
+async function listWorkflowSnapshots() {
+  const store = await getStore();
+  return workflowBackup.listSnapshots(store.rootDir);
 }
 
 async function countUnresolved() {
@@ -473,13 +651,23 @@ module.exports = {
   UNRESOLVED_STATES,
   getPublishedTexts,
   addPosts,
+  bulkDeleteById,
   bulkDeleteByText,
   getRecoveryItems,
+  confirmPublished,
+  confirmNotPublishedAndRequeue,
+  requeueDead,
+  discardDead,
   requeueRecovery,
   discardRecovery,
   confirmRecoveryPublished,
   runMaintenance,
   integrityCheck,
+  assertHealthy,
+  assertHealthyResult,
+  criticalHealthProblems,
+  createWorkflowSnapshot,
+  listWorkflowSnapshots,
   countUnresolved,
   toLegacyEntry,
   textOf,

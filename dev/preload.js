@@ -33,22 +33,20 @@ contextBridge.exposeInMainWorld('api', {
 
   // Queue operations
   getQueue: (profileName) => ipcRenderer.invoke('get-queue', profileName),
+  getQueueState: () => ipcRenderer.invoke('get-queue-state'),
   addPosts: (posts, profileName) => ipcRenderer.invoke('add-posts', posts, profileName),
-  // Takes post TEXTS, not row indices — an index goes stale as soon as
-  // publishing consumes a post. See durableQueue.bulkDeleteByText.
-  bulkDelete: (texts, profileName) => ipcRenderer.invoke('bulk-delete', texts, profileName),
+  bulkDelete: (mutations, profileName) => ipcRenderer.invoke('bulk-delete', mutations, profileName),
   getRecoveryItems: (profileName) => ipcRenderer.invoke('get-recovery-items', profileName),
-  // `options.confirmedNotPublished` is REQUIRED to requeue a 'pending' item:
-  // it crossed the irreversible boundary, so requeueing it without the user
-  // verifying on X would publish it twice.
-  requeueRecoveryItem: (profileName, kind, text, options) =>
-    ipcRenderer.invoke('requeue-recovery-item', profileName, kind, text, options),
-  confirmRecoveryPublished: (text, proof) =>
-    ipcRenderer.invoke('confirm-recovery-published', text, proof),
-  discardRecoveryItem: (profileName, kind, text) => ipcRenderer.invoke('discard-recovery-item', profileName, kind, text),
+  confirmRecoveryPublished: (mutation, proof) =>
+    ipcRenderer.invoke('recovery-confirm-published', mutation, proof),
+  confirmRecoveryNotPublished: (mutation, acknowledgement) =>
+    ipcRenderer.invoke('recovery-confirm-not-published', mutation, acknowledgement),
+  requeueDeadRecovery: (mutation) => ipcRenderer.invoke('recovery-requeue-dead', mutation),
+  discardDeadRecovery: (mutation) => ipcRenderer.invoke('recovery-discard-dead', mutation),
   workflowHealth: () => ipcRenderer.invoke('workflow-health'),
+  createWorkflowBackup: () => ipcRenderer.invoke('create-workflow-backup'),
 
-  // Automation control
+  // Automation control  // Automation control  // Automation control
   startPosting: (config) => ipcRenderer.invoke('start-posting', config),
   stopAutomation: () => ipcRenderer.send('stop-automation'),
   openProfileForLogin: (profileName) => ipcRenderer.invoke('open-profile-for-login', profileName),

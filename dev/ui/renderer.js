@@ -660,6 +660,15 @@ function buildQueueRow(item) {
     textCell.appendChild(document.createTextNode(' '));
   }
   textCell.appendChild(document.createTextNode(item.text));
+  if (item.state && item.state !== 'queued') {
+    const stateBadge = document.createElement('small');
+    stateBadge.className = 'q-state';
+    const waitSeconds = Math.max(0, Math.ceil((item.waitingMs || 0) / 1000));
+    const waitLabel = waitSeconds > 0 ? ` — متاح بعد ${waitSeconds}ث` : '';
+    stateBadge.textContent = `${item.state}${waitLabel}${item.reason ? ` — ${item.reason}` : ''}`;
+    textCell.appendChild(document.createElement('br'));
+    textCell.appendChild(stateBadge);
+  }
 
   const lenCell = document.createElement('span');
   lenCell.className = 'q-len';
@@ -689,34 +698,86 @@ queueEmptyNote.className = 'empty-note';
 queueEmptyNote.textContent = 'الطابور فارغ — استورد CSV أو ولّد تغريدات من الاستوديو.';
 $('queue-list').appendChild(queueEmptyNote);
 
+let queueRefreshTimer = null;
+
+function workflowHealthBanner() {
+  let banner = document.getElementById('workflow-health-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'workflow-health-banner';
+    banner.className = 'empty-note hidden';
+    const queue = document.getElementById('queue-list');
+    queue.parentElement.insertBefore(banner, queue);
+  }
+  return banner;
+}
+
+function mutationFor(item, prefix) {
+  return {
+    id: item.id,
+    expectedRevision: item.revision,
+    requestId: `${prefix}:${item.id}:${item.revision}:${Date.now()}`,
+  };
+}
+
 async function loadQueue(profile) {
-  const raw = await window.api.getQueue(profile || profileSelect.value);
-  state.queue = Array.isArray(raw) ? raw : [];
-  const seq = ++_queueLoadSeq;
-  state.queueView = state.queue.map((p, i) => {
-    const isObj = p && typeof p === 'object';
-    return {
-      // `id` is for list bookkeeping only (selection + DOM keys) — never send it
-      // to the backend. Deliberately NO `index` field: a stored row position
-      // goes stale the moment publishing consumes a post, and deleting by a
-      // stale index removes the wrong post. Deletion addresses posts by `text`.
-      id: `q${seq}-${i}`,
-      text: isObj ? (p.text || '') : String(p ?? ''),
-      media: isObj ? (p.media_path || null) : null,
-    };
-  });
-  qSelection.clear(); // معرفات جديدة بعد كل تحميل
+  const result = await window.api.getQueueState();
+  const banner = workflowHealthBanner();
+  if (!result || result.success !== true) {
+    state.queue = [];
+    state.queueView = [];
+    queueList.setItems([]);
+    queueEmptyNote.classList.remove('hidden');
+    banner.classList.remove('hidden');
+    banner.textContent = `❌ تعذر قراءة مخزن العمل: ${result?.error || 'خطأ غير معروف'}`;
+    btnMainAction.disabled = true;
+    updateQueueCounters();
+    return;
+  }
+
+  state.queue = Array.isArray(result.items) ? result.items : [];
+  state.queueView = state.queue.map((item) => ({
+    id: item.id,
+    revision: item.revision,
+    text: item.payload?.text || item.text || '',
+    media: item.media?.[0]?.managedPath || item.media_path || null,
+    state: item.state || 'queued',
+    waitingMs: item.waitingMs || 0,
+    reason: item.deferReason || item.reason || null,
+  }));
+  qSelection.clear();
   queueList.setItems(state.queueView);
   queueEmptyNote.classList.toggle('hidden', state.queueView.length > 0);
   updateQueueCounters();
   updateSelectionUI();
+
+  const healthy = result.integrity && result.integrity.ok === true;
+  banner.classList.toggle('hidden', healthy && !result.unresolved);
+  banner.textContent = !healthy
+    ? '⚠️ فحص سلامة مخزن العمل يحتاج مراجعة. النشر متوقف حمايةً للطابور.'
+    : result.unresolved
+      ? `⚠️ يوجد ${result.unresolved} منشور غير محسوم. احسمه قبل بدء نشر جديد.`
+      : '';
+  btnMainAction.disabled = !healthy || Number(result.unresolved || 0) > 0;
+
   await loadRecoveryItems(profile || profileSelect.value);
+  if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+  if (state.queueView.some((item) => item.state === 'deferred' && item.waitingMs > 0)) {
+    queueRefreshTimer = setTimeout(() => loadQueue(profile || profileSelect.value), 30_000);
+  }
 }
 
 async function loadRecoveryItems(profile) {
   const host = $('recovery-list');
   host.replaceChildren();
   const result = await window.api.getRecoveryItems(profile || profileSelect.value);
+  if (!result || result.success !== true) {
+    const error = document.createElement('div');
+    error.className = 'recovery-empty';
+    error.textContent = `تعذر تحميل الاسترداد: ${result?.error || 'خطأ غير معروف'}`;
+    host.appendChild(error);
+    return;
+  }
   const items = [
     ...(result.pending || []).map(item => ({ ...item, kind: 'pending', label: 'بانتظار التحقق' })),
     ...(result.deadLetters || []).map(item => ({ ...item, kind: 'dead', label: 'فشل نهائي' })),
@@ -728,41 +789,75 @@ async function loadRecoveryItems(profile) {
     host.appendChild(empty);
     return;
   }
+
   for (const item of items) {
     const row = document.createElement('div');
     row.className = 'recovery-item';
+    row.dataset.itemId = item.id;
     const kind = document.createElement('span');
     kind.className = 'recovery-kind';
     kind.textContent = item.label;
     const text = document.createElement('span');
     text.className = 'recovery-text';
-    text.textContent = item.text || '';
+    text.textContent = `${item.text || ''}${item.profileName ? ` — ${item.profileName}` : ''}${item.reason ? ` — ${item.reason}` : ''}`;
     const actions = document.createElement('span');
     actions.className = 'recovery-actions';
-    const retry = document.createElement('button');
-    retry.className = 'btn btn--secondary btn--sm';
-    retry.textContent = 'إعادة للطابور';
-    retry.addEventListener('click', async () => {
-      const r = await window.api.requeueRecoveryItem(profile, item.kind, item.text);
-      addLog(r.success ? '↩️ أُعيد المنشور للطابور' : `❌ ${r.error || 'تعذرت الاستعادة'}`, r.success ? 'success' : 'error');
-      await loadQueue(profile);
-    });
-    const discard = document.createElement('button');
-    discard.className = 'btn btn--danger btn--sm';
-    discard.textContent = 'حذف';
-    discard.addEventListener('click', async () => {
-      if (!confirm('حذف هذا العنصر نهائياً من قائمة الاستعادة؟')) return;
-      const r = await window.api.discardRecoveryItem(profile, item.kind, item.text);
-      addLog(r.success ? '🗑️ حُذف عنصر الاستعادة' : `❌ ${r.error || 'تعذر الحذف'}`, r.success ? 'warning' : 'error');
-      await loadRecoveryItems(profile);
-    });
-    actions.append(retry, discard);
+    const mutation = () => mutationFor(item, `recovery-${item.kind}`);
+
+    if (item.kind === 'pending') {
+      const published = document.createElement('button');
+      published.className = 'btn btn--secondary btn--sm';
+      published.textContent = 'تأكيد أنه نُشر';
+      published.addEventListener('click', async () => {
+        const externalUrl = prompt('ألصق رابط المنشور على X للتوثيق:');
+        if (!externalUrl || !externalUrl.trim()) return;
+        const response = await window.api.confirmRecoveryPublished(mutation(), {
+          externalUrl: externalUrl.trim(),
+          checkedAt: new Date().toISOString(),
+        });
+        addLog(response.success ? '✅ ثُبّت المنشور كمنشور فعلاً' : `❌ ${response.error || 'تعذر التأكيد'}`, response.success ? 'success' : 'error');
+        await loadQueue(profile);
+      });
+
+      const notPublished = document.createElement('button');
+      notPublished.className = 'btn btn--secondary btn--sm';
+      notPublished.textContent = 'لم يُنشر — أعده';
+      notPublished.addEventListener('click', async () => {
+        if (!confirm('هل تحققت من X وتأكدت أن المنشور لم يُنشر؟')) return;
+        const response = await window.api.confirmRecoveryNotPublished(mutation(), {
+          confirmedNotPublished: true,
+          evidence: { source: 'renderer_manual_check', checkedAt: new Date().toISOString() },
+        });
+        addLog(response.success ? '↩️ أُعيد المنشور للطابور' : `❌ ${response.error || 'تعذرت الاستعادة'}`, response.success ? 'success' : 'error');
+        await loadQueue(profile);
+      });
+      actions.append(published, notPublished);
+    } else {
+      const retry = document.createElement('button');
+      retry.className = 'btn btn--secondary btn--sm';
+      retry.textContent = 'إعادة للطابور';
+      retry.addEventListener('click', async () => {
+        const response = await window.api.requeueDeadRecovery(mutation());
+        addLog(response.success ? '↩️ أُعيد المنشور للطابور' : `❌ ${response.error || 'تعذرت الاستعادة'}`, response.success ? 'success' : 'error');
+        await loadQueue(profile);
+      });
+      const discard = document.createElement('button');
+      discard.className = 'btn btn--danger btn--sm';
+      discard.textContent = 'حذف نهائي';
+      discard.addEventListener('click', async () => {
+        if (!confirm('حذف عنصر الفشل النهائي؟')) return;
+        const response = await window.api.discardDeadRecovery(mutation());
+        addLog(response.success ? '🗑️ حُذف عنصر الفشل النهائي' : `❌ ${response.error || 'تعذر الحذف'}`, response.success ? 'warning' : 'error');
+        await loadQueue(profile);
+      });
+      actions.append(retry, discard);
+    }
     row.append(kind, text, actions);
     host.appendChild(row);
   }
 }
 
-function updateQueueCounters() {
+function updateQueueCounters() {function updateQueueCounters() {function updateQueueCounters() {
   const n = state.queue.length;
   navQueueBadge.textContent = n;
   mQueue.textContent = n;
@@ -789,25 +884,35 @@ $('select-all').addEventListener('change', (e) => {
 });
 
 async function deleteQueueItem(id) {
-  // ⚡ H7: capture the profile at call time so a profile switch mid-await
-  // doesn't delete or reload the wrong queue.
   const profile = profileSelect.value;
-  const item = state.queueView.find(v => v.id === id);
+  const item = state.queueView.find((entry) => entry.id === id);
   if (!item) return;
-  await window.api.bulkDelete([item.text], profile);
+  const result = await window.api.bulkDelete([mutationFor(item, 'delete-one')], profile);
+  const blocked = Array.isArray(result?.blocked) ? result.blocked : [];
+  addLog(
+    result?.deleted === 1 ? '🗑️ حُذف المنشور' : `تعذر حذف المنشور: ${blocked[0]?.reason || result?.error || 'غير معروف'}`,
+    result?.deleted === 1 ? 'success' : 'warning',
+  );
   await loadQueue(profile);
 }
 
 $('btn-delete-selected').addEventListener('click', async () => {
   if (!qSelection.size) { addLog('لم تحدد أي منشور', 'warning'); return; }
   const profile = profileSelect.value;
-  const texts = state.queueView.filter(v => qSelection.has(v.id)).map(v => v.text);
-  await window.api.bulkDelete(texts, profile);
+  const mutations = state.queueView
+    .filter((item) => qSelection.has(item.id))
+    .map((item) => mutationFor(item, 'delete-selected'));
+  const result = await window.api.bulkDelete(mutations, profile);
+  const deleted = Number.isInteger(result?.deleted) ? result.deleted : 0;
+  const blocked = Array.isArray(result?.blocked) ? result.blocked.length : 0;
+  addLog(
+    `🗑️ حُذف ${deleted} منشور${blocked ? `، وتعذر حذف ${blocked}` : ''}`,
+    blocked ? 'warning' : 'success',
+  );
   await loadQueue(profile);
-  addLog(`🗑️ حُذف ${texts.length} منشور`, 'warning');
 });
 
-// import CSV (two buttons share logic)
+// import CSV// import CSV// import CSV (two buttons share logic)
 async function importCsvFlow() {
   const filePath = await window.api.selectCSV();
   if (!filePath) return;

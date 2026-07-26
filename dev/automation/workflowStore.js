@@ -2098,6 +2098,45 @@ class WorkflowStore {
     );
   }
 
+  discardTerminal({ id, expectedRevision, requestId }) {
+    const normalizedId = assertNonEmptyString(id, 'id');
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new TypeError('expectedRevision must be a non-negative integer');
+    }
+    return this._mutate(
+      'discardTerminal',
+      requestId,
+      { id: normalizedId, expectedRevision },
+      () => {
+        const row = this._getItemRow(normalizedId);
+        if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
+        if (row.state !== 'dead') conflict('INVALID_STATE', `Cannot discard terminal item from ${row.state}`);
+        if (row.revision !== expectedRevision) {
+          conflict('REVISION_CONFLICT', 'The item revision no longer matches');
+        }
+        const now = Date.now();
+        const nextRevision = row.revision + 1;
+        const update = this.db.prepare(`
+          UPDATE workflow_items
+          SET state = 'discarded', discarded_at_ms = ?, reason = 'discarded_dead_by_user',
+              error_json = NULL, revision = ?, updated_at_ms = ?
+          WHERE id = ? AND state = 'dead' AND revision = ?
+        `).run(now, nextRevision, now, normalizedId, expectedRevision);
+        if (update.changes !== 1) conflict('STATE_CONFLICT', 'The dead item changed before it could be discarded');
+        this._recordEvent(
+          normalizedId,
+          'dead_discarded',
+          'dead',
+          'discarded',
+          nextRevision,
+          { discardedBy: 'user' },
+          now,
+        );
+        return this._rowToItem(this._getItemRow(normalizedId));
+      },
+    );
+  }
+
   listItems({ states = [...ITEM_STATES], limit = 100, after = null, afterUpdatedAtMs = null } = {}) {
     this._assertOpen();
     if (!Array.isArray(states) || states.length === 0 || states.some((state) => !ITEM_STATES.has(state))) {
