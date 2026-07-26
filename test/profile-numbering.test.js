@@ -6,7 +6,8 @@
  *      rate limit, never as a successful post URL.
  *   2. profileRegistry — mandatory numbering, ordering (Default = #1),
  *      next-number allocation, legacy-profile migration.
- *   3. queueManager — cursor rename/remove survive profile rename/delete.
+ *   3. the shared queue is untouched by a profile rename — it holds no
+ *      per-profile position, so a rename cannot reset anyone to post #1.
  *   4. "Start from selected profile" slice — no wrap-around to earlier ones.
  *
  * Runs against an ISOLATED HOME so it never touches real user state.
@@ -25,7 +26,7 @@ process.env.HOME = FAKE_HOME;
 const fs = require('fs').promises;
 const { isLimitUrl } = require('../dev/automation/xPoster');
 const registry = require('../dev/automation/profileRegistry');
-const queueManager = require('../dev/automation/queueManager');
+const durableQueue = require('../dev/automation/durableQueue');
 const rateLimitStore = require('../dev/automation/rateLimitStore');
 
 let failures = 0;
@@ -77,7 +78,7 @@ async function main() {
   // has nothing to carry over. Renaming can no longer "reset a profile to post
   // #1", because there is no profile-specific position to reset.
   await fs.mkdir(path.join(dir, 'قديم'), { recursive: true });
-  await queueManager.addPosts(['a', 'b', 'c']);
+  await durableQueue.addPosts(['a', 'b', 'c']);
   rateLimitStore.setCooldown('قديم', 60 * 1000);
 
   await registry.migrateUnnumberedProfiles();
@@ -86,7 +87,7 @@ async function main() {
   check('cooldown survived migration', rateLimitStore.getCooldown('4- قديم') !== null);
   check('old cooldown key gone', rateLimitStore.getCooldown('قديم') === null);
   check('renaming a profile does not touch the shared queue',
-    (await queueManager.getQueue()).length === 3);
+    (await durableQueue.getQueue()).length === 3);
 
   if (failures) {
     console.error(`\n❌ profile-numbering.test.js: ${failures} FAILED`);

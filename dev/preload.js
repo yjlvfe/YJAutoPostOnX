@@ -35,7 +35,7 @@ contextBridge.exposeInMainWorld('api', {
   getQueue: (profileName) => ipcRenderer.invoke('get-queue', profileName),
   addPosts: (posts, profileName) => ipcRenderer.invoke('add-posts', posts, profileName),
   // Takes post TEXTS, not row indices — an index goes stale as soon as
-  // publishing consumes a post. See queueManager.bulkDeleteByText.
+  // publishing consumes a post. See durableQueue.bulkDeleteByText.
   bulkDelete: (texts, profileName) => ipcRenderer.invoke('bulk-delete', texts, profileName),
   getRecoveryItems: (profileName) => ipcRenderer.invoke('get-recovery-items', profileName),
   // `options.confirmedNotPublished` is REQUIRED to requeue a 'pending' item:

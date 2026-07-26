@@ -23,13 +23,85 @@
  * the HTTP round-trip is injected as `runRound`.
  */
 
+/** How many accepted bodies a session carries for dedup context. */
+const MAX_ACCEPTED_BODIES = 60;
+
+/**
+ * Session lifecycle.
+ *
+ * The distinction that matters is STOPPED vs TERMINAL. STOPPED is *parked* —
+ * the worker count was lowered below this session's index, and raising it again
+ * brings the session back. TERMINAL is *spent* — the credential was rejected,
+ * the failure budget ran out, or the session stopped making progress. A spent
+ * session is never respawned by the pool; only an explicit operator reset
+ * (resetTerminalSessions(), wired to the "reset sessions" IPC) revives it,
+ * because the only thing that can change the outcome is a configuration or
+ * credential change the operator has to make.
+ *
+ * Collapsing those two into one state is what let a dead worker be resurrected
+ * at every surviving sibling's round boundary, burning a provider request each
+ * time, forever.
+ */
 const STATUS = Object.freeze({
-  IDLE: 'idle',        // created, not started a round yet
-  RUNNING: 'running',  // 🟢 currently inside an AI round
-  WAITING: 'waiting',  // 🟡 alive but between rounds / paused (count lowered)
-  STOPPED: 'stopped',  // 🔴 stopped (count lowered below this index, or cancelled)
-  DONE: 'done',        // target reached
+  IDLE: 'idle',            // created, not started a round yet
+  RUNNING: 'running',      // 🟢 currently inside an AI round
+  WAITING: 'waiting',      // 🟡 alive but between rounds
+  STOPPED: 'stopped',      // ⏸️ parked: count lowered below this index (reversible)
+  TERMINAL: 'terminal',    // 🔴 spent: never respawned without an explicit reset
+  CANCELLED: 'cancelled',  // ✋ the operator cancelled the run
+  DONE: 'done',            // target reached
 });
+
+/** States from which the pool must never start a new round. */
+const NON_RESPAWNABLE = Object.freeze(new Set([
+  STATUS.TERMINAL,
+  STATUS.CANCELLED,
+  STATUS.DONE,
+]));
+
+/**
+ * Absolute ceilings. These are backstops, not the primary control — per-session
+ * failure and no-progress budgets normally stop a run long before any of these.
+ * They exist so that no code path can issue an unbounded number of paid
+ * provider requests, whatever the UI or a caller asks for.
+ *
+ * MAX_WORKERS is deliberately conservative: every worker holds one in-flight
+ * provider request (up to 120s) plus a growing 16-message thread in memory, and
+ * 32 concurrent requests on one API key is already past what typical providers
+ * allow per key. The UI, the IPC handler and the manager all clamp to this same
+ * number so there is exactly one answer to "how many workers can run".
+ */
+const HARD_LIMITS = Object.freeze({
+  MAX_WORKERS: 32,
+  MAX_TOTAL_CALLS: 1000,
+  MAX_TOTAL_ROUNDS: 1000,
+  MAX_ELAPSED_MS: 2 * 60 * 60_000,   // 2 hours
+});
+
+/** Provider replies that no amount of retrying can fix. */
+const TERMINAL_ERROR_RE = /\b(401|403)\b|unauthorized|forbidden|invalid api key|authentication/i;
+
+/**
+ * Coerce any caller-supplied worker count into [1, MAX_WORKERS].
+ *
+ * Strings, decimals, NaN, Infinity, negatives and absurd values all arrive here
+ * from the renderer's number input and from IPC, and each of them used to be
+ * able to size an array of session objects before anything validated it.
+ */
+function clampWorkerCount(value, fallback = 5) {
+  const n = typeof value === 'number' ? value : parseInt(value, 10);
+  if (!Number.isFinite(n)) return Math.min(Math.max(1, Math.floor(fallback) || 1), HARD_LIMITS.MAX_WORKERS);
+  const i = Math.floor(n);
+  if (i < 1) return 1;
+  return Math.min(i, HARD_LIMITS.MAX_WORKERS);
+}
+
+/** Coerce an optional positive budget, falling back to the hard ceiling. */
+function clampBudget(value, ceiling) {
+  const n = typeof value === 'number' ? value : parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return ceiling;
+  return Math.min(Math.floor(n), ceiling);
+}
 
 /**
  * A single persistent generation session (one continuous AI conversation).
@@ -47,16 +119,22 @@ class GenerationSession {
     this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
   }
 
-  /** Serializable snapshot for cross-restart persistence. */
+  /**
+   * Serializable snapshot for cross-restart persistence.
+   *
+   * `system` is deliberately NOT included. Every session in a pool shares the
+   * manager's system block verbatim, and the envelope's fingerprint is a hash
+   * OF that block — a snapshot is only ever restored when it matches. Writing
+   * it per session stored the same multi-KB prompt once per worker.
+   */
   toJSON() {
     return {
       num: this.num,
-      system: this.system,
       // GROWING THREAD (v4.4.0): persist the last 16 messages so the
       // conversation thread survives app restarts. The thread is what feeds
       // Anthropic's prompt cache (cached prefix is re-served from round 2).
       messages: this.messages.slice(-16),
-      acceptedBodies: this.acceptedBodies.slice(-60),
+      acceptedBodies: this.acceptedBodies.slice(-MAX_ACCEPTED_BODIES),
       roundsCompleted: this.roundsCompleted,
       usage: this.usage,
     };
@@ -64,11 +142,18 @@ class GenerationSession {
 
   /** Rehydrate from a persisted snapshot. */
   static fromJSON(obj, fallbackSystem) {
+    // `obj.system` only exists in snapshots written before the envelope carried
+    // it; the fallback is the authoritative source for everything newer.
     const s = new GenerationSession(obj.num, obj.system || fallbackSystem);
     // GROWING THREAD (v4.4.0): restore the persisted thread so prompt cache
     // continuity is maintained across restarts.
     s.messages = Array.isArray(obj.messages) ? obj.messages.slice(-16) : [];
-    s.acceptedBodies = Array.isArray(obj.acceptedBodies) ? obj.acceptedBodies : [];
+    // Re-capped on the way IN as well as out. An older or hand-edited file
+    // would otherwise reintroduce an unbounded list that every later write
+    // faithfully preserved.
+    s.acceptedBodies = Array.isArray(obj.acceptedBodies)
+      ? obj.acceptedBodies.slice(-MAX_ACCEPTED_BODIES)
+      : [];
     s.roundsCompleted = Number(obj.roundsCompleted) || 0;
     if (obj.usage) s.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, ...obj.usage };
     s.status = STATUS.WAITING;
@@ -103,7 +188,7 @@ class SessionManager {
     this.getBurnedIds = deps.getBurnedIds || (() => new Set());
     this.persist = deps.persist || (() => {});
     this.chunk = deps.chunk || 10;          // tweets requested per round per session
-    this.desiredCount = deps.sessionCount || 5;
+    this.desiredCount = clampWorkerCount(deps.sessionCount, 5);
     this.sessions = [];                      // GenerationSession[]
     this.system = deps.system || '';
     this.inspirationSummary = deps.inspirationSummary || '';
@@ -122,13 +207,98 @@ class SessionManager {
     this.maxNoProgressRounds = Math.max(1, Number(deps.maxNoProgressRounds) || 10);
     this.baseBackoffMs = Math.max(50, Number(deps.baseBackoffMs) || 1000);
     this.maxBackoffMs = Math.max(this.baseBackoffMs, Number(deps.maxBackoffMs) || 30000);
+
+    // Pool-wide budgets. Every one of these is finite, so there is no
+    // combination of inputs that yields an unbounded number of paid requests.
+    this.maxTotalCalls = clampBudget(deps.maxTotalCalls, HARD_LIMITS.MAX_TOTAL_CALLS);
+    this.maxTotalRounds = clampBudget(deps.maxTotalRounds, HARD_LIMITS.MAX_TOTAL_ROUNDS);
+    this.maxElapsedMs = clampBudget(deps.maxElapsedMs, HARD_LIMITS.MAX_ELAPSED_MS);
+
+    // Budget accounting. `_callsAttempted` counts REQUESTS, not successes: a
+    // 401 costs a round-trip and must spend the budget just like a 200 does.
+    this._callsAttempted = 0;
+    this._startedAt = 0;
+    this._budgetStop = null;    // reason code, once any budget trips
+    this._madeProgress = false; // has any round ever accepted anything?
   }
 
-  /** Live desired session count, guarded against a broken getter. */
+  /** Live desired session count, clamped and guarded against a broken getter. */
   _liveCount() {
-    let c;
-    try { c = parseInt(this.getSessionCount(), 10); } catch { c = 0; }
-    return c >= 1 ? c : Math.max(1, this.desiredCount || 1);
+    let raw;
+    try { raw = this.getSessionCount(); } catch { raw = null; }
+    return clampWorkerCount(raw, this.desiredCount || 1);
+  }
+
+  /**
+   * Which pool-wide budget (if any) is spent. Checked immediately before every
+   * provider request and at every round boundary, so the ceiling is an upper
+   * bound on requests actually issued, not on requests already paid for.
+   */
+  _budgetExhausted() {
+    if (this._callsAttempted >= this.maxTotalCalls) return 'budget_calls_exhausted';
+    if (Date.now() - this._startedAt >= this.maxElapsedMs) return 'budget_time_exhausted';
+    let rounds = 0;
+    for (const s of this.sessions) rounds += s.roundsCompleted;
+    if (rounds >= this.maxTotalRounds) return 'budget_rounds_exhausted';
+    return null;
+  }
+
+  /** True once any budget has tripped; latches so the whole pool winds down. */
+  _budgetSpent() {
+    if (this._budgetStop) return true;
+    const reason = this._budgetExhausted();
+    if (reason) { this._budgetStop = reason; return true; }
+    return false;
+  }
+
+  /** Retire a session permanently. Only resetTerminalSessions() undoes this. */
+  _markTerminal(session, reason) {
+    session.status = STATUS.TERMINAL;
+    session._terminal = true;          // legacy flag: existing callers read it
+    session._terminalReason = reason;
+  }
+
+  /**
+   * Charge one failure against a session's budget and retire it if spent.
+   *
+   * Every throw from anywhere in the round pipeline lands here — the provider
+   * call, ingest(), and the engine's sync/context/angle helpers alike. The old
+   * code only charged failures thrown by the provider call; a throw from
+   * ingest() or the engine hit a bare catch-log-sleep-continue that spent no
+   * budget at all, so a permanently broken ingest retried forever.
+   */
+  _chargeFailure(session, err) {
+    const message = (err && err.message) ? err.message : String(err);
+    session.status = STATUS.WAITING;
+    session._lastError = message;
+    session._consecutiveFailures = (session._consecutiveFailures || 0) + 1;
+    if (TERMINAL_ERROR_RE.test(message)) {
+      this._markTerminal(session, 'provider_rejected_credentials');
+    } else if (session._consecutiveFailures >= this.maxConsecutiveFailures) {
+      this._markTerminal(session, 'consecutive_failures_exhausted');
+    }
+    this._emitStatus();
+  }
+
+  /**
+   * Bring retired sessions back. This is the ONLY way out of TERMINAL, and it
+   * exists because the operator has to change something (API key, model, base
+   * URL) before another attempt can end differently.
+   */
+  resetTerminalSessions() {
+    let revived = 0;
+    for (const s of this.sessions) {
+      if (s.status !== STATUS.TERMINAL) continue;
+      s.status = STATUS.WAITING;
+      delete s._terminal;
+      delete s._terminalReason;
+      delete s._lastError;
+      s._consecutiveFailures = 0;
+      s._noProgressRounds = 0;
+      revived++;
+    }
+    this._budgetStop = null;
+    return revived;
   }
 
   /** Restore persisted sessions (called before run when resuming). */
@@ -247,59 +417,64 @@ class SessionManager {
    */
   async _runSessionRound(session) {
     if (this.isCancelled()) return 0;
-
-    // 1. sync() — pull shared queue+preview into this session's dedup state.
-    //    ONLY here, at the very start of the round — never mid-round.
-    this.engine.syncSessionDedup(session, this.sharedQueue, this.sharedPreview);
-
-    // 2. Build the round context (avoid-list from THIS session's accepted +
-    //    cross-session inspiration themes).
-    const acceptedContext = this.engine.buildAcceptedContext(session.acceptedBodies);
-    const angles = this.engine.selectAngles(this.chunk, this.getBurnedIds());
+    if (session.status === STATUS.TERMINAL) return 0;
 
     // Clear stale error before starting; if this round fails, _lastError is
     // set again so the UI always shows FRESH errors, never stale ones.
     delete session._lastError;
-
-    // 3. Send the AI turn inside the SAME persistent thread and wait.
     session.status = STATUS.RUNNING;
     this._emitStatus();
-    let result;
+
+    // ONE try/catch around the WHOLE pipeline. Every step below can throw, and
+    // every throw must cost the session part of its failure budget — otherwise
+    // a step that fails deterministically (a broken ingest, an engine helper
+    // that always throws) spins without limit.
     try {
-      result = await this.runRound({
+      // 1. sync() — pull shared queue+preview into this session's dedup state.
+      //    ONLY here, at the very start of the round — never mid-round.
+      this.engine.syncSessionDedup(session, this.sharedQueue, this.sharedPreview);
+
+      // 2. Build the round context (avoid-list from THIS session's accepted +
+      //    cross-session inspiration themes).
+      const acceptedContext = this.engine.buildAcceptedContext(session.acceptedBodies);
+      const angles = this.engine.selectAngles(this.chunk, this.getBurnedIds());
+
+      // 3. Spend one unit of the pool's call budget — checked and incremented
+      //    with no await in between, so the ceiling is exact.
+      if (this._budgetSpent()) {
+        session.status = STATUS.WAITING;
+        return 0;
+      }
+      this._callsAttempted++;
+
+      // 4. Send the AI turn inside the SAME persistent thread and wait.
+      const result = await this.runRound({
         session,
         angles,
         acceptedContext,
         inspirationSummary: this.inspirationSummary,
         chunk: this.chunk,
       });
-    } catch (err) {
-      session.status = STATUS.WAITING;
-      session._lastError = err.message;
-      session._consecutiveFailures = (session._consecutiveFailures || 0) + 1;
-      const terminal = /\b(401|403)\b|unauthorized|forbidden|invalid api key|authentication/i.test(err.message || '');
-      if (terminal || session._consecutiveFailures >= this.maxConsecutiveFailures) {
-        session._terminal = true;
-        session.status = STATUS.STOPPED;
+
+      // 5. Accounting + ingest accepted posts into the shared queue.
+      if (result && result.usage) {
+        session.usage.input += result.usage.input || 0;
+        session.usage.output += result.usage.output || 0;
+        session.usage.cacheRead += result.usage.cacheRead || 0;
+        session.usage.cacheWrite += result.usage.cacheWrite || 0;
+        session.usage.calls++;
       }
+      const gained = this.ingest((result && result.cores) || [], session) || 0;
+      session._consecutiveFailures = 0;
+      session.roundsCompleted++;
+      session.status = STATUS.WAITING;
+      if (gained > 0) this._madeProgress = true;
       this._emitStatus();
+      return gained;
+    } catch (err) {
+      this._chargeFailure(session, err);
       return 0;
     }
-
-    // 4. Accounting + ingest accepted posts into the shared queue.
-    if (result && result.usage) {
-      session.usage.input += result.usage.input || 0;
-      session.usage.output += result.usage.output || 0;
-      session.usage.cacheRead += result.usage.cacheRead || 0;
-      session.usage.cacheWrite += result.usage.cacheWrite || 0;
-      session.usage.calls++;
-    }
-    const gained = this.ingest((result && result.cores) || [], session) || 0;
-    session._consecutiveFailures = 0;
-    session.roundsCompleted++;
-    session.status = STATUS.WAITING;
-    this._emitStatus();
-    return gained;
   }
 
   /**
@@ -310,6 +485,11 @@ class SessionManager {
    * @param {function} getTargetMet - () => boolean  (e.g. accepted >= target)
    */
   async run(getTargetMet) {
+    // Start the clock before anything can spend it. The elapsed-time budget is
+    // measured from here, so a slow first launch counts against the run too.
+    this._startedAt = Date.now();
+    this._budgetStop = null;
+
     // Sessions launched per second when many start at once: a smooth ramp
     // instead of firing hundreds of simultaneous HTTP requests in one tick.
     // This delays LAUNCH only — once launched, every session loops freely.
@@ -336,7 +516,7 @@ class SessionManager {
     const sessionLoop = async (session, launchDelayMs) => {
       try {
         if (launchDelayMs > 0) await launchWait(launchDelayMs);
-        while (!getTargetMet() && !this.isCancelled()) {
+        while (!getTargetMet() && !this.isCancelled() && !this._budgetSpent()) {
           try {
             const liveCount = this._liveCount();
             // Golden rule: count changes apply BETWEEN rounds only. Raising
@@ -352,37 +532,43 @@ class SessionManager {
             // Persist between rounds — debounced + serialized (one writer),
             // so an app close mid-run is resumable without write races.
             this._schedulePersist();
-            if (session._terminal) return;
+            if (session.status === STATUS.TERMINAL) return;
             session._noProgressRounds = gained > 0 ? 0 : (session._noProgressRounds || 0) + 1;
             if (session._noProgressRounds >= this.maxNoProgressRounds) {
-              session.status = STATUS.STOPPED;
+              // Spent, not parked: a session that has produced nothing for N
+              // consecutive rounds must not be respawned by a sibling either.
+              this._markTerminal(session, 'no_progress_exhausted');
               session._lastError = `No progress after ${session._noProgressRounds} consecutive rounds`;
               this._emitStatus();
               return;
             }
-            if (gained === 0 && !getTargetMet() && !this.isCancelled()) {
+            if (gained === 0 && !getTargetMet() && !this.isCancelled() && !this._budgetSpent()) {
               const failures = Math.max(session._consecutiveFailures || 0, session._noProgressRounds || 0);
               const delay = Math.min(this.maxBackoffMs, this.baseBackoffMs * (2 ** Math.min(failures - 1, 8)));
               await launchWait(delay);
             }
           } catch (err) {
-            // Catch-all for any unexpected error in a single round iteration.
-            // Log it, mark the session, and continue the loop (don't crash).
-            console.error(`Session #${session.num} round error:`, err.message);
-            session._lastError = err.message;
-            this._emitStatus();
-            // Brief pause before retrying to avoid tight error loops
-            await new Promise(r => setTimeout(r, 2000));
+            // Anything unexpected in the iteration itself (not the round
+            // pipeline, which charges its own failures). Charge it too — a
+            // bare log-and-continue here is exactly how an unbounded retry
+            // loop hides. If the budget is spent this retires the session.
+            console.error(`Session #${session.num} round error:`, err && err.message);
+            this._chargeFailure(session, err);
+            if (session.status === STATUS.TERMINAL) return;
+            await launchWait(Math.min(this.maxBackoffMs, this.baseBackoffMs));
           }
         }
-        session.status = getTargetMet() ? STATUS.DONE : STATUS.WAITING;
+        if (this.isCancelled()) session.status = STATUS.CANCELLED;
+        else if (getTargetMet()) session.status = STATUS.DONE;
+        else if (this._budgetStop) this._markTerminal(session, this._budgetStop);
+        else session.status = STATUS.WAITING;
         this._emitStatus();
       } catch (err) {
         // Outer catch: if anything throws outside the while (e.g. getTargetMet),
-        // mark session stopped and return gracefully instead of crashing.
-        console.error(`Session #${session.num} fatal:`, err.message);
-        session.status = STATUS.STOPPED;
-        session._lastError = err.message;
+        // the session cannot be trusted to run again — retire it.
+        console.error(`Session #${session.num} fatal:`, err && err.message);
+        this._markTerminal(session, 'session_loop_fault');
+        session._lastError = err && err.message ? err.message : String(err);
         this._emitStatus();
       }
     };
@@ -399,7 +585,12 @@ class SessionManager {
       for (let i = 0; i < limit; i++) {
         const s = this.sessions[i];
         if (loops.has(s.num)) continue;
-        if (getTargetMet() || this.isCancelled()) break;
+        // THE FIX for the unbounded-respawn bug. "Has no running loop" is not
+        // the same as "may run": a session that returned because it was spent
+        // also has no loop. Without this check every sibling's round boundary
+        // resurrected it and paid for another provider request.
+        if (NON_RESPAWNABLE.has(s.status)) continue;
+        if (getTargetMet() || this.isCancelled() || this._budgetSpent()) break;
         // Take the next slot on the shared launch clock (LAUNCH_RATE/s).
         // A shared clock — NOT a per-call counter — so nested spawn calls
         // from session prologues keep the ramp instead of resetting it.
@@ -433,7 +624,70 @@ class SessionManager {
     }
     this._emitStatus(true);
     await this._flushPersist();
+    return this._buildResult(getTargetMet);
+  }
+
+  /**
+   * The run's verdict, derived from what actually happened.
+   *
+   * The invariant this exists to enforce: `success` if and only if the target
+   * was met. Everything else is `partial` (some posts were accepted), `failed`
+   * (none were) or `cancelled` — each with a reason code the caller can show
+   * and act on. The old code returned `success: true` from main.js even on
+   * 0/target, which is what made a pool of dead workers look like a good run.
+   */
+  _buildResult(getTargetMet) {
+    let targetMet = false;
+    try { targetMet = !!getTargetMet(); } catch { targetMet = false; }
+    let cancelled = false;
+    try { cancelled = !!this.isCancelled(); } catch { cancelled = false; }
+
+    const considered = Math.min(this._liveCount(), this.sessions.length);
+    const inScope = this.sessions.slice(0, considered);
+    const terminal = inScope.filter(s => s.status === STATUS.TERMINAL);
+
+    let status;
+    let reason;
+    if (targetMet) {
+      status = 'success';
+      reason = 'target_met';
+    } else if (cancelled) {
+      status = 'cancelled';
+      reason = 'cancelled_by_user';
+    } else {
+      status = this._madeProgress ? 'partial' : 'failed';
+      if (this._budgetStop) reason = this._budgetStop;
+      else if (terminal.length > 0 && terminal.length >= considered) reason = 'all_workers_terminal';
+      else reason = 'no_progress';
+    }
+
+    return {
+      status,
+      reason,
+      targetMet,
+      cancelled,
+      madeProgress: this._madeProgress,
+      callsAttempted: this._callsAttempted,
+      elapsedMs: Date.now() - this._startedAt,
+      budgetStop: this._budgetStop,
+      terminalCount: terminal.length,
+      workerCount: considered,
+      totals: this.totals(),
+      sessions: this.sessions.map(s => ({
+        num: s.num,
+        status: s.status,
+        rounds: s.roundsCompleted,
+        terminalReason: s._terminalReason || null,
+        lastError: s._lastError || null,
+      })),
+    };
   }
 }
 
-module.exports = { SessionManager, GenerationSession, STATUS };
+module.exports = {
+  SessionManager,
+  GenerationSession,
+  STATUS,
+  HARD_LIMITS,
+  clampWorkerCount,
+};

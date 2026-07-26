@@ -39,6 +39,19 @@ function resolveProfilePath(name) {
   return resolved;
 }
 
+/**
+ * On-disk data directory for a profile (browser session data, reports).
+ *
+ * The Default profile predates the numbered-profile layout and keeps its own
+ * historical folder; every other profile lives under the profiles dir. Queue
+ * state does NOT live here — that is the workflow store's job.
+ */
+function profileDataDir(profileName) {
+  const name = profileName || 'Default';
+  if (name === 'Default') return path.join(os.homedir(), '.config', 'x-poster-bot-profile');
+  return resolveProfilePath(name);
+}
+
 /** Sequence number of a profile, or null if the name carries none. Default is always 1. */
 function profileNumber(name) {
   if (name === 'Default') return 1;
@@ -121,4 +134,5 @@ module.exports = {
   migrateUnnumberedProfiles,
   assertSafeProfileName,
   resolveProfilePath,
+  profileDataDir,
 };

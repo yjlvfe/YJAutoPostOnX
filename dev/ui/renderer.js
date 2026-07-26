@@ -1114,13 +1114,44 @@ async function runGeneration() {
 btnGenerate.addEventListener('click', runGeneration);
 
 // 🔄 Live session-count change — applies between rounds (no restart needed).
+/**
+ * The worker ceiling is owned by the main process (SessionManager.HARD_LIMITS).
+ * The renderer never hard-codes its own copy — it asks, so the number in the
+ * input and the number the pool actually runs can never drift apart. Until the
+ * answer arrives the input's own `max` attribute is the interim bound.
+ */
+let MAX_WORKERS = parseInt($('ai-session-count').getAttribute('max'), 10) || 32;
+
+function clampWorkers(value) {
+  const n = typeof value === 'number' ? value : parseInt(value, 10);
+  if (!Number.isFinite(n)) return 5;
+  return Math.min(Math.max(1, Math.floor(n)), MAX_WORKERS);
+}
+
 $('ai-session-count').addEventListener('change', async () => {
   const input = $('ai-session-count');
-  const n = Math.max(1, parseInt(input.value, 10) || 5);
+  const requested = parseInt(input.value, 10);
+  // The main process is the authority on the ceiling; it returns the value it
+  // actually accepted. The input is then set to THAT, so the box never shows a
+  // number the app is not really running.
+  let n = clampWorkers(requested);
+  try {
+    const res = await window.api.setSessionCount(n);
+    if (res && Number.isInteger(res.count)) n = res.count;
+    if (res && Number.isInteger(res.max)) {
+      MAX_WORKERS = res.max;
+      input.max = String(res.max);
+    }
+  } catch { /* best-effort */ }
   input.value = n;
-  try { await window.api.setSessionCount(n); } catch { /* best-effort */ }
   window.api.saveSettings({ aiSessionCount: String(n) });
-  addLog(`🔄 عدد الجلسات المتوازية = ${n} — بلا حد أقصى، ويُطبَّق مباشرة أثناء التشغيل (الجلسات الجديدة تنطلق تدريجياً).`, 'info');
+  const capped = Number.isFinite(requested) && requested !== n;
+  addLog(
+    capped
+      ? `🔄 عدد الجلسات المتوازية = ${n} (خُفِّض من ${requested} — الحد الأقصى ${MAX_WORKERS}) ويُطبَّق بين الجولات.`
+      : `🔄 عدد الجلسات المتوازية = ${n} (الحد الأقصى ${MAX_WORKERS}) — يُطبَّق مباشرة أثناء التشغيل بين الجولات.`,
+    capped ? 'warning' : 'info',
+  );
 });
 
 // 🗑️ إعادة تعيين الجلسات — wipes persisted sessions; next run starts fresh.

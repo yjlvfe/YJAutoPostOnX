@@ -21,19 +21,12 @@ const path = require('path');
 const log = require('../utils/logger');
 const { WorkflowStore } = require('./workflowStore');
 const { migrateLegacyWorkflow } = require('./workflowMigration');
-const { dispatchNext } = require('./publishWorkflow');
-const { listProfilesOrdered, resolveProfilePath } = require('./profileRegistry');
+const { listProfilesOrdered, profileDataDir } = require('./profileRegistry');
 
 const SHARED_DIR = path.join(os.homedir(), '.config', 'x-poster-shared');
 
 let storePromise = null;
 let cachedStore = null;
-
-function legacyProfileDir(profileName) {
-  const name = profileName || 'Default';
-  if (name === 'Default') return path.join(os.homedir(), '.config', 'x-poster-bot-profile');
-  return resolveProfilePath(name);
-}
 
 /**
  * Open the store, migrating legacy JSON on first use.
@@ -47,7 +40,7 @@ async function getStore() {
   if (!storePromise) {
     storePromise = (async () => {
       const profileNames = await listProfilesOrdered();
-      const profileDirs = profileNames.map((name) => ({ name, dir: legacyProfileDir(name) }));
+      const profileDirs = profileNames.map((name) => ({ name, dir: profileDataDir(name) }));
       try {
         migrateLegacyWorkflow({ rootDir: SHARED_DIR, sharedDir: SHARED_DIR, profileDirs });
       } catch (error) {
@@ -72,6 +65,87 @@ async function getStore() {
 
 function textOf(item) {
   return item && item.payload && typeof item.payload.text === 'string' ? item.payload.text : '';
+}
+
+// ── Paginating reads ─────────────────────────────────────────────────────────
+//
+// WorkflowStore.listQueued hard-clamps `limit` to 1000 and listItems to 10000,
+// so a single call can never see a queue larger than that. Every read below
+// therefore pages on the store's keyset cursor, exactly as getPublishedTexts
+// already did.
+//
+// This is not a cosmetic limit. The same reads feed the queue the UI counts,
+// the duplicate check in addPosts, and the semantic-dedup corpus main.js builds
+// before AI generation — so a post sitting past position 1000 was invisible to
+// all three, and the app would queue and publish a second copy of it.
+
+/** Page size per call. Below both store clamps, so one page is always honoured. */
+const PAGE_SIZE = 500;
+
+/** Every queued/deferred item, paged on queue_seq. */
+function readAllQueuedItems(store) {
+  const all = [];
+  let after = null;
+  for (;;) {
+    const page = store.listQueued({ limit: PAGE_SIZE, after });
+    if (page.length === 0) break;
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    after = { queueSeq: page[page.length - 1].queueSeq };
+  }
+  return all;
+}
+
+/** Every item in `states`, paged on the composite (updatedAtMs, id) cursor. */
+function readAllItems(store, states) {
+  const all = [];
+  let after = null;
+  for (;;) {
+    const page = store.listItems({ states, limit: PAGE_SIZE, after });
+    if (page.length === 0) break;
+    all.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    const last = page[page.length - 1];
+    after = { updatedAtMs: last.updatedAtMs, id: last.id };
+  }
+  return all;
+}
+
+/**
+ * States that represent work the app still owes an outcome on.
+ *
+ * `queued` is only the part that is claimable RIGHT NOW. A post whose network
+ * attempt failed sits in `deferred` until its backoff elapses; one a worker is
+ * composing sits in `leased`; one whose keystroke went out sits in
+ * `dispatch_started`/`ambiguous` awaiting a human. Every one of those is
+ * outstanding work, and none of them appeared in the queue the operator saw.
+ */
+const BACKLOG_STATES = Object.freeze(['queued', 'deferred', 'leased']);
+const UNRESOLVED_STATES = Object.freeze(['dispatch_started', 'ambiguous']);
+
+/** Everything outstanding for display: claimable now plus waiting plus in-flight. */
+function readAllBacklogItems(store) {
+  return readAllItems(store, BACKLOG_STATES)
+    .sort((a, b) => (a.queueSeq ?? 0) - (b.queueSeq ?? 0));
+}
+
+/**
+ * Every text that must block a duplicate enqueue.
+ *
+ * This used to read only the ready rows, so re-adding a post that was merely
+ * DEFERRED was accepted silently: the durable backlog then held two rows for
+ * the same text, and both eventually published. Dedup has to span every state
+ * that still owes an outcome, including the ones awaiting a human decision —
+ * re-adding a post whose first attempt may already be live on X is exactly the
+ * duplicate this whole design exists to prevent.
+ */
+function collectQueuedTexts(store) {
+  const texts = new Set();
+  for (const item of readAllItems(store, [...BACKLOG_STATES, ...UNRESOLVED_STATES])) {
+    const text = textOf(item);
+    if (text) texts.add(text);
+  }
+  return texts;
 }
 
 /** Shape a durable item like the legacy queue entry the UI expects. */
@@ -104,7 +178,7 @@ async function resolveProfileId(profileName) {
   }
   const created = store.createProfile({
     name,
-    legacyPath: legacyProfileDir(name),
+    legacyPath: profileDataDir(name),
     requestId: `create-profile:${name}`,
   });
   return created.id;
@@ -112,15 +186,51 @@ async function resolveProfileId(profileName) {
 
 // ── Queue reads ──────────────────────────────────────────────────────────────
 
+/**
+ * What the operator's queue screen shows: everything outstanding.
+ *
+ * Deliberately NOT just the ready rows. A queue that reported "empty" while a
+ * deferred post was waiting an hour to retry is a lie in the only direction
+ * that matters — the operator adds the post again, and it goes out twice.
+ */
 async function getQueue() {
   const store = await getStore();
-  return store.listQueued({ limit: 1000 }).map(toLegacyEntry);
+  return readAllBacklogItems(store).map(toLegacyEntry);
 }
 
-/** Full item records, for callers that need IDs/state rather than bare text. */
+/**
+ * Full item records with the state metadata the UI needs to explain WHY an item
+ * is not going out yet: its state, when it becomes eligible, why it was
+ * deferred, and how many attempts it has already cost.
+ */
 async function getQueueDetailed() {
   const store = await getStore();
-  return store.listQueued({ limit: 1000 });
+  return readAllBacklogItems(store).map((item) => ({
+    ...item,
+    notBeforeMs: item.availableAtMs || null,
+    waitingMs: item.availableAtMs ? Math.max(0, item.availableAtMs - Date.now()) : 0,
+    deferReason: item.reason || null,
+    attempts: item.preDispatchFailureCount || 0,
+  }));
+}
+
+/** Only what can be claimed right now — the publisher's view, not the UI's. */
+async function getReadyNow() {
+  const store = await getStore();
+  return readAllQueuedItems(store);
+}
+
+/** Counts for the UI, split so "0 ready" can never be shown as "0 total". */
+async function getBacklogCounts() {
+  const store = await getStore();
+  const counts = { queued: 0, deferred: 0, leased: 0, unresolved: 0 };
+  for (const state of BACKLOG_STATES) {
+    counts[state] = readAllItems(store, [state]).length;
+  }
+  counts.unresolved = store.countUnresolvedRecovery();
+  counts.backlog = counts.queued + counts.deferred + counts.leased;
+  counts.readyNow = counts.queued;
+  return counts;
 }
 
 async function getPublishedTexts() {
@@ -146,9 +256,9 @@ async function getPublishedTexts() {
 
 async function addPosts(newPosts, _profileName) {
   const store = await getStore();
-  const existing = new Set([
-    ...store.listQueued({ limit: 1000 }).map(textOf),
-  ]);
+  // The WHOLE queue, not the first page: a duplicate past position 1000 was
+  // otherwise queued a second time and published twice.
+  const existing = collectQueuedTexts(store);
 
   const items = [];
   let skippedDuplicate = 0;
@@ -166,13 +276,14 @@ async function addPosts(newPosts, _profileName) {
   }
 
   if (items.length === 0) {
-    return { added: 0, skippedDuplicate, total: store.listQueued({ limit: 1000 }).length };
+    return { added: 0, skippedDuplicate, total: readAllQueuedItems(store).length };
   }
   const result = store.enqueue({ items, requestId: `add-posts:${Date.now()}:${items.length}` });
   return {
     added: result.items.length,
     skippedDuplicate,
-    total: store.listQueued({ limit: 1000 }).length,
+    // The real total, not a capped one — this is the number the UI reports back.
+    total: readAllQueuedItems(store).length,
   };
 }
 
@@ -191,7 +302,9 @@ async function bulkDeleteByText(texts) {
 
   let deleted = 0;
   const blocked = [];
-  for (const item of store.listItems({ states: ['queued', 'deferred', 'leased', 'dispatch_started'], limit: 1000 })) {
+  // Paged: an item past position 1000 was previously neither deleted nor
+  // reported as blocked, so the UI showed a silent no-op.
+  for (const item of readAllItems(store, ['queued', 'deferred', 'leased', 'dispatch_started'])) {
     const text = textOf(item);
     if (!wanted.has(text)) continue;
     if (item.state === 'queued' || item.state === 'deferred') {
@@ -209,7 +322,7 @@ async function bulkDeleteByText(texts) {
       blocked.push({ text, reason: `IN_FLIGHT_${item.state.toUpperCase()}` });
     }
   }
-  return { deleted, blocked, remaining: store.listQueued({ limit: 1000 }).length };
+  return { deleted, blocked, remaining: readAllQueuedItems(store).length };
 }
 
 // ── Recovery ─────────────────────────────────────────────────────────────────
@@ -232,7 +345,7 @@ async function getRecoveryItems(_profileName) {
     evidence: item.currentAttempt ? item.currentAttempt.evidence : null,
     at: item.updatedAtMs ? new Date(item.updatedAtMs).toISOString() : null,
   }));
-  const deadLetters = store.listItems({ states: ['dead'], limit: 500 }).map((item) => ({
+  const deadLetters = readAllItems(store, ['dead']).map((item) => ({
     id: item.id,
     text: textOf(item),
     reason: item.reason,
@@ -251,7 +364,10 @@ async function getRecoveryItems(_profileName) {
 async function requeueRecovery(_profileName, kind, postText, options = {}) {
   const store = await getStore();
   const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
-  const match = store.listItems({ states, limit: 500 }).find((item) => textOf(item) === postText);
+  // Paged, and deliberately so: an unresolved ambiguous item blocks publishing
+  // for EVERY profile, so one that fell outside the old 500-row window could
+  // never be resolved from the UI and the whole app stayed wedged.
+  const match = readAllItems(store, states).find((item) => textOf(item) === postText);
   if (!match) return false;
 
   if (kind === 'dead') {
@@ -276,7 +392,7 @@ async function requeueRecovery(_profileName, kind, postText, options = {}) {
 async function discardRecovery(_profileName, kind, postText) {
   const store = await getStore();
   const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
-  const match = store.listItems({ states, limit: 500 }).find((item) => textOf(item) === postText);
+  const match = readAllItems(store, states).find((item) => textOf(item) === postText);
   if (!match) return false;
   store.resolveRecovery({
     id: match.id,
@@ -344,9 +460,17 @@ async function closeStore() {
 module.exports = {
   getStore,
   closeStore,
+  readAllQueuedItems,
+  readAllItems,
+  collectQueuedTexts,
   resolveProfileId,
   getQueue,
   getQueueDetailed,
+  getReadyNow,
+  getBacklogCounts,
+  readAllBacklogItems,
+  BACKLOG_STATES,
+  UNRESOLVED_STATES,
   getPublishedTexts,
   addPosts,
   bulkDeleteByText,
@@ -357,7 +481,6 @@ module.exports = {
   runMaintenance,
   integrityCheck,
   countUnresolved,
-  dispatchNext,
   toLegacyEntry,
   textOf,
 };

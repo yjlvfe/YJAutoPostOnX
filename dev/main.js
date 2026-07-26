@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { createReadStream } = require('fs');
 const csv = require('csv-parser');
 const contentEngine = require('./automation/contentEngine');
-const { SessionManager } = require('./automation/sessionManager');
+const { SessionManager, HARD_LIMITS, clampWorkerCount } = require('./automation/sessionManager');
 const { readJson, atomicWriteJson } = require('./utils/atomicJson');
 
 // 🔒 Security modules
@@ -31,8 +31,10 @@ let aiGenerationCancelled = false;
 let activeAbortController = null;
 let aiGenerationActive = false;
 // Desired parallel worker count (default 5, adjustable via 'set-session-count').
-// NO upper cap — the user's number is the number that runs; SessionManager
-// ramps launches in batches and throttles status/persist so large pools stay smooth.
+// Capped at HARD_LIMITS.MAX_WORKERS. Every worker is one in-flight paid provider
+// request plus a persistent conversation thread in memory, so an unchecked
+// number here is an unbounded cost and concurrency path — the renderer's number
+// input, this IPC handler and SessionManager all clamp to the SAME constant.
 let desiredWorkerCount = 5;
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
 
@@ -101,6 +103,10 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+
+  // Durable-store housekeeping. Started after the window so it never delays the
+  // first paint; the first sweep is a further minute out.
+  scheduleMaintenance();
 });
 
 app.on('window-all-closed', () => {
@@ -112,7 +118,57 @@ app.on('before-quit', async () => {
     try { await loginContext.close(); } catch (e) { /* best-effort */ }
     loginContext = null;
   }
+  // Close the durable store explicitly: better-sqlite3's close() checkpoints the
+  // WAL back into the main .db file, so the next launch starts from a fully
+  // folded database instead of replaying the sidecar. Best-effort — a failure
+  // here must never block quit.
+  if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null; }
+  try {
+    // `durableQueue` is const-bound further down the module; this callback only
+    // ever runs long after module evaluation, so the binding is initialised.
+    await durableQueue.closeStore();
+  } catch (e) {
+    log.error(`إغلاق مخزن العمل فشل (غير حرج): ${e?.message || e}`);
+  }
 });
+
+// --- DURABLE STORE MAINTENANCE ---
+//
+// runMaintenance reclaims stale leases, sweeps orphaned media bytes off disk,
+// and prunes the idempotency cache. That prune is the ONLY thing that can ever
+// delete an api_requests row — the retention trigger refuses every delete unless
+// pruneIdempotency has set its cutoff — so without this timer the retention
+// mechanism is inert and the store grows ~4KB per published post forever.
+//
+// Every step is a no-op when nothing needs doing, so running it on a slow timer
+// is cheap. unref() so it never holds the process open by itself.
+const MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const MAINTENANCE_STARTUP_DELAY_MS = 60 * 1000;     // stay off the launch path
+let maintenanceTimer = null;
+
+async function runStoreMaintenance() {
+  try {
+    const result = await durableQueue.runMaintenance();
+    if (result.reclaimedLeases || result.mediaFilesRemoved || result.idempotencyPruned) {
+      log.info(
+        `صيانة المخزن: عقود مستعادة=${result.reclaimedLeases} ` +
+        `ملفات وسائط محذوفة=${result.mediaFilesRemoved} ` +
+        `سجلات idempotency=${result.idempotencyPruned}`
+      );
+    }
+  } catch (error) {
+    // Runs on a timer with nobody awaiting it: an escaping rejection would be an
+    // unhandled rejection in the main process.
+    log.error(`صيانة المخزن فشلت (غير حرج): ${error?.message || error}`);
+  }
+}
+
+function scheduleMaintenance() {
+  if (maintenanceTimer) return;
+  setTimeout(() => { void runStoreMaintenance(); }, MAINTENANCE_STARTUP_DELAY_MS).unref?.();
+  maintenanceTimer = setInterval(() => { void runStoreMaintenance(); }, MAINTENANCE_INTERVAL_MS);
+  maintenanceTimer.unref?.();
+}
 
 // --- SETTINGS MANAGER ---
 let configWriteChain = Promise.resolve();
@@ -334,14 +390,15 @@ ipcMain.handle('detect-provider', async (event, config) => {
 // --- AUTOMATION CONTROL ---
 const xPoster = require('./automation/xPoster');
 const { escCsv } = require('./automation/xPoster');
-const queueManager = require('./automation/queueManager');
-// Durable publish workflow (SQLite + WAL). Replaces the split JSON queue for
-// every queue/recovery operation; queueManager is kept only for legacy paths
-// that have not been cut over yet (per-profile data dirs).
+// Durable publish workflow (SQLite + WAL). The single source of truth for every
+// queue and recovery operation — the split JSON files it replaced are read once
+// by the migration and never again.
 const durableQueue = require('./automation/durableQueue');
 const { SemanticIndex } = require('./automation/semanticIndex');
 const { openProfileForLogin } = require('./automation/browserManager');
 const rateLimitStore = require('./automation/rateLimitStore');
+const profileLifecycle = require('./automation/profileLifecycle');
+const { installFatalHandlers, isFatal } = require('./utils/fatal');
 // Mandatory profile numbering (#1 = Default, #2, #3, …) + ordered listing
 const {
   profileNumber,
@@ -469,6 +526,14 @@ ipcMain.handle('workflow-health', async () => {
 let automationRunning = false;
 
 ipcMain.handle('start-posting', async (event, config) => {
+  // Fail closed. After a fatal fault this process is on its way down and its
+  // in-memory state is not trustworthy enough to own an irreversible action.
+  if (isFatal()) {
+    return { success: false, error: 'تعطّل التطبيق — أعد تشغيله قبل بدء نشر جديد.', code: 'FATAL_STATE' };
+  }
+  if (stopInProgress) {
+    return { success: false, error: 'جارٍ إيقاف تشغيل سابق — انتظر حتى يكتمل.', code: 'STOP_IN_PROGRESS' };
+  }
   if (automationRunning) {
     mainWindow.webContents.send('status-update', { type: 'warning', message: 'Automation already running' });
     return { success: false, error: 'Automation already running' };
@@ -563,38 +628,106 @@ function reportFaultToUI(message) {
   }
 }
 
-// Global unhandled rejection handler
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  reportFaultToUI(`Unhandled error: ${reason}`);
+/**
+ * Fatal faults END the process, non-zero.
+ *
+ * The previous policy logged an uncaught exception, cleared the run flags and
+ * deliberately kept running, on the reasoning that the queue is consumed
+ * post-by-post so nothing could be double-posted by staying alive. But an
+ * uncaught throw means an invariant already broke somewhere unknown, while this
+ * process still owns a SQLite handle, a Playwright context, and possibly a
+ * lease on an item whose dispatch state is undecided. A child probe exited 0
+ * after a fatal throw, so nothing supervising the app could tell.
+ *
+ * Recovery belongs to the durable store at next boot — reconcileStartup()
+ * resolves whatever was mid-flight — not to in-memory flags in a process whose
+ * memory can no longer be trusted.
+ */
+installFatalHandlers({
+  logPath: path.join(app.getPath('userData'), 'logs', 'fatal.log'),
+  notify: (record) => {
+    global.isRunning = false;
+    automationRunning = false;
+    reportFaultToUI(
+      `خطأ غير متوقع (${record.kind}) أوقف التطبيق: ${record.message} — `
+      + 'سيُغلق التطبيق الآن، وستُسوّى أي عملية غير محسومة عند التشغيل التالي.',
+    );
+  },
+  onFatal: async () => {
+    // Bounded: mark the run interrupted and let go of the store handle so the
+    // WAL is checkpointed. Anything slower than the deadline is abandoned.
+    try { await xPoster.stopActive('fatal', { joinTimeoutMs: 2000 }); } catch { /* best effort */ }
+    try { await durableQueue.closeStore(); } catch { /* best effort */ }
+  },
 });
 
 /**
- * Synchronous twin of the rejection handler above. Without it, ONE uncaught
- * throw anywhere in the main process (a Playwright teardown, an Electron API
- * misuse, a bad write) takes the whole app down instantly — no window, no
- * message, mid-run.
+ * Stop is a request that has to be JOINED, not a flag that is set.
  *
- * It deliberately does not exit. The queue is consumed post-by-post, so
- * anything already published is already out of the queue and nothing is
- * double-posted by staying alive; the user gets to see what happened instead of
- * watching the window vanish. The run flags are cleared because the automation
- * that was in flight is definitively over — leaving them set would strand the
- * UI on "جاري النشر..." and `automationRunning` would refuse every later run
- * with "Automation already running".
+ * The old handler set global.isRunning = false, fired stopActive() and returned
+ * immediately. The UI showed "stopped" while a committed keystroke was still on
+ * its way to X, and a new run could be started straight into the teardown of
+ * the old one. Now the renderer gets `stopping` first, and `stopped` only after
+ * every in-flight dispatch has settled (or a join timeout is reported honestly).
  */
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  global.isRunning = false;
-  automationRunning = false;
-  reportFaultToUI(`خطأ غير متوقع أوقف التشغيل: ${error?.message || error} — الطابور سليم، وكل منشور نُشر فعلاً حُذف منه.`);
-});
+async function performStop(reason = 'user_stop') {
+  if (stopInProgress) return stopInProgress;
+  stopInProgress = (async () => {
+    reportStatusToUI({ type: 'info', message: '🛑 جارٍ الإيقاف…', runState: 'stopping' });
+    try {
+      const result = await xPoster.stopActive(reason);
+      global.isRunning = false;
+      automationRunning = false;
+      if (result.timedOut > 0) {
+        // A join timeout is NOT a clean stop. Say so.
+        reportStatusToUI({
+          type: 'warning',
+          runState: 'stopped',
+          message: `⚠️ اكتمل الإيقاف مع ${result.timedOut} محاولة إرسال لم تُحسم — راجع قائمة الاسترداد قبل تشغيل جديد.`,
+        });
+      } else {
+        reportStatusToUI({ type: 'info', message: '⏹️ تم الإيقاف.', runState: 'stopped' });
+      }
+      return result;
+    } catch (error) {
+      log.error(`تعذر إغلاق سياقات الأتمتة: ${error.message}`);
+      global.isRunning = false;
+      automationRunning = false;
+      reportStatusToUI({ type: 'error', message: `تعذر الإيقاف بالكامل: ${error.message}`, runState: 'stopped' });
+      return { stopped: false, error: error.message };
+    } finally {
+      stopInProgress = null;
+    }
+  })();
+  return stopInProgress;
+}
 
+/** In-flight stop, so a second press joins the first instead of racing it. */
+let stopInProgress = null;
+
+function reportStatusToUI(payload) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('status-update', payload);
+    }
+  } catch (e) {
+    console.error('Failed to send status to UI:', e?.message || e);
+  }
+}
+
+// Kept as a fire-and-forget channel for the existing renderer call, but the
+// work itself is awaited inside performStop and reported through status-update.
 ipcMain.on('stop-automation', () => {
-  global.isRunning = false;
-  xPoster.stopActive().catch((error) => {
+  performStop('user_stop').catch((error) => {
     log.error(`تعذر إغلاق سياقات الأتمتة فورًا: ${error.message}`);
   });
+});
+
+// Invokable twin, so the renderer (and tests) can await the join and know the
+// run is genuinely over rather than guessing from a status message.
+ipcMain.handle('stop-automation-await', async () => {
+  const result = await performStop('user_stop');
+  return { success: !!(result && result.stopped), ...result };
 });
 
 // Synchronous on purpose: the preload bridge resolves this before the
@@ -672,19 +805,23 @@ ipcMain.handle('create-profile', async (event, profileName) => {
   }
 });
 
+/**
+ * Cancel and JOIN any run publishing as this profile before its identity
+ * changes underneath it. Passed into the lifecycle operations below so a
+ * rename or delete can never race a committed dispatch.
+ */
+async function stopRunsForProfile(profileName) {
+  if (!global.isRunning && !automationRunning) return;
+  log.info(`إيقاف التشغيل الجاري قبل تعديل البروفايل "${profileName}"…`);
+  await performStop(`profile_change:${profileName}`);
+}
+
+// Both handlers are thin wrappers: the real staged logic lives in
+// profileLifecycle.js so it is testable without booting Electron, and so the
+// durable identity can never again be updated in one place but not the other.
 ipcMain.handle('delete-profile', async (event, profileName) => {
   try {
-    if (!profileName || profileName === 'Default') {
-      return { success: false, error: 'لا يمكن حذف البروفايل الافتراضي' };
-    }
-    const safeName = assertSafeProfileName(profileName, { allowDefault: false });
-    const profilePath = resolveProfilePath(safeName);
-    await fs.rm(profilePath, { recursive: true, force: true });
-    // Clean up the orphaned cooldown entry for the deleted profile. There is no
-    // queue cursor to clean up any more — the shared queue is consumed as it's
-    // published, so it holds no per-profile state.
-    try { rateLimitStore.clearCooldown(safeName); } catch { /* best-effort */ }
-    return { success: true };
+    return await profileLifecycle.deleteProfile(profileName, { stopRuns: stopRunsForProfile });
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -692,30 +829,7 @@ ipcMain.handle('delete-profile', async (event, profileName) => {
 
 ipcMain.handle('rename-profile', async (event, oldName, newName) => {
   try {
-    if (!oldName || oldName === 'Default') {
-      return { success: false, error: 'لا يمكن تعديل البروفايل الافتراضي' };
-    }
-    const safeOld = assertSafeProfileName(oldName, { allowDefault: false });
-    // Renaming changes only the LABEL — the profile keeps its sequence number.
-    const label = stripLeadingNumber(newName || '').replace(/[/<>:"\\|?*.]/g, '').trim();
-    if (!safeOld || !label) return { success: false, error: 'الاسم غير صالح' };
-    const keepNum = profileNumber(safeOld) ?? await nextProfileNumber();
-    const safeName = assertSafeProfileName(`${keepNum}- ${label}`, { allowDefault: false });
-    const oldPath = resolveProfilePath(safeOld);
-    const newPath = resolveProfilePath(safeName);
-    if (safeName !== safeOld) {
-      const existing = await listProfilesOrdered();
-      if (existing.some(n => n !== safeOld && stripLeadingNumber(n) === label)) {
-        return { success: false, error: 'يوجد بروفايل بنفس الاسم بالفعل' };
-      }
-      await fs.rename(oldPath, newPath);
-      // ⚡ FIX (hidden bug): the rate-limit cooldown is keyed by profile name —
-      // without migrating it, a renamed profile lost its cooldown. (The queue
-      // cursor this used to migrate no longer exists — the shared queue is
-      // consumed as it's published and keeps no per-profile state.)
-      try { rateLimitStore.renameProfile(safeOld, safeName); } catch { /* best-effort */ }
-    }
-    return { success: true, profile: { name: safeName } };
+    return await profileLifecycle.renameProfile(oldName, newName, { stopRuns: stopRunsForProfile });
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1292,9 +1406,11 @@ ipcMain.handle('cancel-ai-generation', async () => {
 
 // Adjust parallel worker count (applied at next round start).
 ipcMain.handle('set-session-count', async (event, count) => {
-  const n = Math.max(1, parseInt(count, 10) || 5);
+  const n = clampWorkerCount(count, desiredWorkerCount);
   desiredWorkerCount = n;
-  return { success: true, count: n };
+  // Report both the accepted value and the ceiling so the UI can show the user
+  // that their number was reduced rather than silently running something else.
+  return { success: true, count: n, max: HARD_LIMITS.MAX_WORKERS, clamped: n !== count };
 });
 
 // Reset persisted AI sessions. Never race a live generation run.
@@ -1302,10 +1418,7 @@ ipcMain.handle('reset-sessions', async () => {
   if (aiGenerationActive) return { success: false, error: 'أوقف التوليد الحالي قبل تصفير الجلسات.' };
   aiGenerationCancelled = false;
   try {
-    await Promise.all([
-      fs.rm(SHARED_SESSION_FILE, { force: true }),
-      fs.rm(`${SHARED_SESSION_FILE}.bak`, { force: true }),
-    ]);
+    await discardSessionSnapshot();
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1323,8 +1436,22 @@ ipcMain.handle('reset-sessions', async () => {
 // Cross-session hard guard (sharedExactKeys) prevents intra-round races.
 
 const SHARED_SESSION_FILE = path.join(os.homedir(), '.config', 'x-poster-shared', 'sessions.json');
+// Bump this whenever the snapshot shape changes. An older shape is discarded on
+// load, never partially interpreted.
+const SESSION_SNAPSHOT_VERSION = 2;
+
+/** Remove the persisted snapshot and its atomic-write backup. */
+async function discardSessionSnapshot() {
+  await Promise.all([
+    fs.rm(SHARED_SESSION_FILE, { force: true }),
+    fs.rm(`${SHARED_SESSION_FILE}.bak`, { force: true }),
+  ]);
+}
 
 ipcMain.handle('generate-ai-posts', async (event, config) => {
+  if (isFatal()) {
+    return { success: false, status: 'failed', reason: 'fatal_state', error: 'تعطّل التطبيق — أعد تشغيله قبل توليد جديد.' };
+  }
   if (aiGenerationActive) return { success: false, error: 'يوجد توليد AI جارٍ بالفعل.' };
   const {
     apiKey, baseUrl, model, providerOverride,
@@ -1351,7 +1478,7 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   activeAbortController = new AbortController();
 
   const target   = Math.max(1, parseInt(quantity, 10) || 20);
-  const nWorkers = Math.max(1, parseInt(sessionCount, 10) || desiredWorkerCount);
+  const nWorkers = clampWorkerCount(sessionCount, desiredWorkerCount);
   if (sessionCount) desiredWorkerCount = nWorkers;
 
   const provider = contentEngine.detectProvider(baseUrl, providerOverride, model);
@@ -1596,8 +1723,12 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   const persist = async (sessionSnapshots) => {
     try {
       await atomicWriteJson(SHARED_SESSION_FILE, {
-        version: 2,
+        version: SESSION_SNAPSHOT_VERSION,
         fingerprint: sessionFingerprint,
+        // Stored once for the whole pool. Every session shares it verbatim, and
+        // the fingerprint above is a hash of it, so a snapshot is only ever
+        // restored against the identical block.
+        system: systemBlock,
         sessions: sessionSnapshots,
       });
     } catch (e) {
@@ -1606,10 +1737,25 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
   };
 
   // Load sessions only when provider/model/prompt identity is unchanged.
+  //
+  // A snapshot that cannot be restored is DELETED rather than left in place.
+  // Pre-v2 installs left a multi-megabyte bare array on disk that this check
+  // silently rejected on every run: prompt-cache continuity was permanently
+  // off, the file was never read and never reclaimed, and nothing said so.
   let loadedSessions = [];
   try {
     const parsed = await readJson(SHARED_SESSION_FILE, null);
-    if (parsed?.version === 2 && parsed.fingerprint === sessionFingerprint && Array.isArray(parsed.sessions)) {
+    if (parsed === null || parsed === undefined) {
+      // No snapshot yet — the ordinary first-run case, not a problem.
+    } else if (parsed.version !== SESSION_SNAPSHOT_VERSION || !Array.isArray(parsed.sessions)) {
+      log.error('Session snapshot is not readable by this version — discarding it.');
+      await discardSessionSnapshot();
+    } else if (parsed.fingerprint !== sessionFingerprint) {
+      // Provider/model/prompt changed: the thread is worthless for the new
+      // identity, and keeping it only wastes disk until the next successful run.
+      log.info('Session snapshot belongs to a different provider/model/prompt — discarding it.');
+      await discardSessionSnapshot();
+    } else {
       loadedSessions = parsed.sessions;
     }
   } catch (e) {
@@ -1643,33 +1789,58 @@ ipcMain.handle('generate-ai-posts', async (event, config) => {
       `🚀 بدء التوليد: ${nWorkers} جلسة متوازية · هدف ${target} تغريدة (${label})`
     );
 
-    await manager.run(() => accepted.length >= target);
+    const outcome = await manager.run(() => accepted.length >= target);
 
     const totals = manager.totals();
     const finalBreakdown = Object.entries(rejectedReasons)
       .map(([k, v]) => `${k}:${v}`).join(' | ') || 'لا شيء';
+
+    // The manager's verdict is the truth. `success` used to be hard-coded true
+    // here, so a pool whose every worker died on a bad API key still reported a
+    // successful run with 0/target — the UI said "اكتمل" and the operator had
+    // no idea the key was rejected.
+    const reasonText = {
+      all_workers_terminal: 'كل الجلسات توقفت نهائياً (تحقق من مفتاح API / الموديل)',
+      budget_calls_exhausted: 'استُنفدت ميزانية عدد الطلبات',
+      budget_rounds_exhausted: 'استُنفدت ميزانية عدد الجولات',
+      budget_time_exhausted: 'استُنفدت المهلة الزمنية للتوليد',
+      no_progress: 'توقف التقدم — لم تُقبل تغريدات جديدة',
+      cancelled_by_user: 'أُلغي التوليد بطلب المستخدم',
+      target_met: 'اكتمل الهدف',
+    }[outcome.reason] || outcome.reason || '';
+
     sendProgress(
-      accepted.length >= target ? 'success' : 'info',
-      `اكتمل: ${accepted.length}/${target} مقبول · ${rejectedCount} مرفوض [${finalBreakdown}]`,
+      outcome.status === 'success' ? 'success' : outcome.status === 'failed' ? 'error' : 'warning',
+      `${outcome.status === 'success' ? 'اكتمل' : 'انتهى بنتيجة جزئية'}: ${accepted.length}/${target} مقبول · `
+      + `${rejectedCount} مرفوض [${finalBreakdown}]${reasonText ? ` — ${reasonText}` : ''}`,
       totals.rounds, totals.cacheHitPct
     );
 
     return {
-      success: true, provider, label,
+      // success is now exactly "the target was met", nothing else.
+      success: outcome.status === 'success',
+      status: outcome.status,          // success | partial | failed | cancelled
+      reason: outcome.reason,
+      reasonText,
+      provider, label,
       posts:   accepted.map(a => a.text),
       details: accepted,
       count:   accepted.length,
       requested: target,
       rounds: totals.rounds,
       waves:  totals.rounds,
-      cancelled: aiGenerationCancelled,
+      cancelled: outcome.cancelled,
+      terminalWorkers: outcome.terminalCount,
+      workerCount: outcome.workerCount,
+      callsAttempted: outcome.callsAttempted,
+      sessions: outcome.sessions,
       rejectedCount,
       duplicates: dupCount,
       rejectedReasons,
       usage: totals,
     };
   } catch (error) {
-    return { success: false, error: error.message, provider, label };
+    return { success: false, status: 'failed', reason: 'generation_threw', error: error.message, provider, label };
   } finally {
     aiGenerationCancelled = false;
     activeAbortController = null;

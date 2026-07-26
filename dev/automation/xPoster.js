@@ -1,9 +1,11 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { launchBrowser } = require('./browserManager');
-const queueManager = require('./queueManager');
+const { DurableSession } = require('./durableSession');
+const { profileDataDir } = require('./profileRegistry');
 const { ReportEngine } = require('./reportEngine');
 const rateLimitStore = require('./rateLimitStore');
+const { RunRegistry, DEFAULT_JOIN_TIMEOUT_MS } = require('./runControl');
 // 🔓 DECOUPLED: publishing is 100% referral-agnostic. The referral link is a
 // STUDIO concern — it's baked into post text at generation time. This engine
 // only takes posts from the queue and publishes them AS-IS: no referral gate,
@@ -83,9 +85,47 @@ const RATE_LIMIT_PATTERNS = [
 const LIMIT_URL_RE = /premium_sign_up|daily_post_limit/i;
 const activeContexts = new Set();
 
-async function stopActive() {
+/**
+ * Every live run's cancellation token. Stop flips all of them synchronously,
+ * so no run anywhere can start a new dispatch, and only THEN joins.
+ */
+const runRegistry = new RunRegistry();
+
+/**
+ * Stop every active run and wait for it to actually be over.
+ *
+ * The old version set a boolean, fired context.close() and resolved — before
+ * any in-flight keystroke had settled and before any worker had unwound. That
+ * is why Stop could report success while a post was on its way out.
+ *
+ * Order matters and is not negotiable:
+ *   1. flip every token (synchronous) — no new dispatch can be claimed;
+ *   2. flip the legacy global so the interruptible waits unblock;
+ *   3. join every in-flight dispatch, with a timeout that is reported, never
+ *      swallowed into success;
+ *   4. only then close the browser contexts.
+ *
+ * Closing contexts first would tear the page out from under a keystroke that
+ * had already been committed durably, turning a knowable outcome into an
+ * unnecessary ambiguous one.
+ */
+async function stopActive(reason = 'user_stop', { joinTimeoutMs = DEFAULT_JOIN_TIMEOUT_MS } = {}) {
+  const stop = runRegistry.stopAll(reason, joinTimeoutMs);
   global.isRunning = false;
+
+  const results = await stop.join();
+  const timedOut = results.filter((r) => r.timedOut);
+
   await Promise.allSettled(Array.from(activeContexts, context => context.close()));
+
+  return {
+    stopped: timedOut.length === 0,
+    reason,
+    runsJoined: results.length,
+    dispatchInFlight: stop.dispatchInFlight,
+    timedOut: timedOut.length,
+    runs: results,
+  };
 }
 function isLimitUrl(url) {
   return typeof url === 'string' && LIMIT_URL_RE.test(url);
@@ -161,17 +201,16 @@ function escCsv(value) {
 }
 
 function getReportDir(profileName) {
-  return path.join(queueManager.getProfileDataDir(profileName), 'reports');
+  return path.join(profileDataDir(profileName), 'reports');
 }
 
 // 🚨 Consecutive unrecognized-failure circuit breaker — see reportRateLimitAndThrow.
 const CONSECUTIVE_FAILURE_LIMIT = 3;
 
-// ⏸️ v5.12.0: cap on how many times a single post can be deferred (transient
-// network failure) before it falls through to a permanent dead-letter. Without
-// this, a post that's actually broken (but misclassified as 'network') would
-// defer silently forever, one run after another, never surfacing as an error.
-const DEFER_ATTEMPTS_LIMIT = 3;
+// The cap on how many times one post may be deferred before it is retired now
+// lives in the store (WorkflowStore's maxPreDispatchFailures), so a post that is
+// actually broken can never defer forever across runs or processes. The old
+// module-local DEFER_ATTEMPTS_LIMIT counted only within a single run.
 
 // 🔗 Last-resort tweet URL lookup: scans the DOM for a status link when the
 // confirmation toast disappeared before we could read its href. This was
@@ -192,9 +231,38 @@ async function getTweetUrlFromDOM(page) {
   }
 }
 
+// Anti-detection floor between two posts. Even at speed 0 the engine never
+// fires two tweets back to back — that pattern is exactly what gets an account
+// flagged. Overridable only through `config`, never from the UI.
+const DEFAULT_MIN_COOLDOWN_MS = 15_000;
+// Pause before attempting DOM recovery after a network/timeout failure, giving
+// a flapping connection time to settle instead of retrying into the same fault.
+const DEFAULT_NETWORK_RECOVERY_MS = 10_000;
+
+/**
+ * Wait between posts: a random point between the anti-detection floor and the
+ * user's configured speed. Identical at both call sites (normal completion and
+ * the deferred-failure branch), so it lives here rather than being written out
+ * twice with two chances to drift.
+ */
+function nextCooldownMs(speed, minCooldownMs) {
+  const baseCooldownMs = speed * 60 * 1000;
+  const span = baseCooldownMs - minCooldownMs + 1;
+  return Math.floor(Math.random() * span) + minCooldownMs;
+}
+
 async function start(config, onStatus) {
   const { speed, maxPosts, outputFolder, profile } = config;
   const profileName = profile || 'Default';
+  // Timing overrides. The app never sets these; the test harness sets them to 0
+  // so the suite does not spend minutes asleep proving logic that has nothing
+  // to do with waiting. Absent or invalid values fall back to the real floors,
+  // so a missed override slows a run down — it can never silently remove the
+  // anti-detection gap in production.
+  const minCooldownMs = Number.isFinite(config.minCooldownMs) && config.minCooldownMs >= 0
+    ? config.minCooldownMs : DEFAULT_MIN_COOLDOWN_MS;
+  const networkRecoveryMs = Number.isFinite(config.networkRecoveryMs) && config.networkRecoveryMs >= 0
+    ? config.networkRecoveryMs : DEFAULT_NETWORK_RECOVERY_MS;
 
   // ⚡ M5: validate outputFolder early — create it if missing so the CSV
   // appendFile calls below never hit ENOENT. Best-effort; a failure here
@@ -254,7 +322,20 @@ async function start(config, onStatus) {
   // interrupted.
   async function reportRateLimitAndThrow(pageContent, attemptNum, opts = {}, pendingPost = null) {
     global.isRateLimited = true;
-    if (pendingPost?.text) await queueManager.clearPosting(profileName, pendingPost.text);
+    // Hand the claim back so the next profile can pick the post up immediately
+    // instead of waiting out the lease. Which way depends on the boundary: some
+    // callers reach here AFTER the keystroke (the "daily post limit" URL check),
+    // and a post that may already be live must never return to the queue.
+    if (session) {
+      try {
+        if (session.pastBoundary) {
+          session.markAmbiguous('rate_limited_after_submit', null, { profileName });
+        } else if (session.current) {
+          // A rate limit is not this post's fault — do not spend its retry budget.
+          session.release('rate_limited', { countAsFailure: false });
+        }
+      } catch (e) { /* best-effort: the throw below must still happen */ }
+    }
     const parsedMs = pageContent ? rateLimitStore.parseCooldownFromText(pageContent) : null;
     const cd = rateLimitStore.setCooldown(profileName, parsedMs, {
       source: parsedMs ? 'x' : 'default',
@@ -278,26 +359,50 @@ async function start(config, onStatus) {
     throw err;
   }
 
-  let queue;
+  // No queue snapshot: every iteration claims the next post from the live store,
+  // so a post deleted or published elsewhere can never be picked up from a stale
+  // local copy. `session` owns all queue state for this run.
+  //
+  // Declared here on purpose. This file is not in strict mode, so the bare
+  // `session = await DurableSession.open(...)` below was creating an implicit
+  // GLOBAL — one shared binding for every concurrent start() call, which would
+  // let one profile resolve another profile's leased item.
+  let session = null;
   let context = null;
+
+  // A run that starts while a Stop is still joining would race the very
+  // dispatch that Stop is waiting on. Refuse instead — the UI shows
+  // "stopping" until the join completes and the button becomes live again.
+  if (runRegistry.stopping) {
+    onStatus({
+      type: 'warning',
+      message: '⏳ جارٍ إيقاف تشغيل سابق — انتظر حتى يكتمل الإيقاف قبل بدء تشغيل جديد.',
+    });
+    return {
+      status: 'refused', reason: 'stop_in_progress', profile: profileName,
+      success: 0, unconfirmed: 0, failed: 0, skipped: 0,
+    };
+  }
+
+  // This run's cancellation token — the thing Stop actually competes with.
+  const runToken = runRegistry.create({ label: profileName });
+  // The gate ticket for a keystroke that is currently in flight, if any.
+  let dispatchTicket = null;
   try {
-    // Shared consumable queue — ALWAYS starts at the first post. There is no
-    // resume cursor any more: a published post is deleted from the queue
-    // outright (consumePost), so whatever sits at index 0 is BY DEFINITION the
-    // next unpublished post. Anything still in the queue has not gone out.
+    // Shared consumable queue — ALWAYS starts at the head. There is no resume
+    // cursor: a published post leaves the queue outright, so whatever sits at
+    // the head is BY DEFINITION the next unpublished post, and anything still
+    // queued has not gone out.
     //
-    // This is also why a rate-limit hand-off needs no plumbing: the post the
-    // previous profile couldn't publish was never consumed, so it's still at
-    // the head and this profile picks it up first, naturally. Prepending it
-    // (the old config.priorityPost path) would now publish it TWICE — once as
-    // the injected copy, once from the queue itself.
+    // This is why a rate-limit hand-off needs no plumbing: the post the previous
+    // profile couldn't publish was never consumed, so it is still at the head and
+    // this profile claims it first, naturally. Prepending it (the old
+    // config.priorityPost path) would publish it TWICE — once as the injected
+    // copy, once from the queue itself. The same holds for a network-deferred
+    // post: the store brings it back on its own once the backoff elapses.
     //
-    // Same for the deferred backlog: a network-failed post stays in the queue,
-    // so the next run retries it at the head on its own. deferred-posts.json is
-    // now only an attempt COUNTER (see the network branch below) — never a
-    // re-injection source.
-    // Durable session: the queue, recovery, and every state transition now live
-    // in the SQLite workflow store. Startup reconciliation already ran when the
+    // Durable session: the queue, recovery, and every state transition live in
+    // the SQLite workflow store. Startup reconciliation already ran when the
     // store opened, so anything left mid-flight by a previous process has been
     // resolved into a durable state before we claim anything.
     session = await DurableSession.open(profileName);
@@ -336,6 +441,10 @@ async function start(config, onStatus) {
     try {
       await waitForSelectorInterruptible(page, '[data-testid="SideNav_AccountSwitcher_Button"]', 15000);
     } catch (e) {
+      // A Stop landing during the auth probe is a stop, not a login problem.
+      // Rewriting it as AUTH_REQUIRED sent the operator to re-authenticate an
+      // account that was fine, and hid the fact that their Stop was honoured.
+      if (e.message === 'STOPPED_BY_USER') throw e;
       throw new Error("AUTH_REQUIRED: Please log in first");
     }
 
@@ -406,6 +515,9 @@ async function start(config, onStatus) {
       let postingAttempted = false;
       const maxRetries = 3;
       let stoppedCleanupDone = false;
+      // Set when a pre-boundary guard refused the dispatch. The item is already
+      // resolved durably, so this post is finished — skip straight to the next.
+      let dispatchRefused = false;
 
       // Stopping is not a publishing failure. Keep an untouched post in the
       // queue; if submit may have happened, quarantine it for verification.
@@ -417,9 +529,11 @@ async function start(config, onStatus) {
       async function handleStoppedDuringAttempt() {
         if (stoppedCleanupDone) return;
         stoppedCleanupDone = true;
-        if (postingAttempted) {
-          await queueManager.moveToPending(itemText, profileName, 'stopped_after_submit');
-          await queueManager.removeDeferred(profileName, itemText);
+        // pastBoundary, not postingAttempted: the dispatch is committed the
+        // instant beginDispatch returns, which is before the keystroke. Stopping
+        // in that window is exactly the ambiguous case — the post may be live.
+        if (session.pastBoundary) {
+          session.markAmbiguous('stopped_after_submit', null, { stoppedByUser: true });
           unconfirmedCount++;
           report.recordPostResult({
             postId: `post-${postedCount}`,
@@ -429,11 +543,18 @@ async function start(config, onStatus) {
             lastError: 'Stopped by user after submit',
           });
         } else {
-          await queueManager.clearPosting(profileName, itemText);
+          // Nothing left the app. Stopping is an operator action, not a
+          // publishing failure, so it must not burn the item's retry budget.
+          session.release('stopped_by_user', { countAsFailure: false });
         }
       }
 
       while (!postSuccess && attempts < maxRetries && global.isRunning && !global.isRateLimited) {
+        // Once the dispatch is committed, the keystroke may already have gone
+        // out. Retrying would press Ctrl+Enter a second time for the same
+        // committed attempt — the exact duplicate-publish the durable design
+        // exists to prevent. The outcome is resolved below instead.
+        if (session.pastBoundary || dispatchRefused) break;
         attempts++;
         if (attempts >= 2) {
           report.logEvent({ level: 'warn', event: 'RETRY', postId: `post-${postedCount}`, attempt: attempts, message: `Retry attempt ${attempts}/${maxRetries}` });
@@ -492,9 +613,75 @@ async function start(config, onStatus) {
             await page.mouse.move(Math.random() * 500 + 100, Math.random() * 500 + 100, { steps: 10 });
             await interruptibleDelay(100 + Math.random() * 200);
             const baselineToast = await getToastSnapshot(page);
-            await queueManager.markPosting(itemText, profileName);
-            await page.keyboard.press('ControlOrMeta+Enter');
+
+            // ── THE IRREVERSIBLE BOUNDARY ──────────────────────────────────
+            // Everything from here to the keystroke is SYNCHRONOUS on purpose.
+            // Do not introduce an `await` between the gate and the press: that
+            // gap is exactly where a Stop used to slip through unobserved,
+            // leaving the operator with a tweet they had already cancelled.
+            //
+            // 1. Take the run gate. If Stop got here first this refuses, and
+            //    nothing irreversible happens.
+            const gate = runToken.tryEnterDispatch(`post-${postedCount}`);
+            if (!gate.ok) {
+              dispatchRefused = true;
+              // Nothing left the app, so this is not a publishing failure and
+              // must not spend the item's retry budget.
+              try { session.release('stopped_before_dispatch', { countAsFailure: false }); }
+              catch (e) { console.error('release after stop-wins failed:', e?.message); }
+              stoppedCleanupDone = true;
+              onStatus({
+                type: 'warning',
+                message: '🛑 وصل أمر الإيقاف قبل الإرسال — لم يُضغط الإرسال ولم يُنشر شيء، والمنشور باقٍ في الطابور.',
+              });
+              break;
+            }
+
+            // 2. Commit the dispatch durably BEFORE the keystroke, never after:
+            //    a crash between the two must leave a record that something may
+            //    already be live on X. If a guard refuses, the keystroke must
+            //    not happen at all — beginDispatch has already landed the item
+            //    somewhere durable and released the claim.
+            let dispatch;
+            try {
+              dispatch = session.beginDispatch(postText);
+            } catch (beginErr) {
+              runToken.leaveDispatch(gate.ticket, { outcome: 'begin_threw' });
+              throw beginErr;
+            }
+            if (!dispatch.ok) {
+              runToken.leaveDispatch(gate.ticket, { outcome: 'refused' });
+              dispatchRefused = true;
+              onStatus({
+                type: 'warning',
+                message: `⛔ رُفض النشر قبل الإرسال (${dispatch.code}) — لم يُضغط الإرسال ولم يُنشر شيء.`,
+              });
+              break;
+            }
+
+            // 3. The transport call. From here the outcome can only be
+            //    published or ambiguous — never back to the queue.
+            //
+            //    `postingAttempted` is set BEFORE the await, not after it. The
+            //    boundary is the point of no return, not the moment a promise
+            //    happens to resolve: if the keystroke reached the page and the
+            //    promise then rejected (a context torn down, a navigation, a
+            //    timeout), setting it afterwards left pastBoundary=true with
+            //    postingAttempted=false. The unwind then tried markTerminal on
+            //    an item already in `dispatch_started`, got INVALID_STATE, and
+            //    stranded it there — invisible in both queue and recovery, and
+            //    blocking every profile until a restart reconciled it.
+            dispatchTicket = gate.ticket;
             postingAttempted = true;
+            try {
+              await page.keyboard.press('ControlOrMeta+Enter');
+            } finally {
+              // Release the gate as soon as the keystroke itself has settled.
+              // A Stop waiting to join is unblocked here; the outcome is
+              // resolved by the code below either way.
+              runToken.leaveDispatch(dispatchTicket, { outcome: 'submitted' });
+              dispatchTicket = null;
+            }
 
             onStatus({ type: 'info', message: `Post triggered via ${PLATFORM_KEY_LABEL}+Enter, awaiting server confirmation...` });
             try {
@@ -562,7 +749,7 @@ async function start(config, onStatus) {
 
           if (err.name === 'TimeoutError' || err.message.includes('net::') || err.message.includes('connection')) {
             onStatus({ type: 'warning', message: 'Network/Timeout error, attempting recovery...' });
-            await interruptibleDelay(10000);
+            await interruptibleDelay(networkRecoveryMs);
             // 🛑 Recovery navigations below can take up to 45-60s each and
             // aren't pollable mid-flight — at minimum, skip them entirely if
             // Stop was already pressed during the delay above.
@@ -659,19 +846,54 @@ async function start(config, onStatus) {
       postUrl = postUrl || 'N/A';
 
       if (postSuccess === true) {
-        successCount++;
-        consecutiveFailures = 0;
-        // ✅ PUBLISHED + LINK CAPTURED → delete from the shared queue NOW, for
-        // good. This is the single point where the queue shrinks. It runs
-        // before anything else that could throw (reporting, CSV, cooldown), so
-        // a later failure can never resurrect an already-published post.
-        // published: true also archives the text for the studio's semantic
-        // dedup, which must keep seeing it long after it leaves the queue.
-        await queueManager.consumePost(itemText, { published: true, profileName });
-        // A post that had been network-deferred and finally went through — drop
-        // its attempt counter so a future post never inherits a stale count.
-        await queueManager.removeDeferred(profileName, itemText);
-        queue = queue.slice(1);
+        // ✅ PUBLISHED + LINK CAPTURED. Recorded before anything else that could
+        // throw (reporting, CSV, cooldown), so a later failure can never
+        // resurrect an already-published post. The item stays in the store as
+        // `published` — that is what keeps feeding the studio's semantic dedup
+        // long after it leaves the queue.
+        //
+        // The counter is incremented AFTER the commit returns, never before.
+        // Incrementing first meant the duplicate-URL path below moved the item
+        // to `ambiguous` while the run still reported it as a success: a probe
+        // measured success=2/unconfirmed=1 against a database holding
+        // published=1/ambiguous=1. The summary has to come from what committed.
+        try {
+          session.markPublished({
+            externalUrl: confirmedPostUrl || null,
+            evidence: { profileName, attempts, postUrl },
+          });
+          successCount++;
+          consecutiveFailures = 0;
+        } catch (publishErr) {
+          // external_url is UNIQUE: a scraped URL that already belongs to
+          // another attempt means the DOM handed us a stale link, so we cannot
+          // attribute this URL to this post. The post itself very likely DID go
+          // out, so it must not go back in the queue — but we have no proof of
+          // which URL is its own. That is precisely "ambiguous": park it for a
+          // human. Throwing here instead would strand the item in
+          // dispatch_started and block publishing for every profile.
+          if (publishErr && publishErr.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+            onStatus({
+              type: 'warning',
+              message: '⚠️ رابط التأكيد مُسجَّل لمنشور آخر — تعذّر إثبات رابط هذا المنشور، نُقل للتحقق اليدوي.',
+            });
+            session.markAmbiguous('duplicate_external_url', publishErr, {
+              profileName,
+              attempts,
+              scrapedUrl: confirmedPostUrl || postUrl || null,
+            });
+            unconfirmedCount++;
+            report.recordPostResult({
+              postId: `post-${postedCount}`,
+              text: itemText,
+              status: 'unconfirmed',
+              attempts,
+              lastError: 'Duplicate external URL — could not attribute the link',
+            });
+            continue;
+          }
+          throw publishErr;
+        }
         report.recordPostResult({
           postId: `post-${postedCount}`,
           text: itemText,
@@ -681,9 +903,11 @@ async function start(config, onStatus) {
       } else if (postSuccess === 'unconfirmed') {
         // Remote outcome is ambiguous. Move atomically to the visible recovery
         // list and never auto-retry; the user decides after checking X.
-        await queueManager.moveToPending(itemText, profileName, 'ambiguous_publish_result');
-        await queueManager.removeDeferred(profileName, itemText);
-        queue = queue.slice(1);
+        session.markAmbiguous('ambiguous_publish_result', lastError, {
+          profileName,
+          attempts,
+          composerCleared: true,
+        });
         unconfirmedCount++;
         consecutiveFailures = 0;
         onStatus({ type: 'warning', message: 'Post moved to pending verification (unconfirmed status)' });
@@ -717,22 +941,18 @@ async function start(config, onStatus) {
         failedCount++;
         consecutiveFailures++;
 
-        // ⏸️ Transient (network) failures are NOT consumed — the post stays in
-        // the queue exactly where it is, so the next run (or the next profile)
-        // finds it at the head and retries it. Only the local `queue` copy
-        // skips past it, giving "try another post now, retry this one later".
-        // deferred-posts.json no longer re-injects anything; it survives purely
-        // as an attempt COUNTER, so a post that can never go out is eventually
-        // consumed into dead-letters instead of blocking the head of the queue
-        // forever.
+        // ⏸️ Transient (network) failures are NOT consumed. The post is deferred
+        // with a backoff, so this run moves on to the next post and the store
+        // brings this one back on its own — "try another post now, retry this
+        // one later" without ever stalling on the head of the queue.
         if (errorType === 'network') {
-          await queueManager.clearPosting(profileName, itemText);
-          const attemptsSoFar = await queueManager.addDeferred(itemText, errorMsg, profileName);
-          queue = queue.slice(1);
-          if (attemptsSoFar > DEFER_ATTEMPTS_LIMIT) {
-            await queueManager.removeDeferred(profileName, itemText);
-            await queueManager.moveToDeadLetter(itemText, errorType, errorMsg, profileName);
-            onStatus({ type: 'error', message: `❌ فشل شبكي متكرر (${attemptsSoFar} مرات) — تم نقله للمحذوفات نهائياً.` });
+          // The store owns the retry budget: markDeferred increments the
+          // pre-dispatch failure count and retires the item to `dead` on its own
+          // once the budget is spent, so the returned state IS the outcome.
+          const deferredItem = session.markDeferred('network_failure', lastError);
+          const retired = deferredItem && deferredItem.state === 'dead';
+          if (retired) {
+            onStatus({ type: 'error', message: `❌ فشل شبكي متكرر — تم نقله للمحذوفات نهائياً.` });
             report.recordPostResult({
               postId: `post-${postedCount}`, text: itemText, status: 'dead_letter',
               attempts: attempts, errorType, lastError: errorMsg,
@@ -758,11 +978,10 @@ async function start(config, onStatus) {
           }
           // Skip the shared error-log CSV + generic status message below —
           // this branch already reported its own outcome above.
-          if (queue.length > 0 && postedCount < maxPosts && global.isRunning) {
-            const baseCooldownMs = speed * 60 * 1000;
-            const minCooldownMs = 15000;
-            const randomDelay = Math.floor(Math.random() * (baseCooldownMs - minCooldownMs + 1)) + minCooldownMs;
-            const stopEarly = await countdown(randomDelay, onStatus, queue.length, liveStats().success, liveStats().failed);
+          const remainingAfterDefer = session.queuedCount();
+          if (remainingAfterDefer > 0 && postedCount < maxPosts && global.isRunning) {
+            const randomDelay = nextCooldownMs(speed, minCooldownMs);
+            const stopEarly = await countdown(randomDelay, onStatus, remainingAfterDefer, liveStats().success, liveStats().failed);
             if (stopEarly) break;
           }
           continue;
@@ -770,20 +989,13 @@ async function start(config, onStatus) {
 
         onStatus({ type: 'error', message: `❌ فشل (${errorType}): ${errorMsg.slice(0, 60)}` });
         // A non-transient failure (selector/platform/unknown) will not fix
-        // itself on a retry. Consume it into dead-letters so it can't block the
-        // head of the queue forever (Zero-Queue-Block) — dead-letters.json
-        // keeps the text, so nothing is actually lost.
-        // Clear any stale posting-in-progress marker BEFORE dead-lettering (not
-        // just relying on moveToDeadLetter's own internal clear at the end of
-        // its multi-step write): if the process crashes between here and
-        // moveToDeadLetter finishing, recoverInterruptedPosts() on the next
-        // start unconditionally re-quarantines any surviving marker — clearing
-        // it first means a crash mid-write leaves this post to be retried
-        // once more, instead of surfacing as a duplicate recovery entry.
-        await queueManager.clearPosting(profileName, itemText);
-        await queueManager.removeDeferred(profileName, itemText);
-        queue = queue.slice(1);
-        await queueManager.moveToDeadLetter(itemText, errorType, errorMsg, profileName);
+        // itself on a retry, so the post is retired rather than left to block
+        // the head of the queue forever (Zero-Queue-Block). This is one durable
+        // transaction, not a multi-step write, so a crash cannot land halfway.
+        // Strictly pre-boundary: nothing was ever submitted, so retiring it can
+        // never hide a published post. Dead items keep their text and stay
+        // visible in the recovery list, so nothing is lost.
+        session.markTerminal(errorType, lastError);
         report.recordPostResult({
           postId: `post-${postedCount}`,
           text: itemText,
@@ -852,16 +1064,14 @@ async function start(config, onStatus) {
       onStatus({ 
         type: statusType, 
         message: statusMessage,
-        queueCount: queue.length,
+        queueCount: session.queuedCount(),
         stats: liveStats()
       });
 
-      if (queue.length > 0 && postedCount < maxPosts && global.isRunning) {
-        const baseCooldownMs = speed * 60 * 1000;
-        const minCooldownMs = 15000;
-        const randomDelay = Math.floor(Math.random() * (baseCooldownMs - minCooldownMs + 1)) + minCooldownMs;
-
-        const stopEarly = await countdown(randomDelay, onStatus, queue.length, liveStats().success, liveStats().failed);
+      const remainingQueued = session.queuedCount();
+      if (remainingQueued > 0 && postedCount < maxPosts && global.isRunning) {
+        const randomDelay = nextCooldownMs(speed, minCooldownMs);
+        const stopEarly = await countdown(randomDelay, onStatus, remainingQueued, liveStats().success, liveStats().failed);
         if (stopEarly) break;
       }
     }
@@ -907,6 +1117,26 @@ async function start(config, onStatus) {
     await report.endRun();
     throw error;
   } finally {
+    // Close the run in the SAME finally that closes the browser. Without this
+    // the row stayed 'active' forever: workflow_runs grew one row per run and
+    // the next startup reconciliation relabelled every one of them 'crashed',
+    // so a clean run was indistinguishable from a real crash. It also releases
+    // a claim still held on an early break, instead of waiting out the lease.
+    // A user pressing Stop is still a CLEAN close — 'crashed' is reserved for
+    // runs that never reached this line at all.
+    // A ticket still held here means the run unwound between the keystroke and
+    // its own finally (a throw from deep inside Playwright, for instance).
+    // Release it so a Stop waiting to join is never wedged behind a dead run.
+    if (dispatchTicket) {
+      try { runToken.leaveDispatch(dispatchTicket, { outcome: 'run_unwound' }); }
+      catch (e) { console.error('Failed to release dispatch gate:', e?.message); }
+      dispatchTicket = null;
+    }
+    runRegistry.release(runToken);
+    if (session) {
+      try { session.close('closed'); }
+      catch (e) { console.error('Failed to close workflow run:', e?.message); }
+    }
     if (context) activeContexts.delete(context);
     try {
       if (context) await context.close();

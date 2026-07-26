@@ -116,6 +116,24 @@ function unitTests() {
   check('session restores rounds', restored.roundsCompleted === 2);
   check('session restores acceptedBodies (dedup memory)', restored.acceptedBodies.length === 1);
   check('thread persisted + restored for cache continuity', restored.messages.length === 2 && (json.messages || []).length === 2);
+
+  // The system block is stored ONCE in the snapshot envelope, not repeated in
+  // every session. With a 30-worker pool it was ~30 copies of the same
+  // multi-KB prompt in a file rewritten after every round.
+  check('snapshot does not repeat the system block per session', json.system === undefined);
+  check('the system block comes from the envelope on restore', restored.system === 'SYS');
+
+  // Both directions are capped. toJSON capping alone still let an older or
+  // hand-edited file reintroduce an unbounded list that every later write
+  // then preserved faithfully.
+  const big = new GenerationSession(4, 'SYS');
+  for (let i = 0; i < 200; i++) big.acceptedBodies.push(`b${i}`);
+  check('toJSON caps acceptedBodies', big.toJSON().acceptedBodies.length === 60);
+  const fromOversized = GenerationSession.fromJSON(
+    { num: 4, acceptedBodies: Array.from({ length: 200 }, (_, i) => `b${i}`) },
+    'SYS'
+  );
+  check('fromJSON also caps acceptedBodies', fromOversized.acceptedBodies.length === 60);
 }
 
 server.listen(0, async () => {

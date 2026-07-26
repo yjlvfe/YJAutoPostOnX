@@ -5,14 +5,14 @@
  * markPosting() already wrote the durable marker, the single highest-risk
  * moment for a duplicate/lost post — used to unwind straight past the retry
  * loop's "stopping is not a publishing failure" handling. That handling only
- * ran on a NORMAL loop exit, so the exception path left a stale
- * posting-state.json marker and the post silently missing from that run's
- * own stats, only picked up by the NEXT run's startup recovery pass.
+ * ran on a NORMAL loop exit, so the exception path left the post silently
+ * missing from that run's own stats, only picked up by the NEXT run's startup
+ * recovery pass.
  *
  * This drives the REAL xPoster.start() against a fake browser that never
  * produces a toast and flips global.isRunning=false mid-poll (simulating
  * Stop pressed while waiting for confirmation), and asserts the post is
- * quarantined to pending-verification IMMEDIATELY — not one run later.
+ * quarantined as ambiguous IMMEDIATELY — not one run later.
  */
 
 'use strict';
@@ -72,17 +72,17 @@ require.cache[browserManagerPath] = {
   },
 };
 
-const queueManager = require('../dev/automation/queueManager');
+const durableQueue = require('../dev/automation/durableQueue');
 const xPoster = require('../dev/automation/xPoster');
 
 const OUT_DIR = path.join(SANDBOX, 'out');
 
 async function run() {
-  await queueManager.addPosts(['STOP_MID_TOAST']);
+  await durableQueue.addPosts(['STOP_MID_TOAST']);
 
   global.isRunning = true;
   const res = await xPoster.start(
-    { speed: 0, maxPosts: 1, outputFolder: OUT_DIR, profile: 'Default' },
+    { speed: 0, minCooldownMs: 0, networkRecoveryMs: 0, maxPosts: 1, outputFolder: OUT_DIR, profile: 'Default' },
     () => {}
   );
 
@@ -90,15 +90,29 @@ async function run() {
   assert(res.unconfirmed === 1,
     `the interrupted post is counted in THIS run's own stats, not silently dropped (got unconfirmed=${res.unconfirmed})`);
 
-  const pending = await queueManager.getPending('Default');
+  const { pending } = await durableQueue.getRecoveryItems('Default');
   assert(pending.some(p => p.text === 'STOP_MID_TOAST' && p.reason === 'stopped_after_submit'),
-    "the post lands in pending-verification with reason 'stopped_after_submit' IMMEDIATELY — not only after the next run's startup recovery");
+    "the post lands in recovery with reason 'stopped_after_submit' IMMEDIATELY — not only after the next run's startup recovery");
 
-  const queue = (await queueManager.getQueue()).map(p => (typeof p === 'string' ? p : p.text));
+  const queue = (await durableQueue.getQueue()).map(p => (typeof p === 'string' ? p : p.text));
   assert(!queue.includes('STOP_MID_TOAST'),
     'the post is removed from the live queue so a later run cannot auto-repost it');
 
+  // The keystroke was already sent, so this post may or may not be live on X.
+  // Nothing else may publish until a human says which — including a requeue,
+  // which must refuse without an explicit "it was not published" confirmation.
+  const store = await durableQueue.getStore();
+  assert(store.countUnresolvedRecovery() === 1,
+    'the interrupted post blocks publishing globally until its outcome is resolved');
+  let refused = false;
+  try {
+    await durableQueue.requeueRecovery('Default', 'pending', 'STOP_MID_TOAST', {});
+  } catch (e) { refused = true; }
+  assert(refused,
+    'requeueing it WITHOUT confirming it was never published is refused — that path is how a live post gets duplicated');
+
   console.log(`\n${failed === 0 ? '✅' : '❌'} stop-during-toast-wait: ${passed} passed, ${failed} failed`);
+  await durableQueue.closeStore();
   try { fs.rmSync(SANDBOX, { recursive: true }); } catch (e) { /* best-effort */ }
   if (failed > 0) process.exit(1);
 }

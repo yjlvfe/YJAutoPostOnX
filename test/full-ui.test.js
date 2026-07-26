@@ -143,14 +143,14 @@ async function runTests() {
   ok('isDuplicate نص مكرر = true', isDup2 === true);
 
   // ══════════════════════════════════════════════
-  section('4. queueManager — الطابور');
+  section('4. durableQueue — الطابور');
   // ══════════════════════════════════════════════
-  const qm = require('../dev/automation/queueManager');
+  const dq = require('../dev/automation/durableQueue');
 
   const testProfile = 'TestProfile_UI_' + Date.now();
 
   // 4.1 getQueue — الطابور مشترك، نتحقق فقط أنه array
-  const emptyQ = await qm.getQueue(testProfile);
+  const emptyQ = await dq.getQueue(testProfile);
   ok('getQueue بروفايل جديد = فاضي', Array.isArray(emptyQ));
 
   // 4.2 addPosts — نضيف 3 منشورات فريدة بـ timestamp
@@ -161,26 +161,27 @@ async function runTests() {
     { text: `تغريدة اختبار ثالثة ${ts}` },
   ];
   const beforeCount = emptyQ.length;
-  const addResult = await qm.addPosts(posts, testProfile);
-  ok('addPosts يضيف 3 منشورات', (addResult.added ?? addResult.successfullyAdded) === 3);
+  const addResult = await dq.addPosts(posts, testProfile);
+  ok('addPosts يضيف 3 منشورات', addResult.added === 3);
 
   // 4.3 getQueue بعد الإضافة
-  const filledQ = await qm.getQueue(testProfile);
+  const filledQ = await dq.getQueue(testProfile);
   ok('getQueue بعد إضافة = 3 منشور', filledQ.length === beforeCount + 3);
 
   // 4.4 تجنب التكرار
-  const dupResult = await qm.addPosts([{ text: `تغريدة اختبار أولى ${ts}` }], testProfile);
-  ok('addPosts يرفض التكرار', (dupResult.skippedDuplicate ?? 0) >= 1);
+  const dupResult = await dq.addPosts([{ text: `تغريدة اختبار أولى ${ts}` }], testProfile);
+  ok('addPosts يرفض التكرار', dupResult.skippedDuplicate >= 1);
 
   // 4.5 bulkDeleteByText — حذف موجّه بالمحتوى، لا بمؤشرات قابلة للتقادم
-  await qm.bulkDeleteByText(posts.map(post => post.text), testProfile);
-  const afterQ = await qm.getQueue(testProfile);
+  const delResult = await dq.bulkDeleteByText(posts.map(post => post.text), testProfile);
+  ok('bulkDeleteByText يبلّغ عن العدد المحذوف فعلاً', delResult.deleted === 3);
+  const afterQ = await dq.getQueue(testProfile);
   ok('getQueue بعد الحذف يعود للعدد السابق', afterQ.length === beforeCount);
 
   // تنظيف
   try {
-    const dataDir = qm.getProfileDataDir(testProfile);
-    require('fs').rmSync(dataDir, { recursive: true, force: true });
+    const { profileDataDir } = require('../dev/automation/profileRegistry');
+    require('fs').rmSync(profileDataDir(testProfile), { recursive: true, force: true });
   } catch(e) {}
 
   // ══════════════════════════════════════════════

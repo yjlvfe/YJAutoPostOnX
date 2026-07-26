@@ -79,6 +79,24 @@ assert(!/stats:\s*\{\s*success:\s*successCount,\s*failed:\s*failedCount\s*\}/.te
 assert(/unconfirmedCount\+\+/.test(code) && /unconfirmed:\s*unconfirmedCount/.test(code),
   'unconfirmed posts are counted and returned (they consume the global target)');
 
+// ── The anti-detection floors are what SHIPS ──────────────────────────────
+// The engine-driving tests pass minCooldownMs/networkRecoveryMs = 0 so the
+// suite does not sleep for minutes. That override must stay a test-only
+// courtesy: if a missing or malformed value ever fell through to 0, the app
+// would fire tweets back to back — the exact pattern that gets an account
+// flagged — and every test would still be green.
+console.log('📋 Timing floors: the override cannot weaken production');
+assert(/const DEFAULT_MIN_COOLDOWN_MS = 15_000;/.test(code),
+  'the 15s anti-detection floor between posts is still the default');
+assert(/const DEFAULT_NETWORK_RECOVERY_MS = 10_000;/.test(code),
+  'the 10s network-recovery pause is still the default');
+assert(/Number\.isFinite\(config\.minCooldownMs\) && config\.minCooldownMs >= 0\s*\n\s*\? config\.minCooldownMs : DEFAULT_MIN_COOLDOWN_MS/.test(code),
+  'an absent or non-numeric minCooldownMs falls back to the floor, never to 0');
+assert(/Number\.isFinite\(config\.networkRecoveryMs\) && config\.networkRecoveryMs >= 0\s*\n\s*\? config\.networkRecoveryMs : DEFAULT_NETWORK_RECOVERY_MS/.test(code),
+  'an absent or non-numeric networkRecoveryMs falls back to the floor, never to 0');
+assert(!/minCooldownMs|networkRecoveryMs/.test(fs.readFileSync(path.join(__dirname, '../dev/main.js'), 'utf8')),
+  'main.js never sets the timing overrides — the shipped app always gets the floors');
+
 // start/startMulti still exported and loadable without electron
 const xPoster = require(XPOSTER_PATH);
 assert(typeof xPoster.start === 'function' && typeof xPoster.startMulti === 'function',

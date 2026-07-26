@@ -5,8 +5,8 @@
  *
  * xPoster's loop is battle-tested (stop handling, rate limits, retries, toast
  * confirmation), so this keeps that structure and replaces only the STATE
- * operations underneath it. Each method maps one legacy queueManager call onto
- * a single durable transaction.
+ * operations underneath it: each method is one durable transaction against the
+ * workflow store.
  *
  * The critical rule the old code could not enforce: `beginDispatch` commits
  * BEFORE Ctrl+Enter, and once committed nothing may return the item to an
@@ -16,10 +16,23 @@
 
 const crypto = require('crypto');
 const durableQueue = require('./durableQueue');
+const { resolveBoundaryGuardFailure } = require('./dispatchBoundary');
 
 function rid(prefix, id) {
   return `${prefix}:${id}:${crypto.randomUUID()}`;
 }
+
+/**
+ * How often a held claim renews its lease, and how long each renewal buys.
+ *
+ * Preparation is slow by design — human-like typing delays, a media upload, a
+ * toast wait — and can legitimately outlast a single lease. Without renewal the
+ * lease simply expired mid-preparation: `beginDispatch` then refused with
+ * LEASE_EXPIRED (safe, but the work was wasted) and, worse, the item became
+ * claimable by another worker while this one was still composing it.
+ */
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_LEASE_MS = 180_000;
 
 class DurableSession {
   constructor({ store, profileId, runId, profileName }) {
@@ -29,7 +42,56 @@ class DurableSession {
     this.profileName = profileName;
     this.current = null;      // the leased item
     this.attempt = null;      // the committed dispatch attempt, if any
+    this._heartbeatTimer = null;
+    this._heartbeatFailures = 0;
+    this.lastHeartbeatError = null;
   }
+
+  /**
+   * Keep the claim alive for as long as it is held.
+   *
+   * Started automatically when an item is claimed and stopped by every terminal
+   * transition, so no caller has to remember to do it — the previous design
+   * exposed heartbeat() as a method the live engine simply never called, while
+   * the test driver did, which made the tests healthier than production.
+   */
+  _startHeartbeat(leaseMs = HEARTBEAT_LEASE_MS) {
+    this._stopHeartbeat();
+    this._heartbeatFailures = 0;
+    const interval = Math.max(1_000, Math.min(HEARTBEAT_INTERVAL_MS, Math.floor(leaseMs / 3)));
+    this._heartbeatTimer = setInterval(() => {
+      // Once the dispatch is committed the lease is already released by the
+      // store; renewing past the boundary would be meaningless.
+      if (!this.current || this.attempt) { this._stopHeartbeat(); return; }
+      try {
+        this.store.renewLease({
+          id: this.current.id,
+          leaseToken: this.current.leaseToken,
+          leaseMs,
+        });
+        this._heartbeatFailures = 0;
+        this.lastHeartbeatError = null;
+      } catch (error) {
+        // A failed renewal is not fatal on its own — the boundary re-checks the
+        // lease inside its own transaction and refuses if it really is gone.
+        // Record it so the refusal can be explained rather than mysterious.
+        this._heartbeatFailures++;
+        this.lastHeartbeatError = { message: error.message, code: error.code || null };
+        if (this._heartbeatFailures >= 3) this._stopHeartbeat();
+      }
+    }, interval);
+    if (this._heartbeatTimer.unref) this._heartbeatTimer.unref();
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+  }
+
+  /** True while a claim is being kept alive — for tests and diagnostics. */
+  get heartbeatActive() { return this._heartbeatTimer !== null; }
 
   static async open(profileName) {
     const store = await durableQueue.getStore();
@@ -38,9 +100,11 @@ class DurableSession {
     return new DurableSession({ store, profileId, runId: run.id, profileName });
   }
 
-  /** How many posts are ready to publish right now. */
+  /** How many posts are ready to publish right now.
+   *  Paged: listQueued clamps at 1000, so a larger queue reported exactly 1000
+   *  and the operator saw a number that stopped moving as posts went out. */
   queuedCount() {
-    return this.store.listQueued({ limit: 1000 }).length;
+    return durableQueue.readAllQueuedItems(this.store).length;
   }
 
   /** Items awaiting a human decision — publishing is blocked while > 0. */
@@ -65,6 +129,8 @@ class DurableSession {
       if (!item) { this.current = null; return null; }
       this.current = item;
       this.attempt = null;
+      // The claim is now held; keep it alive for as long as preparation takes.
+      this._startHeartbeat(leaseMs);
       const media = item.media && item.media.length > 0 ? item.media[0] : null;
       return {
         id: item.id,
@@ -106,6 +172,10 @@ class DurableSession {
         renderedText: typeof renderedText === 'string' ? renderedText : this.current.payload.text,
         requestId: rid('begin', this.current.id),
       });
+      // The boundary releases the lease inside its own transaction, so renewal
+      // is meaningless from here on. Stop immediately rather than leaving a
+      // live interval to notice on its next tick.
+      this._stopHeartbeat();
       return { ok: true, attemptId: this.attempt.attemptId };
     } catch (error) {
       const resolved = this._resolveGuardFailure(error);
@@ -113,43 +183,24 @@ class DurableSession {
     }
   }
 
-  /** A guard refused pre-boundary: land the item somewhere durable and visible. */
+  /**
+   * A guard refused pre-boundary: land the item somewhere durable and visible.
+   *
+   * The policy itself lives in dispatchBoundary.js. Whatever it decides, the
+   * claim is dropped here: an item left in 'leased' shows up in neither the
+   * queue nor the recovery screen.
+   */
   _resolveGuardFailure(error) {
     const item = this.current;
     if (!item) return null;
-    const base = { id: item.id, leaseToken: item.leaseToken, error: { message: error.message, code: error.code || null } };
     try {
-      if (error.code === 'MEDIA_INTEGRITY_FAILED') {
-        const dead = this.store.markTerminal({ ...base, reason: 'media_integrity_failed', requestId: rid('dead-media', item.id) });
-        this.current = null;
-        return dead;
-      }
-      if (error.code === 'RECOVERY_REQUIRED' || error.code === 'RUN_NOT_ACTIVE' || error.code === 'PROFILE_NOT_ACTIVE') {
-        const released = this.store.releasePreDispatch({
-          ...base,
-          reason: `refused_${(error.code || 'guard').toLowerCase()}`,
-          countAsFailure: false,
-          requestId: rid('release-guard', item.id),
-        });
-        this.current = null;
-        return released;
-      }
-      if (error.code === 'LEASE_EXPIRED' || error.code === 'LEASE_CONFLICT') {
-        this.store.reclaimExpiredLeases({ requestId: rid('reclaim', item.id), graceMs: 0 });
-        this.current = null;
-        return this.store.getItem(item.id);
-      }
-      const deferred = this.store.markDeferred({
-        ...base,
-        reason: 'unknown_boundary_guard_failure',
-        availableAtMs: Date.now() + 300_000,
-        requestId: rid('defer-guard', item.id),
-      });
-      this.current = null;
-      return deferred;
+      const resolved = resolveBoundaryGuardFailure({ store: this.store, item, error });
+      return resolved.item;
     } catch {
-      this.current = null;
       return null;
+    } finally {
+      this._stopHeartbeat();
+      this.current = null;
     }
   }
 
@@ -163,6 +214,7 @@ class DurableSession {
       evidence: { confirmed: true, ...(evidence || {}) },
       requestId: rid('published', this.current.id),
     });
+    this._stopHeartbeat();
     this.current = null;
     this.attempt = null;
     return result;
@@ -181,6 +233,7 @@ class DurableSession {
       evidence,
       requestId: rid('ambiguous', this.current.id),
     });
+    this._stopHeartbeat();
     this.current = null;
     this.attempt = null;
     return result;
@@ -197,6 +250,7 @@ class DurableSession {
       availableAtMs: Date.now() + backoffMs,
       requestId: rid('deferred', this.current.id),
     });
+    this._stopHeartbeat();
     this.current = null;
     return result;
   }
@@ -211,6 +265,7 @@ class DurableSession {
       error: error ? { message: error.message || String(error), code: error.code || null } : null,
       requestId: rid('terminal', this.current.id),
     });
+    this._stopHeartbeat();
     this.current = null;
     return result;
   }
@@ -230,6 +285,7 @@ class DurableSession {
       countAsFailure,
       requestId: rid('release', this.current.id),
     });
+    this._stopHeartbeat();
     this.current = null;
     return result;
   }

@@ -1,21 +1,31 @@
 'use strict';
 
-const crypto = require('crypto');
+/**
+ * dispatchDriver.js — a TEST DRIVER for one full publish cycle.
+ *
+ * This is not shipped code. The application has exactly one publish state
+ * machine — DurableSession, driven by xPoster's loop — and this file exists so
+ * the store-semantics suites can exercise a complete lease → boundary →
+ * transport → outcome cycle without a browser.
+ *
+ * It used to live in dev/automation/publishWorkflow.js, where it looked like a
+ * second shipped publish engine. Nothing in the app ever called it, so the
+ * suites built on it could all pass while the engine that actually ships was
+ * broken — which is precisely what happened. The irreversible-boundary POLICY it
+ * relies on is not duplicated here: it is imported from the shipped
+ * dev/automation/dispatchBoundary.js, so these tests still pin real behaviour.
+ *
+ * End-to-end coverage of the shipped loop lives in queue-consume.test.js,
+ * deferred-retry-v512.test.js and stop-during-toast-wait.test.js, which drive
+ * the real xPoster against a fake browser.
+ */
 
-const DEFAULT_BACKOFF_MS = 5 * 60_000;
-
-function requestId(prefix) {
-  return `${prefix}:${crypto.randomUUID()}`;
-}
-
-function serializeError(error) {
-  if (!error) return null;
-  return {
-    name: typeof error.name === 'string' ? error.name : 'Error',
-    message: typeof error.message === 'string' ? error.message : String(error),
-    code: typeof error.code === 'string' ? error.code : null,
-  };
-}
+const {
+  DEFAULT_GUARD_BACKOFF_MS: DEFAULT_BACKOFF_MS,
+  requestId,
+  serializeError,
+  resolveBoundaryGuardFailure,
+} = require('../../dev/automation/dispatchBoundary');
 
 /**
  * Classify a preparation failure.
@@ -50,90 +60,33 @@ function hasAuthoritativeProof(evidence) {
 }
 
 /**
- * Turn a pre-boundary guard failure into a durable, visible state.
+ * dispatchNext's vocabulary for each shared boundary-guard outcome.
  *
- * The item is still 'leased' at this point and the transport was never called,
- * so nothing here can duplicate a post. What matters is that the item never
- * stays leased: that state is invisible in both the queue and recovery views.
+ * The POLICY lives in dispatchBoundary.js — this only renames its result into
+ * the `status` strings dispatchNext's callers already switch on.
  */
-function resolveBoundaryGuardFailure({ store, item, error, backoffMs }) {
-  const code = error && error.code;
-  const details = { id: item.id, leaseToken: item.leaseToken, error: serializeError(error) };
+const GUARD_STATUS = {
+  terminal: 'terminal_error_pre_dispatch',
+  released: 'cancelled_pre_dispatch',
+  blocked: 'blocked',
+  lease_lost: 'lease_lost_pre_dispatch',
+  deferred: 'retryable_error_pre_dispatch',
+};
 
-  // Locally provable corruption cannot repair itself by retrying.
-  if (code === 'MEDIA_INTEGRITY_FAILED') {
-    const dead = store.markTerminal({
-      ...details,
-      reason: 'media_integrity_failed',
-      requestId: requestId('terminal-media-integrity'),
-    });
-    return { ...dead, status: 'terminal_error_pre_dispatch', error, item: dead };
+function resolveGuardFailureAsDispatchResult({ store, item, error, backoffMs }) {
+  const resolved = resolveBoundaryGuardFailure({ store, item, error, backoffMs });
+  const status = GUARD_STATUS[resolved.outcome];
+  const base = resolved.item ? { ...resolved.item } : { state: resolved.state };
+  const result = { ...base, status, error, item: resolved.item };
+  if (resolved.outcome === 'blocked') {
+    result.reason = 'recovery_required';
+    result.details = resolved.details || null;
   }
-
-  // Stop / profile deletion / lost lease: the operator or another worker won.
-  // Release without penalising the item.
-  if (code === 'RUN_NOT_ACTIVE' || code === 'PROFILE_NOT_ACTIVE') {
-    const released = store.releasePreDispatch({
-      ...details,
-      reason: code === 'RUN_NOT_ACTIVE' ? 'run_closed_before_dispatch' : 'profile_deleted_before_dispatch',
-      countAsFailure: false,
-      requestId: requestId('release-boundary-guard'),
-    });
-    return { ...released, status: 'cancelled_pre_dispatch', error, item: released };
+  if (resolved.outcome === 'lease_lost') {
+    result.state = resolved.state;
+    result.reclaimedIds = resolved.reclaimedIds;
   }
-
-  // Another item became unresolved while we prepared: hold this one back.
-  if (code === 'RECOVERY_REQUIRED') {
-    const released = store.releasePreDispatch({
-      ...details,
-      reason: 'blocked_by_unresolved_recovery',
-      countAsFailure: false,
-      requestId: requestId('release-recovery-required'),
-    });
-    return {
-      ...released,
-      status: 'blocked',
-      reason: 'recovery_required',
-      details: error.details || null,
-      error,
-      item: released,
-    };
-  }
-
-  // A lost/expired lease means we can no longer prove ownership, so we must not
-  // force a transition with a token that may be stale. But the item must never
-  // be left invisible in 'leased': reclaim it immediately (expired leases are
-  // pre-boundary by definition, so this cannot duplicate a post). If another
-  // worker legitimately owns it now, the reclaim is a no-op and they proceed.
-  if (code === 'LEASE_EXPIRED' || code === 'LEASE_CONFLICT') {
-    let reclaimed = null;
-    try {
-      reclaimed = store.reclaimExpiredLeases({
-        requestId: requestId('reclaim-lost-lease'),
-        graceMs: 0,
-      });
-    } catch (reclaimError) {
-      // Reclamation is best-effort here; startup reconciliation is the backstop.
-      reclaimed = { reclaimedIds: [], error: serializeError(reclaimError) };
-    }
-    const current = store.getItem(item.id);
-    return {
-      status: 'lease_lost_pre_dispatch',
-      state: current ? current.state : null,
-      item: current,
-      reclaimedIds: reclaimed ? reclaimed.reclaimedIds : [],
-      error,
-    };
-  }
-
-  // Unknown guard failure: back off rather than spin, but stay recoverable.
-  const deferred = store.markDeferred({
-    ...details,
-    reason: 'unknown_boundary_guard_failure',
-    availableAtMs: Date.now() + backoffMs,
-    requestId: requestId('defer-boundary-guard'),
-  });
-  return { ...deferred, status: 'retryable_error_pre_dispatch', error, item: deferred };
+  return result;
 }
 
 /**
@@ -297,7 +250,7 @@ async function dispatchNext({
       requestId: requestId('begin-dispatch'),
     });
   } catch (error) {
-    return resolveBoundaryGuardFailure({ store, item, error, backoffMs });
+    return resolveGuardFailureAsDispatchResult({ store, item, error, backoffMs });
   }
 
   let evidence;

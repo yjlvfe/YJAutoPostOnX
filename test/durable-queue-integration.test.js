@@ -18,6 +18,9 @@ const realHomedir = os.homedir;
 os.homedir = () => home;
 
 const durableQueue = require('../dev/automation/durableQueue');
+// A full lease -> boundary -> transport cycle, without a browser. Not shipped
+// code — see the header of test/helpers/dispatchDriver.js.
+const { dispatchNext } = require('./helpers/dispatchDriver');
 
 async function main() {
   // ── add / read ─────────────────────────────────────────────────────────────
@@ -47,7 +50,7 @@ async function main() {
   const run = store.startRun({ requestId: 'r-1' });
 
   let transportCalls = 0;
-  const published = await durableQueue.dispatchNext({
+  const published = await dispatchNext({
     store,
     profileId: profile.id,
     runId: run.id,
@@ -68,7 +71,7 @@ async function main() {
     'published text must remain visible to semantic dedup');
 
   // ── ambiguity blocks everything ────────────────────────────────────────────
-  const ambiguous = await durableQueue.dispatchNext({
+  const ambiguous = await dispatchNext({
     store,
     profileId: profile.id,
     runId: run.id,
@@ -87,7 +90,7 @@ async function main() {
 
   // Adding more posts must not let publishing resume while unresolved.
   await durableQueue.addPosts(['third post']);
-  const blocked = await durableQueue.dispatchNext({
+  const blocked = await dispatchNext({
     store,
     profileId: profile.id,
     runId: run.id,

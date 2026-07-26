@@ -1,12 +1,18 @@
 # خطة تنفيذ xposter — إصلاح workflow النشر المتين
 
-> **الحالة:** IN EXECUTION — المراحل A/B/C مبنية ومختبَرة (37/37) على فرع `repair/xposter-durable-workflow`.
+> **الحالة:** ✅ مكتملة — الدمج الحي تم في 2026-07-26.
 > **المستودع:** `/root/projects/xposter`
-> **HEAD المرجعي للتدقيق:** `1c448eff3f60e6073c2e4b89092351209629c9ab`
-> **الالتزامات المنفَّذة:** `c9e7907` (المتجر + البوابة العامة) ← `fda4403` (دورة حياة الحجز) ← `a82b978` (إغلاق blocker معاد فتحه + النمو اللامحدود)
-> **القاعدة:** لا انتقال إلى SondooqPro حتى اكتمال كل البوابات أدناه.
 >
-> **ما لم يكتمل بعد:** الطبقة الجديدة **لم تُربط بعد** بالتطبيق الحي (`dev/main.js` / `xPoster.js` / `queueManager.js`) — المراجع الحالية هي الاختبارات و`workflowMigration` فقط. مرحلة D/E (الدمج الحي) هي التالية.
+> **ما تم بعد كتابة هذه الخطة:**
+> - `xPoster.js` صار يمرّ فعلياً عبر `DurableSession`: `claimNext` → `beginDispatch`
+>   (قبل ضغطة الإرسال) → `markPublished`/`markAmbiguous`/`markDeferred`/`markTerminal`.
+>   كان الدمج نصف مكتمل والنشر معطّلاً بالكامل قبل ذلك.
+> - `queueManager.js` **حُذف**: مسارات JSON القديمة لم يعد لها وجود في الكود الحي،
+>   و`workflowMigration` وحده يقرأها مرة واحدة عند أول تشغيل.
+> - `publishWorkflow.js` نُقل إلى `test/helpers/dispatchDriver.js` — لم يكن التطبيق
+>   يستدعيه أبداً، وسياسة الحدّ اللارجعي التي كان يكرّرها صارت في
+>   `dev/automation/dispatchBoundary.js` بنسخة واحدة يشاركها مع `DurableSession`.
+> - كل تشغيل يُغلق الآن في `workflow_runs` بدل أن يبقى `active` إلى الأبد.
 
 ## العقد غير القابل للتفاوض
 

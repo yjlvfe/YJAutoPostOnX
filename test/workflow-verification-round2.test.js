@@ -20,7 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { WorkflowStore } = require('../dev/automation/workflowStore');
-const { dispatchNext } = require('../dev/automation/publishWorkflow');
+const { dispatchNext } = require('./helpers/dispatchDriver');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xposter-verify2-'));
 

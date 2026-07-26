@@ -95,11 +95,19 @@ function runAudit() {
   // ════════════════════════════════════════
   // 2. Hardcoded URL scan in source files
   // ════════════════════════════════════════
+  // Every automation module is scanned, not a hand-maintained list: a list
+  // silently stops covering whatever module is added next, and it keeps naming
+  // modules long after they are deleted.
   const AUTO_DIR = path.join(__dirname, '..', 'automation');
-  const sourceFiles = [
-    'xPoster.js', 'queueManager.js', 'contentEngine.js',
-    'referralService.js', 'reportEngine.js',
-  ].map(f => path.join(AUTO_DIR, f));
+  let sourceFiles = [];
+  try {
+    sourceFiles = fs.readdirSync(AUTO_DIR)
+      .filter(f => f.endsWith('.js'))
+      .sort()
+      .map(f => path.join(AUTO_DIR, f));
+  } catch (e) {
+    report.warnings.push(`⚠️ فشل سرد مجلد الأتمتة: ${e.message}`);
+  }
 
   for (const filePath of sourceFiles) {
     try {
@@ -180,7 +188,12 @@ function runAudit() {
   report.info.push(`📁 تم مسح ${report.scanned} ملف`);
 
   if (report.critical.length === 0 && report.status === 'PASS') {
-    report.info.push('✅ الفحص كامل: لا توجد مشاكل');
+    // Scope, not a clean bill of health. This auditor scans the referral/link
+    // configuration and the local file surface — nothing else. Saying "no
+    // problems" invited it to be read as a whole-project verdict, which it has
+    // never been: it does not look at dependencies, the durable store, the
+    // publish path, or the AI budgets.
+    report.info.push('✅ لا مشاكل ضمن نطاق هذا الفحص (روابط الإحالة + مسح الملفات المحلية فقط)');
   }
 
   return report;
@@ -191,7 +204,10 @@ function runAudit() {
  */
 function printReport(report) {
   console.log('\n═══════════════════════════════════════════');
-  console.log('  🔍 تقرير فحص النظام');
+  console.log('  🔍 تقرير فحص محدود النطاق');
+  console.log('  النطاق: روابط الإحالة + مسح الملفات المحلية');
+  console.log('  خارج النطاق: الاعتماديات، مخزن العمل الدائم،');
+  console.log('              مسار النشر، ميزانيات الذكاء الاصطناعي');
   console.log(`  ${report.timestamp}`);
   console.log('═══════════════════════════════════════════');
 
