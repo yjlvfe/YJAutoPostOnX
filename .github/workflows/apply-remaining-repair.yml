@@ -1,16 +1,15 @@
 name: Apply xposter audit completion
 
 on:
-  push:
-    branches:
-      - fix/xposter-completion-20260726
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: write
 
 jobs:
   apply-test-build:
-    if: ${{ !contains(github.event.head_commit.message, '[xposter-complete]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -22,21 +21,39 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Skip after verified completion
+        id: guard
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          LAST="$(git log -1 --pretty=%B)"
+          if [ "$VERSION" = "5.20.0" ] || grep -q '\[xposter-complete\]' <<<"$LAST"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Apply audited source transformations
+        if: steps.guard.outputs.skip != 'true'
         run: |
           node scripts/apply-remaining-repair.cjs
           node scripts/apply-xposter-followup.cjs
       - name: Bump package version
+        if: steps.guard.outputs.skip != 'true'
         run: npm version 5.20.0 --no-git-tag-version
       - name: Install exact dependencies
+        if: steps.guard.outputs.skip != 'true'
         run: npm ci
       - name: Run complete test suite
+        if: steps.guard.outputs.skip != 'true'
         run: npm test
       - name: Run Electron and renderer integration tests
+        if: steps.guard.outputs.skip != 'true'
         run: npm run test:electron
       - name: Build Linux AppImage
+        if: steps.guard.outputs.skip != 'true'
         run: npm run build:linux
       - name: Boot built AppImage in an isolated HOME
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -54,13 +71,14 @@ jobs:
           CODE=$?
           set -e
           if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 124 ]; then
-            echo "AppImage exited unexpectedly with $CODE"
             exit "$CODE"
           fi
           test -f "$HOME/.config/x-poster-shared/workflow.sqlite"
       - name: Capture production dependency audit
+        if: steps.guard.outputs.skip != 'true'
         run: npm audit --omit=dev --json > audit-prod.json || true
       - name: Commit verified repair
+        if: steps.guard.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -68,6 +86,7 @@ jobs:
           git commit -m "fix: complete xposter durable workflow repair [xposter-complete]"
           git push origin HEAD:fix/xposter-completion-20260726
       - name: Upload verified AppImage
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: YJAutoPostOnX-5.20.0-AppImage
