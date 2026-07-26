@@ -36,6 +36,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: |
           node scripts/apply-remaining-repair.cjs
+          node scripts/prepare-xposter-followup.cjs
           node scripts/apply-xposter-followup.cjs
       - name: Bump package version
         if: steps.guard.outputs.skip != 'true'
