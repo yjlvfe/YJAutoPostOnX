@@ -36,10 +36,21 @@ jobs:
           fi
       - name: Apply audited source transformations
         if: steps.guard.outputs.skip != 'true'
+        shell: bash
         run: |
-          node scripts/apply-remaining-repair.cjs
-          node scripts/prepare-xposter-followup.cjs
-          node scripts/apply-xposter-followup.cjs
+          set -o pipefail
+          {
+            node scripts/apply-remaining-repair.cjs
+            node scripts/prepare-xposter-followup.cjs
+            node scripts/apply-xposter-followup.cjs
+          } 2>&1 | tee xposter-ci-apply.log
+      - name: Upload apply failure diagnostic
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-apply-failure-log
+          path: xposter-ci-apply.log
+          if-no-files-found: error
       - name: Bump package version
         if: steps.guard.outputs.skip != 'true'
         run: npm version 5.20.0 --no-git-tag-version
