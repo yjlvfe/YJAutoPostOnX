@@ -34,7 +34,11 @@ const { DurableSession } = require('../dev/automation/durableSession');
     const byText = await durableQueue.bulkDeleteByText(['SAME TEXT']);
     check('text deletion refuses an ambiguous address', byText.deleted === 0 && byText.blocked.some((b) => b.reason === 'AMBIGUOUS_TEXT_ADDRESS'), JSON.stringify(byText));
 
-    const byId = await durableQueue.bulkDeleteById([duplicate[0].id]);
+    const byId = await durableQueue.bulkDeleteById([{
+      id: duplicate[0].id,
+      expectedRevision: duplicate[0].revision,
+      requestId: 'delete-first-duplicate-by-id',
+    }]);
     check('ID deletion removes exactly the selected row', byId.deleted === 1, JSON.stringify(byId));
     const survivors = durableQueue.readAllItems(store, ['queued']).filter((item) => durableQueue.textOf(item) === 'SAME TEXT');
     check('the other duplicate survives untouched', survivors.length === 1 && survivors[0].id === duplicate[1].id);
