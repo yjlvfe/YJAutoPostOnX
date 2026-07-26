@@ -59,7 +59,17 @@ jobs:
         run: npm ci
       - name: Run complete test suite
         if: steps.guard.outputs.skip != 'true'
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee xposter-ci-test.log
+      - name: Upload unit-test failure diagnostic
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-test-failure-log
+          path: xposter-ci-test.log
+          if-no-files-found: error
       - name: Run Electron and renderer integration tests
         if: steps.guard.outputs.skip != 'true'
         run: npm run test:electron
