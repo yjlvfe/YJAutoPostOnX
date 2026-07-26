@@ -1,17 +1,17 @@
-name: Apply xposter audit completion
+name: Verify xposter audit completion
 
 on:
   workflow_dispatch:
-  issues:
-    types: [opened]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
-  issues: read
+  pull-requests: read
 
 jobs:
   apply-test-build:
-    if: github.event_name == 'workflow_dispatch' || github.event.issue.title == 'RUN_XPOSTER_COMPLETION_20260726'
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
