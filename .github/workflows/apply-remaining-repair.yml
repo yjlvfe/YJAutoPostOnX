@@ -1,60 +1,129 @@
-name: Apply xposter audit completion
+name: Verify xposter audit completion
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/5 * * * *'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: xposter-completion-${{ github.event.pull_request.number || 'manual' }}
+  cancel-in-progress: true
 
 jobs:
-  apply-test-build:
+  baseline-tests:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           ref: fix/xposter-completion-20260726
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Skip after verified completion
-        id: guard
+      - run: npm ci
+      - name: Run baseline tests
+        id: tests
         shell: bash
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          LAST="$(git log -1 --pretty=%B)"
-          if [ "$VERSION" = "5.20.0" ] || grep -q '\[xposter-complete\]' <<<"$LAST"; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Apply audited source transformations
-        if: steps.guard.outputs.skip != 'true'
+          set -o pipefail
+          timeout --signal=TERM --kill-after=15s 20m npm run test:baseline 2>&1 | tee baseline-tests.log
+      - name: Upload baseline failure log
+        if: ${{ failure() && steps.tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-baseline-failure-log
+          path: baseline-tests.log
+          if-no-files-found: error
+
+  workflow-tests:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/xposter-completion-20260726
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run durable workflow tests
+        id: tests
+        shell: bash
         run: |
-          node scripts/apply-remaining-repair.cjs
-          node scripts/prepare-xposter-followup.cjs
-          node scripts/apply-xposter-followup.cjs
-      - name: Bump package version
-        if: steps.guard.outputs.skip != 'true'
-        run: npm version 5.20.0 --no-git-tag-version
-      - name: Install exact dependencies
-        if: steps.guard.outputs.skip != 'true'
-        run: npm ci
-      - name: Run complete test suite
-        if: steps.guard.outputs.skip != 'true'
-        run: npm test
-      - name: Run Electron and renderer integration tests
-        if: steps.guard.outputs.skip != 'true'
-        run: npm run test:electron
+          set -o pipefail
+          timeout --signal=TERM --kill-after=15s 20m npm run test:workflow 2>&1 | tee workflow-tests.log
+      - name: Upload workflow failure log
+        if: ${{ failure() && steps.tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-workflow-failure-log
+          path: workflow-tests.log
+          if-no-files-found: error
+
+  electron-tests:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/xposter-completion-20260726
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run Electron integration tests
+        id: tests
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=15s 12m npm run test:electron 2>&1 | tee electron-tests.log
+      - name: Upload Electron failure log
+        if: ${{ failure() && steps.tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-electron-failure-log
+          path: electron-tests.log
+          if-no-files-found: error
+
+  package-appimage:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
+    needs: [baseline-tests, workflow-tests, electron-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/xposter-completion-20260726
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - name: Build Linux AppImage
-        if: steps.guard.outputs.skip != 'true'
-        run: npm run build:linux
-      - name: Boot built AppImage in an isolated HOME
-        if: steps.guard.outputs.skip != 'true'
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build:linux 2>&1 | tee appimage-build.log
+      - name: Upload build failure log
+        if: ${{ failure() && steps.build.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-build-failure-log
+          path: appimage-build.log
+          if-no-files-found: error
+      - name: Boot AppImage in isolated HOME
+        id: boot
         shell: bash
         run: |
           set -euo pipefail
@@ -66,28 +135,28 @@ jobs:
           export XDG_CONFIG_HOME="$HOME/.config"
           export XDG_CACHE_HOME="$HOME/.cache"
           export XDG_DATA_HOME="$HOME/.local/share"
+          export APPIMAGE_EXTRACT_AND_RUN=1
           mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
           set +e
-          timeout 30s xvfb-run -a "$APPIMAGE" --no-sandbox
-          CODE=$?
+          timeout --signal=TERM --kill-after=10s 30s xvfb-run -a "$APPIMAGE" --no-sandbox 2>&1 | tee appimage-boot.log
+          CODE=${PIPESTATUS[0]}
           set -e
           if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 124 ]; then
             exit "$CODE"
           fi
           test -f "$HOME/.config/x-poster-shared/workflow.sqlite"
-      - name: Capture production dependency audit
-        if: steps.guard.outputs.skip != 'true'
-        run: npm audit --omit=dev --json > audit-prod.json || true
-      - name: Commit verified repair
-        if: steps.guard.outputs.skip != 'true'
+      - name: Upload AppImage boot failure log
+        if: ${{ failure() && steps.boot.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-appimage-boot-failure-log
+          path: appimage-boot.log
+          if-no-files-found: warn
+      - name: Audit production dependencies
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add dev test package.json package-lock.json .github/workflows/ci.yml audit-prod.json
-          git commit -m "fix: complete xposter durable workflow repair [xposter-complete]"
-          git push origin HEAD:fix/xposter-completion-20260726
+          npm audit --omit=dev --audit-level=high
       - name: Upload verified AppImage
-        if: steps.guard.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: YJAutoPostOnX-5.20.0-AppImage
