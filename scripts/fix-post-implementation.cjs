@@ -19,6 +19,7 @@ function write(rel, content) {
 function replaceOnce(rel, source, from, to, label, { required = true } = {}) {
   const first = source.indexOf(from);
   if (first === -1) {
+    if (source.includes(to)) return source;
     if (required) throw new Error(`Missing cleanup anchor (${rel}): ${label}`);
     return source;
   }
@@ -122,8 +123,18 @@ function replaceAllLiteral(source, from, to) {
   source = replaceOnce(
     rel,
     source,
-    '      durableQueue.integrityCheck(),\n      durableQueue.countUnresolved(),',
-    '      durableQueue.integrityCheck({ verifyMedia: false }),\n      durableQueue.countUnresolved(),',
+    "    const [items, counts, integrity, unresolved] = await Promise.all([\n" +
+      "      durableQueue.getQueueDetailed(),\n" +
+      "      durableQueue.getBacklogCounts(),\n" +
+      "      durableQueue.integrityCheck(),\n" +
+      "      durableQueue.countUnresolved(),\n" +
+      "    ]);",
+    "    const [items, counts, integrity, unresolved] = await Promise.all([\n" +
+      "      durableQueue.getQueueDetailed(),\n" +
+      "      durableQueue.getBacklogCounts(),\n" +
+      "      durableQueue.integrityCheck({ verifyMedia: false }),\n" +
+      "      durableQueue.countUnresolved(),\n" +
+      "    ]);",
     'lightweight queue-state health read',
   );
   write(rel, source);
