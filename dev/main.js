@@ -430,7 +430,7 @@ ipcMain.handle('get-queue-state', async () => {
     const [items, counts, integrity, unresolved] = await Promise.all([
       durableQueue.getQueueDetailed(),
       durableQueue.getBacklogCounts(),
-      durableQueue.integrityCheck(),
+      durableQueue.integrityCheck({ verifyMedia: false }),
       durableQueue.countUnresolved(),
     ]);
     return { success: true, items, counts, integrity, unresolved };

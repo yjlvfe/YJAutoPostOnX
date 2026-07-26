@@ -46,7 +46,7 @@ contextBridge.exposeInMainWorld('api', {
   workflowHealth: () => ipcRenderer.invoke('workflow-health'),
   createWorkflowBackup: () => ipcRenderer.invoke('create-workflow-backup'),
 
-  // Automation control  // Automation control  // Automation control
+  // Automation control
   startPosting: (config) => ipcRenderer.invoke('start-posting', config),
   stopAutomation: () => ipcRenderer.send('stop-automation'),
   openProfileForLogin: (profileName) => ipcRenderer.invoke('open-profile-for-login', profileName),

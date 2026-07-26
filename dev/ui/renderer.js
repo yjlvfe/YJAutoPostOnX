@@ -751,7 +751,11 @@ async function loadQueue(profile) {
   updateQueueCounters();
   updateSelectionUI();
 
-  const healthy = result.integrity && result.integrity.ok === true;
+  const integrity = result.integrity || {};
+  const healthy = integrity.quickCheck === 'ok'
+    && (!Array.isArray(integrity.foreignKeyViolations) || integrity.foreignKeyViolations.length === 0)
+    && (!Array.isArray(integrity.mediaProblems) || integrity.mediaProblems.length === 0)
+    && (!Array.isArray(integrity.stateConsistencyViolations) || integrity.stateConsistencyViolations.length === 0);
   banner.classList.toggle('hidden', healthy && !result.unresolved);
   banner.textContent = !healthy
     ? '⚠️ فحص سلامة مخزن العمل يحتاج مراجعة. النشر متوقف حمايةً للطابور.'
@@ -857,7 +861,7 @@ async function loadRecoveryItems(profile) {
   }
 }
 
-function updateQueueCounters() {function updateQueueCounters() {function updateQueueCounters() {
+function updateQueueCounters() {
   const n = state.queue.length;
   navQueueBadge.textContent = n;
   mQueue.textContent = n;
@@ -912,7 +916,7 @@ $('btn-delete-selected').addEventListener('click', async () => {
   await loadQueue(profile);
 });
 
-// import CSV// import CSV// import CSV (two buttons share logic)
+// import CSV (two buttons share logic)
 async function importCsvFlow() {
   const filePath = await window.api.selectCSV();
   if (!filePath) return;

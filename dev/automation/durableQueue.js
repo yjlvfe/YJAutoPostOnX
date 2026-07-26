@@ -106,7 +106,7 @@ async function assertHealthy(options = {}) {
   return assertHealthyResult(store.integrityCheck(options), 'runtime');
 }
 
-// ── Paginating reads// ── Paginating reads ─────────────────────────────────────────────────────────
+// ── Paginating reads ─────────────────────────────────────────────────────────
 //
 // WorkflowStore.listQueued hard-clamps `limit` to 1000 and listItems to 10000,
 // so a single call can never see a queue larger than that. Every read below
@@ -200,7 +200,6 @@ function toLegacyEntry(item) {
 }
 
 /**
- * Resolve a profile name/**
  * Resolve a profile name to its stable UUID, creating it if needed.
  *
  * Profile identity must never be the display name: renaming or deleting a
@@ -320,14 +319,14 @@ async function addPosts(newPosts, _profileName) {
   }
 
   if (items.length === 0) {
-    return { added: 0, skippedDuplicate, total: readAllQueuedItems(store).length };
+    return { added: 0, skippedDuplicate, total: readAllBacklogItems(store).length };
   }
   const result = store.enqueue({ items, requestId: `add-posts:${Date.now()}:${items.length}` });
   return {
     added: result.items.length,
     skippedDuplicate,
     // The real total, not a capped one — this is the number the UI reports back.
-    total: readAllQueuedItems(store).length,
+    total: readAllBacklogItems(store).length,
   };
 }
 
@@ -366,6 +365,10 @@ async function bulkDeleteById(requests) {
   const blocked = [];
 
   for (const request of normalized) {
+    if (request.expectedRevision === null) {
+      blocked.push({ id: request.id, reason: 'REVISION_REQUIRED' });
+      continue;
+    }
     const item = live.get(request.id);
     if (!item) {
       blocked.push({ id: request.id, reason: 'NOT_FOUND' });
@@ -424,7 +427,7 @@ async function bulkDeleteByText(texts) {
   return { ...result, blocked: [...blocked, ...result.blocked] };
 }
 
-// ── Recovery// ── Recovery// ── Recovery ─────────────────────────────────────────────────────────────────
+// ── Recovery ─────────────────────────────────────────────────────────────────
 
 /**
  * Everything awaiting a human decision.
@@ -583,7 +586,7 @@ async function confirmRecoveryPublished(identity, proof = {}) {
   return confirmPublished(identity, proof);
 }
 
-// ── Maintenance// ── Maintenance// ── Maintenance ──────────────────────────────────────────────────────────────
+// ── Maintenance ──────────────────────────────────────────────────────────────
 
 /**
  * Bounded housekeeping for long-lived installs: reclaim stale leases, drop
@@ -606,9 +609,9 @@ async function runMaintenance() {
   };
 }
 
-async function integrityCheck() {
+async function integrityCheck(options = {}) {
   const store = await getStore();
-  return store.integrityCheck();
+  return store.integrityCheck(options);
 }
 
 async function createWorkflowSnapshot(options = {}) {
