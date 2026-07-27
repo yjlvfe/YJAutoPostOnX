@@ -8,6 +8,9 @@ const path = require('path');
 const os = require('os');
 const { atomicWriteJson } = require('../utils/atomicJson');
 
+const DEFAULT_REPORT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_REPORT_MAX_RUNS = 60;
+
 /**
  * ReportEngine
  * - Keeps an in-memory buffer of events, post results and timings
@@ -273,6 +276,49 @@ class ReportEngine {
     return lines.join('\n');
   }
 
+  static async pruneReportDirectory(reportDir, {
+    now = Date.now(),
+    maxAgeMs = DEFAULT_REPORT_MAX_AGE_MS,
+    maxRuns = DEFAULT_REPORT_MAX_RUNS,
+  } = {}) {
+    if (!Number.isInteger(maxAgeMs) || maxAgeMs < 0) throw new TypeError('maxAgeMs must be non-negative');
+    if (!Number.isInteger(maxRuns) || maxRuns < 1) throw new TypeError('maxRuns must be positive');
+    let names = [];
+    try { names = await fs.readdir(reportDir); } catch (error) {
+      if (error.code === 'ENOENT') return { removed: [], kept: [] };
+      throw error;
+    }
+    const files = [];
+    for (const name of names) {
+      if (!/^run-(?:partial-)?/.test(name) || !/.(?:json|txt)$/.test(name)) continue;
+      const fullPath = path.join(reportDir, name);
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.isFile()) files.push({ name, fullPath, mtimeMs: stat.mtimeMs });
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
+    const runKeys = [];
+    const seen = new Set();
+    for (const file of files) {
+      const key = file.name.replace(/.(json|txt)$/, '');
+      if (!seen.has(key)) { seen.add(key); runKeys.push(key); }
+    }
+    const keepKeys = new Set(runKeys.slice(0, maxRuns));
+    const cutoff = now - maxAgeMs;
+    const removed = [];
+    for (const file of files) {
+      const key = file.name.replace(/.(json|txt)$/, '');
+      if (file.mtimeMs >= cutoff && keepKeys.has(key)) continue;
+      try { await fs.unlink(file.fullPath); removed.push(file.fullPath); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+    return { removed, kept: files.filter((file) => !removed.includes(file.fullPath)).map((file) => file.fullPath) };
+  }
+
   // Persist both JSON and TXT reports safely
   async flushAll() {
     const reportJson = this.generateReport();
@@ -291,7 +337,11 @@ class ReportEngine {
 
     try {
       await fs.writeFile(txtPath, textReport, 'utf8');
-      return { jsonPath, txtPath, success: true };
+      const retention = await ReportEngine.pruneReportDirectory(this.reportDir).catch((error) => ({
+        removed: [],
+        error: error?.message || String(error),
+      }));
+      return { jsonPath, txtPath, success: true, retention };
     } catch (err) {
       console.error('ReportEngine flush error (TXT):', err);
       return { jsonPath, txtPath: null, success: true };
@@ -316,4 +366,4 @@ class ReportEngine {
   }
 }
 
-module.exports = { ReportEngine };
+module.exports = { ReportEngine, DEFAULT_REPORT_MAX_AGE_MS, DEFAULT_REPORT_MAX_RUNS };

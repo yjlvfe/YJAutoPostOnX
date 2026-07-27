@@ -22,6 +22,14 @@ function toast(text, href = null) {
   };
 }
 
+function queueTexts(entries) {
+  return entries.map((entry) => typeof entry === 'string' ? entry : entry?.text);
+}
+
+function recoveryMutation(item, requestId) {
+  return { id: item.id, expectedRevision: item.revision, requestId };
+}
+
 async function main() {
   await fsp.mkdir(sandbox, { recursive: true });
 
@@ -59,18 +67,30 @@ async function main() {
   const reopened = await durableQueue.getStore();
   assert.strictEqual(reopened.countUnresolvedRecovery(), 1,
     'a dispatch interrupted by a crash is unresolved after restart, not silently retried');
-  assert.deepStrictEqual((await durableQueue.getQueue()), ['post-b'],
+  assert.deepStrictEqual(queueTexts(await durableQueue.getQueue()), ['post-b'],
     'the interrupted post is out of the auto-publish queue — it may already be live on X');
 
   let recovery = await durableQueue.getRecoveryItems('Default');
-  assert.strictEqual(recovery.pending[0].text, 'post-a', 'the interrupted post is visible for a human decision');
+  const pendingA = recovery.pending[0];
+  assert.strictEqual(pendingA.text, 'post-a', 'the interrupted post is visible for a human decision');
 
   await assert.rejects(
-    async () => durableQueue.requeueRecovery('Default', 'pending', 'post-a', {}),
+    async () => durableQueue.requeueRecovery(
+      'Default',
+      'pending',
+      recoveryMutation(pendingA, 'resilience-requeue-without-confirmation'),
+      {},
+    ),
+    (error) => error.code === 'CONFIRMATION_REQUIRED',
     'requeueing without confirming it was never published must be refused'
   );
-  await durableQueue.requeueRecovery('Default', 'pending', 'post-a', { confirmedNotPublished: true });
-  assert.deepStrictEqual((await durableQueue.getQueue()), ['post-b', 'post-a'],
+  await durableQueue.requeueRecovery(
+    'Default',
+    'pending',
+    recoveryMutation(pendingA, 'resilience-requeue-confirmed'),
+    { confirmedNotPublished: true, evidence: { checked: true } },
+  );
+  assert.deepStrictEqual(queueTexts(await durableQueue.getQueue()), ['post-b', 'post-a'],
     'once the user confirms it never went out, it is publishable again');
   assert.strictEqual(reopened.countUnresolvedRecovery(), 0, 'resolving it unblocks publishing for every profile');
 
@@ -95,7 +115,7 @@ async function main() {
     error: { message: 'missing selector', code: null },
     requestId: 'resilience-terminal',
   });
-  assert.deepStrictEqual((await durableQueue.getQueue()), ['post-a'],
+  assert.deepStrictEqual(queueTexts(await durableQueue.getQueue()), ['post-a'],
     'retiring the failed post removes exactly that post');
   recovery = await durableQueue.getRecoveryItems('Default');
   assert.strictEqual(recovery.deadLetters[0].text, 'post-b', 'a retired post remains visible and recoverable');

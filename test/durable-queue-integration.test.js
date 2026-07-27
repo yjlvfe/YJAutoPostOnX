@@ -2,8 +2,8 @@
 
 // Live-integration gates for durableQueue.js — the bridge the app actually
 // calls. These prove the durable semantics survive the adapter layer, because
-// an adapter that quietly reintroduces the old text-keyed, split-write model
-// would undo the whole repair.
+// an adapter that quietly reintroduces text-keyed destructive mutations would
+// undo the workflow repair.
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -22,6 +22,14 @@ const durableQueue = require('../dev/automation/durableQueue');
 // code — see the header of test/helpers/dispatchDriver.js.
 const { dispatchNext } = require('./helpers/dispatchDriver');
 
+function mutation(item, requestId) {
+  return {
+    id: item.id,
+    expectedRevision: item.revision,
+    requestId,
+  };
+}
+
 async function main() {
   // ── add / read ─────────────────────────────────────────────────────────────
   const media = path.join(home, 'pic.png');
@@ -38,9 +46,13 @@ async function main() {
 
   const queue = await durableQueue.getQueue();
   assert.strictEqual(queue.length, 2);
-  assert.strictEqual(queue[0], 'first post', 'plain posts keep the legacy string shape');
-  assert.strictEqual(typeof queue[1], 'object');
+  assert.strictEqual(typeof queue[0], 'object', 'every queue row exposes durable identity');
+  assert.strictEqual(queue[0].text, 'first post');
+  assert.match(queue[0].id, /^[0-9a-f-]{36}$/i);
+  assert.ok(Number.isInteger(queue[0].revision));
   assert.strictEqual(queue[1].text, 'second post');
+  assert.match(queue[1].id, /^[0-9a-f-]{36}$/i);
+  assert.notStrictEqual(queue[0].id, queue[1].id);
   assert.ok(fs.existsSync(queue[1].media_path), 'media must resolve to a real managed file');
 
   // ── publish path ───────────────────────────────────────────────────────────
@@ -66,6 +78,7 @@ async function main() {
   // A published post leaves the queue permanently but stays in the dedup corpus.
   const afterPublish = await durableQueue.getQueue();
   assert.strictEqual(afterPublish.length, 1);
+  assert.strictEqual(afterPublish[0].text, 'second post');
   const publishedTexts = await durableQueue.getPublishedTexts();
   assert.ok(publishedTexts.includes('first post'),
     'published text must remain visible to semantic dedup');
@@ -85,6 +98,8 @@ async function main() {
   const recovery = await durableQueue.getRecoveryItems('Default');
   assert.strictEqual(recovery.pending.length, 1);
   assert.strictEqual(recovery.pending[0].text, 'second post');
+  assert.match(recovery.pending[0].id, /^[0-9a-f-]{36}$/i);
+  assert.ok(Number.isInteger(recovery.pending[0].revision));
   assert.strictEqual(recovery.pending[0].attemptedText, 'second post',
     'the operator must see exactly what was attempted');
 
@@ -101,15 +116,17 @@ async function main() {
   assert.strictEqual(blocked.reason, 'recovery_required');
 
   // ── requeueing an ambiguous item demands explicit confirmation ─────────────
+  const pendingMutation = mutation(recovery.pending[0], 'integration-requeue-pending');
   await assert.rejects(
-    async () => durableQueue.requeueRecovery('Default', 'pending', 'second post'),
+    async () => durableQueue.confirmNotPublishedAndRequeue(pendingMutation, {}),
     (error) => error.code === 'CONFIRMATION_REQUIRED',
     'requeueing a possibly-published post must require explicit confirmation',
   );
 
   assert.strictEqual(
-    await durableQueue.requeueRecovery('Default', 'pending', 'second post', {
+    await durableQueue.confirmNotPublishedAndRequeue(pendingMutation, {
       confirmedNotPublished: true,
+      evidence: { source: 'integration_test' },
     }),
     true,
   );
@@ -117,19 +134,26 @@ async function main() {
     'resolving recovery must unblock the queue');
 
   // ── deletion is authoritative, never optimistic ────────────────────────────
-  const deletion = await durableQueue.bulkDeleteByText(['third post']);
+  const third = (await durableQueue.getQueue()).find((entry) => entry.text === 'third post');
+  assert.ok(third, 'third post is visible by durable identity');
+  const deletion = await durableQueue.bulkDeleteById([
+    mutation(third, 'integration-delete-third'),
+  ]);
   assert.strictEqual(deletion.deleted, 1);
-  assert.ok(!(await durableQueue.getQueue()).some((entry) =>
-    (typeof entry === 'string' ? entry : entry.text) === 'third post'));
+  assert.ok(!(await durableQueue.getQueue()).some((entry) => entry.id === third.id));
 
   // An in-flight item must NOT report a successful delete.
   const run2 = store.startRun({ requestId: 'r-2' });
   const leased = store.leaseNext({ profileId: profile.id, runId: run2.id });
-  const leasedText = leased.payload.text;
-  const blockedDelete = await durableQueue.bulkDeleteByText([leasedText]);
+  const blockedDelete = await durableQueue.bulkDeleteById([{
+    id: leased.id,
+    expectedRevision: leased.revision,
+    requestId: 'integration-delete-leased',
+  }]);
   assert.strictEqual(blockedDelete.deleted, 0,
     'an in-flight post must never be reported as deleted');
   assert.strictEqual(blockedDelete.blocked.length, 1);
+  assert.strictEqual(blockedDelete.blocked[0].id, leased.id);
   assert.ok(blockedDelete.blocked[0].reason.startsWith('IN_FLIGHT'));
   store.releasePreDispatch({
     id: leased.id,
@@ -139,7 +163,7 @@ async function main() {
     requestId: 'release-test',
   });
 
-  // ── dead letters can be requeued ───────────────────────────────────────────
+  // ── dead letters can be requeued by ID + revision ───────────────────────────
   const run3 = store.startRun({ requestId: 'r-3' });
   const toKill = store.leaseNext({ profileId: profile.id, runId: run3.id });
   store.markTerminal({
@@ -150,11 +174,13 @@ async function main() {
   });
   const deadText = toKill.payload.text;
   const recovery2 = await durableQueue.getRecoveryItems('Default');
-  assert.ok(recovery2.deadLetters.some((entry) => entry.text === deadText));
-  assert.strictEqual(await durableQueue.requeueRecovery('Default', 'dead', deadText), true);
-  assert.ok((await durableQueue.getQueue()).some((entry) =>
-    (typeof entry === 'string' ? entry : entry.text) === deadText),
-    'a requeued dead letter must return to the queue');
+  const dead = recovery2.deadLetters.find((entry) => entry.id === toKill.id);
+  assert.ok(dead && dead.text === deadText);
+  assert.strictEqual(await durableQueue.requeueDead(
+    mutation(dead, 'integration-requeue-dead'),
+  ), true);
+  assert.ok((await durableQueue.getQueue()).some((entry) => entry.id === dead.id),
+    'a requeued dead letter must return to the queue with the same durable ID');
 
   // ── maintenance is safe and bounded ────────────────────────────────────────
   const maintenance = await durableQueue.runMaintenance();

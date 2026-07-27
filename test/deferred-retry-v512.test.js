@@ -106,6 +106,10 @@ function networkDown() {
   return new Error('net::ERR_INTERNET_DISCONNECTED');
 }
 
+function textFromQueueEntry(entry) {
+  return typeof entry === 'string' ? entry : entry?.text;
+}
+
 async function stateOf(text) {
   const store = await durableQueue.getStore();
   const all = durableQueue.readAllItems(store,
@@ -156,10 +160,10 @@ async function main() {
   const readyDuringBackoff = (await durableQueue.getReadyNow()).map(durableQueue.textOf);
   assert(!readyDuringBackoff.includes('NET_FAIL'),
     'while the backoff runs the post is not offered again — that is what stops a dead connection spinning the whole queue');
-  assert((await durableQueue.getQueue()).includes('NET_FAIL'),
+  assert((await durableQueue.getQueue()).map(textFromQueueEntry).includes('NET_FAIL'),
     'a deferred post stays VISIBLE in the backlog — an invisible post gets re-added and published twice');
   await elapseBackoff();
-  assert((await durableQueue.getQueue()).includes('NET_FAIL'),
+  assert((await durableQueue.getQueue()).map(textFromQueueEntry).includes('NET_FAIL'),
     'once the backoff elapses the post is publishable again, with no user action');
 
   // And it really does publish once the network recovers.
@@ -204,11 +208,15 @@ async function main() {
 
   // Retired does not mean lost: it stays visible and requeueable.
   const recovery = await durableQueue.getRecoveryItems('Default');
-  assert(recovery.deadLetters.some(d => d.text === 'POISON'),
+  const poison = recovery.deadLetters.find((entry) => entry.text === 'POISON');
+  assert(!!poison,
     'a retired post stays visible in the recovery list — nothing is silently discarded');
-  assert(await durableQueue.requeueRecovery('Default', 'dead', 'POISON'),
-    'the user can put a retired post back in the queue');
-  assert((await durableQueue.getQueue()).includes('POISON'), 'the requeued post is publishable again');
+  assert(await durableQueue.requeueRecovery('Default', 'dead', {
+    id: poison.id,
+    expectedRevision: poison.revision,
+    requestId: `test-requeue-poison:${poison.id}:${poison.revision}`,
+  }), 'the user can put a retired post back in the queue');
+  assert((await durableQueue.getQueue()).map(textFromQueueEntry).includes('POISON'), 'the requeued post is publishable again');
   await durableQueue.bulkDeleteByText(['POISON', 'BEHIND_POISON']);
 
   // ── H3: a real selector regression must NOT be treated as network ───────

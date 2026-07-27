@@ -152,10 +152,29 @@ jobs:
           name: xposter-appimage-boot-failure-log
           path: appimage-boot.log
           if-no-files-found: warn
-      - name: Audit production dependencies
+      - name: Capture production dependency audit
         shell: bash
         run: |
-          npm audit --omit=dev --audit-level=high
+          npm audit --omit=dev --json > audit-prod.json || true
+      - name: Upload production audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-production-audit
+          path: audit-prod.json
+          if-no-files-found: error
+      - name: Enforce production dependency audit
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const audit = JSON.parse(fs.readFileSync('audit-prod.json', 'utf8'));
+          const counts = audit.metadata?.vulnerabilities || {};
+          const high = Number(counts.high || 0);
+          const critical = Number(counts.critical || 0);
+          console.log(`production audit: high=${high}, critical=${critical}`);
+          if (high > 0 || critical > 0) process.exit(1);
+          NODE
       - name: Upload verified AppImage
         uses: actions/upload-artifact@v4
         with:
