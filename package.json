@@ -39,7 +39,7 @@
   "devDependencies": {
     "cross-env": "10.1.0",
     "electron": "42.7.1",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^26.15.3"
   },
   "overrides": {
     "puppeteer-extra-plugin-user-data-dir": "file:vendor/puppeteer-extra-plugin-user-data-dir"
