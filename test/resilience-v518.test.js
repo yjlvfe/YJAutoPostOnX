@@ -8,6 +8,7 @@ const path = require('path');
 
 const sandbox = path.join(os.tmpdir(), `xposter-resilience-${process.pid}-${Date.now()}`);
 os.homedir = () => sandbox;
+process.env.HOME = sandbox; // belt-and-suspenders: see smoke.test.js for why
 const keepAlive = setInterval(() => {}, 1000);
 
 const { atomicWriteJson, readJson } = require('../dev/utils/atomicJson');

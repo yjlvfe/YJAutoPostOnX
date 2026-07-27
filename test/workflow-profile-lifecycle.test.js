@@ -23,6 +23,7 @@ const path = require('path');
 
 const SANDBOX = path.join(os.tmpdir(), 'xposter-profile-life-' + Date.now());
 os.homedir = () => SANDBOX;
+process.env.HOME = SANDBOX; // belt-and-suspenders: see smoke.test.js for why
 fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-bot-profile'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-profiles', '2- alpha'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-profiles', '3- beta'), { recursive: true });

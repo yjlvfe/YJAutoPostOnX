@@ -9,6 +9,11 @@ const fs = require('fs');
 const os = require('os');
 const SANDBOX = path.join(os.tmpdir(), `xposter-full-ui-${process.pid}-${Date.now()}`);
 os.homedir = () => SANDBOX;
+// Belt-and-suspenders: os.homedir() itself reads process.env.HOME live, so
+// setting this too means isolation doesn't depend solely on every caller
+// having picked up the monkey-patched function reference (module-load
+// ordering, a require() that ran before this line, etc.).
+process.env.HOME = SANDBOX;
 fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-bot-profile'), { recursive: true });
 process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 

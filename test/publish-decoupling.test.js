@@ -30,6 +30,7 @@ const os = require('os');
 // Isolated sandbox — never touch the user's real ~/.config state
 const SANDBOX = path.join(os.tmpdir(), 'xposter-decoupling-test-' + Date.now());
 os.homedir = () => SANDBOX;
+process.env.HOME = SANDBOX; // belt-and-suspenders: see smoke.test.js for why
 fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-bot-profile'), { recursive: true });
 
 let passed = 0;

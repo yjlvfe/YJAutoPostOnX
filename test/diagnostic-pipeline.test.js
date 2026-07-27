@@ -10,6 +10,7 @@ const path = require('path');
 const os = require('os');
 const SANDBOX = path.join(os.tmpdir(), `xposter-diagnostic-${process.pid}-${Date.now()}`);
 os.homedir = () => SANDBOX;
+process.env.HOME = SANDBOX; // belt-and-suspenders: see smoke.test.js for why
 fs.mkdirSync(SANDBOX, { recursive: true });
 process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 

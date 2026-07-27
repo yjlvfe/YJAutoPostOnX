@@ -33,6 +33,7 @@ const os = require('os');
 
 const SANDBOX = path.join(os.tmpdir(), 'xposter-deferred-test-' + Date.now());
 os.homedir = () => SANDBOX;
+process.env.HOME = SANDBOX; // belt-and-suspenders: see smoke.test.js for why
 fs.mkdirSync(path.join(SANDBOX, '.config', 'x-poster-bot-profile'), { recursive: true });
 
 let passed = 0;
