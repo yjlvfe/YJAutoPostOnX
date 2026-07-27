@@ -10,18 +10,15 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: xposter-completion-${{ github.event.pull_request.number || 'manual' }}
+  group: xposter-completion-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   baseline-tests:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -42,13 +39,10 @@ jobs:
           if-no-files-found: error
 
   workflow-tests:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -69,13 +63,10 @@ jobs:
           if-no-files-found: error
 
   electron-tests:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -96,14 +87,11 @@ jobs:
           if-no-files-found: error
 
   package-appimage:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     needs: [baseline-tests, workflow-tests, electron-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
