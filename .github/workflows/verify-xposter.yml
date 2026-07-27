@@ -35,7 +35,7 @@ jobs:
       - name: Set up Node (matches package.json engines + README)
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install system dependencies (Xvfb + AppImage FUSE fallback)
         run: |

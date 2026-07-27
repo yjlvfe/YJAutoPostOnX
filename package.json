@@ -26,10 +26,10 @@
   "author": "Antigravity",
   "license": "MIT",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "12.4.1",
+    "better-sqlite3": "13.0.1",
     "csv-parser": "^3.0.0",
     "playwright": "^1.62.0",
     "playwright-extra": "^4.3.6",
@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "cross-env": "10.1.0",
-    "electron": "30.0.0",
+    "electron": "42.7.1",
     "electron-builder": "^24.13.3"
   },
   "overrides": {
@@ -63,8 +63,5 @@
       "target": "AppImage",
       "category": "Utility"
     }
-  },
-  "allowScripts": {
-    "electron@30.0.0": true
   }
 }
