@@ -5,6 +5,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const TEST_DIR = __dirname;
+const TEST_TIMEOUT_MS = 180_000;
 const BASELINE_TESTS = [
   'referral-toggle.test.js',
   'e2e-generation.test.js',
@@ -51,20 +52,31 @@ let passed = 0;
 for (const name of tests) {
   const absolute = path.join(TEST_DIR, name);
   process.stdout.write(`\n=== ${name} ===\n`);
+  const startedAt = Date.now();
   const result = spawnSync(process.execPath, [absolute], {
     cwd: path.resolve(TEST_DIR, '..'),
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: 'inherit',
+    timeout: TEST_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
+  const durationMs = Date.now() - startedAt;
   if (result.error) {
-    console.error(`Failed to start ${name}:`, result.error);
+    const timedOut = result.error.code === 'ETIMEDOUT';
+    console.error(
+      timedOut
+        ? `${name} exceeded the ${TEST_TIMEOUT_MS}ms safety timeout`
+        : `Failed to start ${name}:`,
+      timedOut ? '' : result.error,
+    );
     process.exit(1);
   }
   if (result.status !== 0) {
-    console.error(`${name} failed with exit code ${result.status}`);
+    console.error(`${name} failed with exit code ${result.status} after ${durationMs}ms`);
     process.exit(result.status || 1);
   }
   passed += 1;
+  console.log(`✓ ${name} completed in ${durationMs}ms`);
 }
 
 console.log(`\nALL ${passed} NODE-STYLE TEST FILES PASSED UNDER ELECTRON`);

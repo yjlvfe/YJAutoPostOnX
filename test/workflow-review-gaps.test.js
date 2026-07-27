@@ -196,6 +196,14 @@ function expiredLeaseUnderActiveRunIsReclaimed() {
 
     const leased = store.leaseNext({ profileId, runId, leaseMs: 1 });
     assert.strictEqual(leased.state, 'leased');
+
+    // Wait for the actual persisted deadline instead of assuming the next line
+    // executes in a later millisecond. The previous version was a timing flake.
+    const deadline = Number(leased.leaseExpiresAtMs || 0);
+    while (Date.now() <= deadline) {
+      // Synchronous store API: bounded spin for at most a couple of milliseconds.
+    }
+
     // Run stays ACTIVE — this is the common real-world case.
     const reclaimed = store.reclaimExpiredLeases({ requestId: 'reclaim-1', graceMs: 0 });
     assert.strictEqual(reclaimed.reclaimedIds.length, 1,

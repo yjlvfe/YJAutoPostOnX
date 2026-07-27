@@ -10,18 +10,15 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: xposter-completion-${{ github.event.pull_request.number || 'manual' }}
+  group: xposter-completion-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   baseline-tests:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -42,13 +39,10 @@ jobs:
           if-no-files-found: error
 
   workflow-tests:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -69,13 +63,10 @@ jobs:
           if-no-files-found: error
 
   electron-tests:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -96,14 +87,11 @@ jobs:
           if-no-files-found: error
 
   package-appimage:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/xposter-completion-20260726'
     needs: [baseline-tests, workflow-tests, electron-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/xposter-completion-20260726
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -152,10 +140,29 @@ jobs:
           name: xposter-appimage-boot-failure-log
           path: appimage-boot.log
           if-no-files-found: warn
-      - name: Audit production dependencies
+      - name: Capture production dependency audit
         shell: bash
         run: |
-          npm audit --omit=dev --audit-level=high
+          npm audit --omit=dev --json > audit-prod.json || true
+      - name: Upload production audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xposter-production-audit
+          path: audit-prod.json
+          if-no-files-found: error
+      - name: Enforce production dependency audit
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const audit = JSON.parse(fs.readFileSync('audit-prod.json', 'utf8'));
+          const counts = audit.metadata?.vulnerabilities || {};
+          const high = Number(counts.high || 0);
+          const critical = Number(counts.critical || 0);
+          console.log(`production audit: high=${high}, critical=${critical}`);
+          if (high > 0 || critical > 0) process.exit(1);
+          NODE
       - name: Upload verified AppImage
         uses: actions/upload-artifact@v4
         with:

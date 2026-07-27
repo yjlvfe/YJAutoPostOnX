@@ -17,10 +17,12 @@ const REQUIRED_IDS = [
 
 const REQUIRED_API = [
   'getSettings', 'saveSettings', 'selectFolder', 'selectCSV', 'selectSaveCSV',
-  'parseCSV', 'getQueue', 'addPosts', 'bulkDelete', 'startPosting',
+  'parseCSV', 'getQueue', 'getQueueState', 'addPosts', 'bulkDelete', 'startPosting',
   'stopAutomation', 'openProfileForLogin', 'getProfiles', 'createProfile',
   'deleteProfile', 'renameProfile', 'generateAiPosts', 'onAiProgress',
-  'exportQueue', 'onStatusUpdate', 'getRecoveryItems', 'requeueRecoveryItem', 'discardRecoveryItem',
+  'exportQueue', 'onStatusUpdate', 'getRecoveryItems', 'confirmRecoveryPublished',
+  'confirmRecoveryNotPublished', 'requeueDeadRecovery', 'discardDeadRecovery',
+  'workflowHealth', 'createWorkflowBackup',
 ];
 
 const fs = require('fs');
