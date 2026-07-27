@@ -33,12 +33,16 @@
     "csv-parser": "^3.0.0",
     "playwright": "^1.43.0",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "puppeteer-extra-plugin-user-data-dir": "file:vendor/puppeteer-extra-plugin-user-data-dir"
   },
   "devDependencies": {
     "cross-env": "10.1.0",
     "electron": "30.0.0",
     "electron-builder": "^24.13.3"
+  },
+  "overrides": {
+    "puppeteer-extra-plugin-user-data-dir": "file:vendor/puppeteer-extra-plugin-user-data-dir"
   },
   "build": {
     "appId": "com.yj.autopostonx",

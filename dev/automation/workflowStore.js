@@ -2394,6 +2394,65 @@ class WorkflowStore {
     return { deleted, reclaimedBytes };
   }
 
+  /**
+   * Reclaim the bytes of media blobs no `workflow_items` row references any
+   * more (its last referencing item was archived by applyRetention()).
+   *
+   * media_blobs rows are permanent tombstones (media_blobs_no_delete) so the
+   * hash/size identity and audit trail survive — only the file on disk and
+   * the `status` column change, to 'missing'. If identical content is staged
+   * again later, enqueue()'s INSERT ... ON CONFLICT revives the row to
+   * 'ready' and rewrites the file at the same content-addressed path, so
+   * this is a safe, reversible reclaim rather than a real deletion.
+   *
+   * The grace period mirrors sweepOrphanMedia(): it protects a blob whose
+   * last item_media link was JUST dropped by one call while a different,
+   * unrelated call is in the middle of staging the same content again.
+   */
+  reclaimUnreferencedMedia({ graceMs = 3_600_000, now = Date.now(), limit = 1000 } = {}) {
+    this._assertOpen();
+    if (!Number.isInteger(graceMs) || graceMs < 0) {
+      throw new TypeError('graceMs must be a non-negative integer');
+    }
+    const cutoff = now - graceMs;
+    const candidates = this.db.prepare(`
+      SELECT sha256, relative_path, byte_size FROM media_blobs
+      WHERE status = 'ready'
+        AND verified_at_ms <= ?
+        AND sha256 NOT IN (SELECT DISTINCT blob_sha256 FROM item_media)
+      ORDER BY sha256
+      LIMIT ?
+    `).all(cutoff, limit);
+
+    const reclaimed = [];
+    let reclaimedBytes = 0;
+    const markMissing = this.db.prepare(`
+      UPDATE media_blobs SET status = 'missing', verified_at_ms = ? WHERE sha256 = ?
+    `);
+    for (const blob of candidates) {
+      // Re-check inside the same synchronous pass rather than trusting the
+      // SELECT above — nothing can interleave between here and the UPDATE
+      // since better-sqlite3 calls run to completion on a single connection,
+      // but a later row in this same loop must not act on a stale count.
+      const stillUnreferenced = this.db.prepare(
+        'SELECT COUNT(*) n FROM item_media WHERE blob_sha256 = ?',
+      ).get(blob.sha256).n === 0;
+      if (!stillUnreferenced) continue;
+
+      const managedPath = path.join(this.mediaDir, blob.relative_path);
+      try {
+        fs.unlinkSync(managedPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') continue;
+      }
+      markMissing.run(now, blob.sha256);
+      reclaimed.push(blob.sha256);
+      reclaimedBytes += blob.byte_size;
+    }
+    if (reclaimed.length > 0) fsyncDirectory(this.mediaDir);
+    return { reclaimed, reclaimedBytes, cutoffMs: cutoff };
+  }
+
   _findOrphanMedia() {
     const referenced = new Set(
       this.db.prepare('SELECT relative_path FROM media_blobs').all().map((row) => row.relative_path),
@@ -2480,8 +2539,16 @@ class WorkflowStore {
     const foreignKeyViolations = this.db.pragma('foreign_key_check');
     const mediaProblems = [];
     if (verifyMedia) {
+      // Only 'ready' blobs are expected to have bytes on disk. A 'missing' blob
+      // is one reclaimUnreferencedMedia() deliberately removed after every
+      // item_media reference to it was gone — that is not damage, and must not
+      // re-flag as corrupt on every health check forever. enqueue()'s dedup
+      // path already revives a blob back to 'ready' if the same content is
+      // staged again, so this never masks a real problem.
       const blobs = this.db.prepare(`
-        SELECT sha256, relative_path, byte_size, status FROM media_blobs ORDER BY sha256
+        SELECT sha256, relative_path, byte_size, status FROM media_blobs
+        WHERE status = 'ready'
+        ORDER BY sha256
       `).all();
       for (const blob of blobs) {
         const managedPath = path.resolve(this.mediaDir, blob.relative_path);
@@ -2668,12 +2735,25 @@ class WorkflowStore {
 
     const stat = fs.statSync(target);
     const sha256 = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+
+    // The DB snapshot is only half of what a restore needs — the other half
+    // is that every 'ready' blob it references still exists, unmodified, in
+    // THIS store's media directory (media is deliberately not copied into the
+    // backup; see the doc comment above). Check that now, while `target` is
+    // still self-consistent with the live media dir, and again at whatever
+    // later moment someone actually attempts the restore.
+    const mediaVerification = this.verifyRestoreCandidate({ path: target });
+
     fs.writeFileSync(`${target}.json`, canonicalStringify({
       createdAtMs: now,
       sqliteBytes: stat.size,
       sha256,
       itemCount,
       mediaBlobs: this.db.prepare('SELECT COUNT(*) n FROM media_blobs').get().n,
+      mediaRequired: mediaVerification.mediaRequired,
+      missingMedia: mediaVerification.missingMedia,
+      mismatchedMedia: mediaVerification.mismatchedMedia,
+      restorable: mediaVerification.restorable,
       schemaVersion: (this.db.prepare(
         `SELECT value_json AS value FROM workflow_metadata WHERE key = 'schema_version'`
       ).get() || {}).value || null,
@@ -2699,7 +2779,18 @@ class WorkflowStore {
       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms
     `).run(canonicalStringify({ path: target, sha256, bytes: stat.size, atMs: now }), now);
 
-    return { ok: true, path: target, bytes: stat.size, sha256, itemCount, verified: true, rotated };
+    return {
+      ok: true,
+      path: target,
+      bytes: stat.size,
+      sha256,
+      itemCount,
+      verified: true,
+      rotated,
+      restorable: mediaVerification.restorable,
+      missingMedia: mediaVerification.missingMedia,
+      mismatchedMedia: mediaVerification.mismatchedMedia,
+    };
   }
 
   /** When the last verified backup was taken, or null. */
@@ -2710,6 +2801,76 @@ class WorkflowStore {
       .get();
     if (!row || !row.value) return null;
     try { return JSON.parse(row.value); } catch { return null; }
+  }
+
+  /**
+   * Whether a backup file can actually be restored: does the sqlite copy
+   * itself pass quick_check, AND does every blob it expects to be 'ready'
+   * still exist in the media directory with matching bytes.
+   *
+   * Deliberately typed rather than boolean-only — `restorable=false` without
+   * saying which blobs are missing or corrupt is not something an operator
+   * (or a test) can act on. Takes a media directory explicitly (defaulting to
+   * this store's own) so a staging restore-drill can point it at a separate,
+   * disposable copy instead of the live one.
+   */
+  verifyRestoreCandidate({ path: backupPath, mediaDir = this.mediaDir } = {}) {
+    if (typeof backupPath !== 'string' || !backupPath) {
+      throw new TypeError('verifyRestoreCandidate requires a backup file path');
+    }
+    const Database = require('better-sqlite3');
+    let copy;
+    try {
+      copy = new Database(backupPath, { readonly: true, fileMustExist: true });
+    } catch (error) {
+      return {
+        ok: false, restorable: false, quickCheck: null,
+        mediaRequired: 0, missingMedia: [], mismatchedMedia: [],
+        error: error.message,
+      };
+    }
+    try {
+      const quickCheck = copy.pragma('quick_check', { simple: true });
+      const readyBlobs = copy.prepare(`
+        SELECT sha256, relative_path, byte_size FROM media_blobs WHERE status = 'ready' ORDER BY sha256
+      `).all();
+
+      const missingMedia = [];
+      const mismatchedMedia = [];
+      const mediaRoot = path.resolve(mediaDir);
+      for (const blob of readyBlobs) {
+        const managedPath = path.resolve(mediaDir, blob.relative_path);
+        if (!managedPath.startsWith(`${mediaRoot}${path.sep}`)) {
+          mismatchedMedia.push({ sha256: blob.sha256, code: 'PATH_ESCAPE' });
+          continue;
+        }
+        let fd;
+        try {
+          fd = fs.openSync(managedPath, 'r');
+          const actual = hashOpenFile(fd);
+          if (actual.sha256 !== blob.sha256 || actual.byteSize !== blob.byte_size) {
+            mismatchedMedia.push({ sha256: blob.sha256, expectedByteSize: blob.byte_size, actualByteSize: actual.byteSize });
+          }
+        } catch (error) {
+          if (error.code === 'ENOENT') missingMedia.push({ sha256: blob.sha256, relativePath: blob.relative_path });
+          else mismatchedMedia.push({ sha256: blob.sha256, code: error.code || 'MEDIA_READ_FAILED' });
+        } finally {
+          if (fd !== undefined) fs.closeSync(fd);
+        }
+      }
+
+      const restorable = quickCheck === 'ok' && missingMedia.length === 0 && mismatchedMedia.length === 0;
+      return {
+        ok: quickCheck === 'ok',
+        quickCheck,
+        mediaRequired: readyBlobs.length,
+        missingMedia,
+        mismatchedMedia,
+        restorable,
+      };
+    } finally {
+      copy.close();
+    }
   }
 
   // ── Retention ──────────────────────────────────────────────────────────────

@@ -153,6 +153,32 @@ async function retentionBoundsGrowthWithoutLosingDedup() {
     .prepare(`SELECT COUNT(*) n FROM archived_items WHERE external_url IS NOT NULL`).get().n;
   check('the proof that each post went out is kept', withUrl === N, `withUrl=${withUrl}`);
 
+  // Unfinished work is untouchable at any age — dispatch_started specifically,
+  // not just its eventual ambiguous outcome. Age the row directly rather than
+  // moving `now`, so this stands alone from the ambiguous case below.
+  const farFuture = Date.now() + 3650 * 86_400_000;
+  ctx.store.enqueue({ items: [{ text: 'MID_FLIGHT' }], requestId: 'e-mid' });
+  const midLease = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
+  const midAttempt = ctx.store.beginDispatch({
+    id: midLease.id, leaseToken: midLease.leaseToken, renderedText: 'MID_FLIGHT', requestId: 'b-mid',
+  });
+  ctx.store.db.prepare(`UPDATE workflow_items SET updated_at_ms = ? WHERE id = ?`)
+    .run(Date.now() - 3650 * 86_400_000, midLease.id);
+  check('the item really is sitting in dispatch_started, mid-flight',
+    ctx.store.db.prepare('SELECT state FROM workflow_items WHERE id = ?').get(midLease.id).state === 'dispatch_started');
+  const midFlightAttempt = ctx.store.applyRetention({
+    olderThanMs: 90 * 86_400_000, now: farFuture, states: ['dispatch_started', 'published', 'discarded', 'dead'],
+  });
+  check('a mid-flight dispatch is never archived, even ten years old and explicitly requested',
+    midFlightAttempt.archived === 0, JSON.stringify(midFlightAttempt));
+  check('it is still exactly where it was — dispatch_started, not silently moved',
+    ctx.store.db.prepare('SELECT state FROM workflow_items WHERE id = ?').get(midLease.id).state === 'dispatch_started');
+
+  // Close it out before continuing — an unresolved dispatch blocks every
+  // later lease in this store, by design (XP-003).
+  ctx.store.markAmbiguous({ attemptId: midAttempt.attemptId, reason: 'test-cleanup', requestId: 'amb-mid' });
+  ctx.store.resolveRecovery({ id: midLease.id, action: 'close', evidence: { by: 'test-cleanup' }, requestId: 'res-mid' });
+
   // Unfinished work is untouchable at any age.
   ctx.store.enqueue({ items: [{ text: 'STILL_QUEUED' }], requestId: 'e-live' });
   const leased = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
@@ -160,7 +186,6 @@ async function retentionBoundsGrowthWithoutLosingDedup() {
     id: leased.id, leaseToken: leased.leaseToken, renderedText: 'STILL_QUEUED', requestId: 'b-live',
   });
   ctx.store.markAmbiguous({ attemptId: ctx.store.listRecovery()[0].currentAttemptId, reason: 'unknown', requestId: 'amb-live' });
-  const farFuture = Date.now() + 3650 * 86_400_000;
   const second = ctx.store.applyRetention({ olderThanMs: 90 * 86_400_000, now: farFuture });
   check('an unresolved item is never archived, at any age', second.archived === 0,
     JSON.stringify(second));
@@ -308,6 +333,199 @@ async function dedupCorpusSpansTheArchive() {
   await durableQueue.closeStore();
 }
 
+async function backupManifestIsHonestAboutMediaAndRestorability() {
+  console.log('\n📋 XP-010.6 the backup manifest states what media it needs, and is honest about restorability');
+  const ctx = freshStore('manifest-media');
+  const src = path.join(SANDBOX, 'manifest-pic.png');
+  fs.writeFileSync(src, Buffer.from('89504e470d0a1a0a' + 'aa'.repeat(64), 'hex'));
+  ctx.store.enqueue({ items: [{ text: 'HAS_MEDIA', media_path: src }], requestId: 'e-mm1' });
+  const leased = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
+  const attempt = ctx.store.beginDispatch({
+    id: leased.id, leaseToken: leased.leaseToken, renderedText: 'HAS_MEDIA', requestId: 'b-mm1',
+  });
+  ctx.store.markPublished({ attemptId: attempt.attemptId, externalUrl: 'https://x.com/i/web/status/mm1', evidence: {}, requestId: 'p-mm1' });
+
+  const goodBackup = await ctx.store.backup({ keep: 3 });
+  check('a backup whose media is intact declares itself restorable',
+    goodBackup.restorable === true, JSON.stringify(goodBackup));
+  check('and lists no missing or mismatched media', goodBackup.missingMedia.length === 0
+    && goodBackup.mismatchedMedia.length === 0, JSON.stringify(goodBackup));
+
+  const manifest = JSON.parse(fs.readFileSync(`${goodBackup.path}.json`, 'utf8'));
+  check('the manifest states how many media blobs a full restore requires',
+    manifest.mediaRequired === 1, JSON.stringify(manifest));
+  check('the manifest itself carries the restorable verdict, not just the live return value',
+    manifest.restorable === true, JSON.stringify(manifest));
+
+  // Now delete the underlying blob file behind the store's back (simulating
+  // disk loss unrelated to any workflow-level action) and take a second backup.
+  const blob = ctx.store.db.prepare(`SELECT relative_path FROM media_blobs LIMIT 1`).get();
+  fs.unlinkSync(path.join(ctx.root, 'media', blob.relative_path));
+
+  const badBackup = await ctx.store.backup({ keep: 3, now: Date.now() + 1000 });
+  check('a backup cannot declare restorable=true when required media is gone',
+    badBackup.ok === true && badBackup.restorable === false, JSON.stringify(badBackup));
+  check('it names exactly which blob is missing, typed, not just a boolean',
+    badBackup.missingMedia.length === 1 && badBackup.missingMedia[0].sha256 === blob0Sha(ctx, blob),
+    JSON.stringify(badBackup.missingMedia));
+
+  const badManifest = JSON.parse(fs.readFileSync(`${badBackup.path}.json`, 'utf8'));
+  check('the manifest on disk agrees — it never overclaims restorability',
+    badManifest.restorable === false && badManifest.missingMedia.length === 1,
+    JSON.stringify(badManifest));
+
+  ctx.store.close();
+}
+function blob0Sha(ctx, blob) {
+  return ctx.store.db.prepare(`SELECT sha256 FROM media_blobs WHERE relative_path = ?`).get(blob.relative_path).sha256;
+}
+
+async function restoreStagingTypedRefusesOnHashMismatch() {
+  console.log('\n📋 XP-010.7 restore verification catches a media file that changed, not just one that vanished');
+  const ctx = freshStore('restore-mismatch');
+  const src = path.join(SANDBOX, 'mismatch-pic.png');
+  fs.writeFileSync(src, Buffer.from('89504e470d0a1a0a' + 'bb'.repeat(64), 'hex'));
+  ctx.store.enqueue({ items: [{ text: 'MISMATCH_MEDIA', media_path: src }], requestId: 'e-mis' });
+  const leased = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
+  const attempt = ctx.store.beginDispatch({
+    id: leased.id, leaseToken: leased.leaseToken, renderedText: 'MISMATCH_MEDIA', requestId: 'b-mis',
+  });
+  ctx.store.markPublished({ attemptId: attempt.attemptId, externalUrl: 'https://x.com/i/web/status/mis', evidence: {}, requestId: 'p-mis' });
+  const backup = await ctx.store.backup({ keep: 3 });
+  check('backup taken while media is intact is restorable', backup.restorable === true, JSON.stringify(backup));
+
+  // Bit rot: the file on disk no longer matches what the backup's DB recorded.
+  const blob = ctx.store.db.prepare(`SELECT relative_path FROM media_blobs LIMIT 1`).get();
+  fs.writeFileSync(path.join(ctx.root, 'media', blob.relative_path), 'CORRUPTED_BYTES');
+
+  const verdict = ctx.store.verifyRestoreCandidate({ path: backup.path });
+  check('verifyRestoreCandidate refuses restorable=true on a hash mismatch',
+    verdict.restorable === false, JSON.stringify(verdict));
+  check('it reports the mismatch as typed data, not a bare boolean',
+    verdict.mismatchedMedia.length === 1, JSON.stringify(verdict.mismatchedMedia));
+  check('quick_check on the backup file itself still passes — this is a media problem, not a DB problem',
+    verdict.quickCheck === 'ok');
+
+  // A restore-drill against a totally empty staging media directory must also
+  // typed-refuse rather than silently proceeding as if nothing were missing.
+  const emptyStagingDir = path.join(SANDBOX, 'empty-staging-media');
+  fs.mkdirSync(emptyStagingDir, { recursive: true });
+  const stagingVerdict = ctx.store.verifyRestoreCandidate({ path: backup.path, mediaDir: emptyStagingDir });
+  check('restoring into a staging dir with no media at all is typed-refused, not assumed fine',
+    stagingVerdict.restorable === false && stagingVerdict.missingMedia.length === 1,
+    JSON.stringify(stagingVerdict));
+
+  ctx.store.close();
+}
+
+async function sharedMediaSurvivesSingleRowRetention() {
+  console.log('\n📋 XP-010.8 media shared by two posts is not deleted when only one is retained');
+  const ctx = freshStore('shared-media');
+  const src = path.join(SANDBOX, 'shared-pic.png');
+  fs.writeFileSync(src, Buffer.from('89504e470d0a1a0a' + 'cc'.repeat(64), 'hex'));
+
+  // Two DIFFERENT items, deliberately reusing the exact same file content —
+  // _stageMedia dedups by hash, so both end up pointing at ONE media_blobs row.
+  ctx.store.enqueue({ items: [{ text: 'SHARED_OLD', media_path: src }], requestId: 'e-sh1' });
+  const l1 = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
+  const a1 = ctx.store.beginDispatch({ id: l1.id, leaseToken: l1.leaseToken, renderedText: 'SHARED_OLD', requestId: 'b-sh1' });
+  ctx.store.markPublished({ attemptId: a1.attemptId, externalUrl: 'https://x.com/i/web/status/sh1', evidence: {}, requestId: 'p-sh1' });
+
+  ctx.store.enqueue({ items: [{ text: 'SHARED_NEW', media_path: src }], requestId: 'e-sh2' });
+  const l2 = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
+  const a2 = ctx.store.beginDispatch({ id: l2.id, leaseToken: l2.leaseToken, renderedText: 'SHARED_NEW', requestId: 'b-sh2' });
+  ctx.store.markPublished({ attemptId: a2.attemptId, externalUrl: 'https://x.com/i/web/status/sh2', evidence: {}, requestId: 'p-sh2' });
+
+  const blob = ctx.store.db.prepare('SELECT sha256, relative_path FROM media_blobs').get();
+  check('both posts really do share one blob row (deduped by content hash)',
+    ctx.store.db.prepare('SELECT COUNT(*) n FROM media_blobs').get().n === 1);
+  check('two item_media links point at it', ctx.store.db.prepare(
+    'SELECT COUNT(*) n FROM item_media WHERE blob_sha256 = ?').get(blob.sha256).n === 2);
+
+  // Retire only the OLD post: backdate ITS updated_at_ms below the cutoff,
+  // rather than moving retention's `now` into the future — SHARED_NEW's own
+  // updated_at_ms is real "now" and must not be swept up by a wall-clock jump.
+  const realNow = Date.now();
+  ctx.store.db.prepare(`UPDATE workflow_items SET updated_at_ms = ? WHERE id = ?`).run(realNow - 200 * 86_400_000, l1.id);
+  const result = ctx.store.applyRetention({ olderThanMs: 90 * 86_400_000, now: realNow });
+  check('exactly the old, shared-media post was archived', result.archived === 1, JSON.stringify(result));
+
+  check('the blob row is untouched — one reference remains', ctx.store.db.prepare(
+    'SELECT COUNT(*) n FROM media_blobs WHERE sha256 = ?').get(blob.sha256).n === 1);
+  check('the blob is still status=ready (still owed to the still-live post)', ctx.store.db.prepare(
+    'SELECT status FROM media_blobs WHERE sha256 = ?').get(blob.sha256).status === 'ready');
+  check('the file itself is still on disk, byte for byte',
+    fs.existsSync(path.join(ctx.root, 'media', blob.relative_path)));
+
+  // Reclaim must not touch it either — SHARED_NEW's link still exists.
+  const reclaim = ctx.store.reclaimUnreferencedMedia({ graceMs: 0, now: realNow });
+  check('reclaim does not reclaim media that is still referenced by the live post',
+    reclaim.reclaimed.length === 0, JSON.stringify(reclaim));
+  check('the file survives the reclaim pass too',
+    fs.existsSync(path.join(ctx.root, 'media', blob.relative_path)));
+
+  ctx.store.close();
+}
+
+async function onlyFullyUnreferencedMediaIsReclaimed() {
+  console.log('\n📋 XP-010.9 media is only cleaned up once every reference to it is gone');
+  const ctx = freshStore('reclaim');
+  const src = path.join(SANDBOX, 'reclaim-pic.png');
+  fs.writeFileSync(src, Buffer.from('89504e470d0a1a0a' + 'dd'.repeat(64), 'hex'));
+  ctx.store.enqueue({ items: [{ text: 'RECLAIM_ME', media_path: src }], requestId: 'e-rec' });
+  const leased = ctx.store.leaseNext({ profileId: ctx.profileId, runId: ctx.runId, leaseMs: 60_000 });
+  const attempt = ctx.store.beginDispatch({
+    id: leased.id, leaseToken: leased.leaseToken, renderedText: 'RECLAIM_ME', requestId: 'b-rec',
+  });
+  ctx.store.markPublished({ attemptId: attempt.attemptId, externalUrl: 'https://x.com/i/web/status/rec', evidence: {}, requestId: 'p-rec' });
+
+  const blob = ctx.store.db.prepare('SELECT sha256, relative_path, byte_size FROM media_blobs LIMIT 1').get();
+  const managedPath = path.join(ctx.root, 'media', blob.relative_path);
+  check('the blob starts out ready with bytes on disk',
+    ctx.store.db.prepare('SELECT status FROM media_blobs WHERE sha256 = ?').get(blob.sha256).status === 'ready'
+    && fs.existsSync(managedPath));
+
+  // Age the ITEM past the retention cutoff (backdate its row, not the clock),
+  // so reclaim's own 1-hour grace period can be tested on its own terms
+  // afterward, against a `now` that stays close to the blob's real
+  // verified_at_ms rather than jumping 120 days ahead of it.
+  const realNow = Date.now();
+  ctx.store.db.prepare(`UPDATE workflow_items SET updated_at_ms = ? WHERE id = ?`).run(realNow - 100 * 86_400_000, leased.id);
+  const soon = ctx.store.applyRetention({ olderThanMs: 90 * 86_400_000, now: realNow });
+  check('retention archived the only post referencing this media', soon.archived === 1, JSON.stringify(soon));
+
+  // Within the grace window, even a fully unreferenced blob must not be touched.
+  const tooSoon = ctx.store.reclaimUnreferencedMedia({ graceMs: 3_600_000, now: realNow + 30 * 60 * 1000 });
+  check('reclaim respects its own grace period even with zero references',
+    tooSoon.reclaimed.length === 0, JSON.stringify(tooSoon));
+  check('the file is still there during the grace window', fs.existsSync(managedPath));
+
+  // Past the grace period, with zero item_media references, it is reclaimed.
+  const pastGrace = realNow + 2 * 3_600_000;
+  const reclaim = ctx.store.reclaimUnreferencedMedia({ graceMs: 3_600_000, now: pastGrace });
+  check('the fully-dereferenced blob is reclaimed once past the grace window',
+    reclaim.reclaimed.includes(blob.sha256), JSON.stringify(reclaim));
+  check('its bytes are actually gone from disk', !fs.existsSync(managedPath));
+  check('its row survives as a tombstone, not deleted (the schema forbids deleting media_blobs)',
+    ctx.store.db.prepare('SELECT status FROM media_blobs WHERE sha256 = ?').get(blob.sha256).status === 'missing');
+
+  // A now-reclaimed blob must not make the health gate refuse publishing.
+  const healthy = storeHealth.evaluate(ctx.store, { now: pastGrace });
+  check('a reclaimed (not corrupt) blob does not trip the health gate',
+    healthy.ok === true, JSON.stringify(healthy.blocking));
+
+  // Staging the exact same content again must revive it — not leave it stuck
+  // 'missing' with a file that silently reappeared underneath the DB's back.
+  const revived = ctx.store.enqueue({ items: [{ text: 'RECLAIM_ME_AGAIN', media_path: src }], requestId: 'e-rec2' });
+  check('re-staging identical content revives the blob to ready',
+    ctx.store.db.prepare('SELECT status FROM media_blobs WHERE sha256 = ?').get(blob.sha256).status === 'ready');
+  check('and the bytes are really back on disk at the same content-addressed path',
+    fs.existsSync(managedPath));
+  check('the enqueue call itself succeeded rather than silently failing', Array.isArray(revived.items));
+
+  ctx.store.close();
+}
+
 (async () => {
   console.log('🧪 XP-010 — backup, retention and the health gate');
   console.log(`   sandbox HOME: ${SANDBOX}`);
@@ -317,6 +535,10 @@ async function dedupCorpusSpansTheArchive() {
     await healthGateBlocksTheBoundary();
     await startupMaintenanceOrdersItsStepsSafely();
     await dedupCorpusSpansTheArchive();
+    await backupManifestIsHonestAboutMediaAndRestorability();
+    await restoreStagingTypedRefusesOnHashMismatch();
+    await sharedMediaSurvivesSingleRowRetention();
+    await onlyFullyUnreferencedMediaIsReclaimed();
   } catch (error) {
     failed++;
     console.error('\n💥 scenario crashed:', error && error.stack ? error.stack : error);

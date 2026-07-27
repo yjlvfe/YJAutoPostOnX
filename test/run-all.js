@@ -28,6 +28,7 @@ const BASELINE_TESTS = [
   'opencode-go-format.test.js',
   'diagnostic-pipeline.test.js',
   'verify-edge-cases.test.js',
+  'dependency-audit-closure.test.js',
 ];
 
 // Durable-workflow tests are discovered, not listed, so a new gate can never be

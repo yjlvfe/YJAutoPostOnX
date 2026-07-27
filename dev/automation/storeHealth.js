@@ -36,6 +36,8 @@ const BACKUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const RETENTION_MS = 90 * 86_400_000;
 /** Verified backups to keep. */
 const BACKUP_KEEP = 5;
+/** Grace period before an unreferenced media blob's bytes are reclaimed. */
+const MEDIA_RECLAIM_GRACE_MS = 3_600_000;
 
 function freeBytes(dir) {
   try {
@@ -129,16 +131,17 @@ async function runStartupMaintenance(store, {
   backupIntervalMs = BACKUP_INTERVAL_MS,
   retentionMs = RETENTION_MS,
   keep = BACKUP_KEEP,
+  mediaReclaimGraceMs = MEDIA_RECLAIM_GRACE_MS,
   force = false,
 } = {}) {
   const health = evaluate(store, { now });
-  const result = { health, backup: null, retention: null, skipped: [] };
+  const result = { health, backup: null, retention: null, mediaReclaim: null, skipped: [] };
 
   if (health.blocked) {
     // Do not overwrite the newest good backup with a damaged snapshot, and do
     // not delete anything under retention: the rows we would drop may be the
     // only remaining evidence of what happened.
-    result.skipped.push('backup:store_unhealthy', 'retention:store_unhealthy');
+    result.skipped.push('backup:store_unhealthy', 'retention:store_unhealthy', 'media_reclaim:store_unhealthy');
     log.error(`Durable store health gate is CLOSED: ${health.blocking.join('; ')}`);
     return result;
   }
@@ -161,13 +164,22 @@ async function runStartupMaintenance(store, {
   // earlier one's. Without that, pruning is just deletion.
   const haveBackup = (result.backup && result.backup.ok) || !!store.lastBackup();
   if (!haveBackup) {
-    result.skipped.push('retention:no_verified_backup');
+    result.skipped.push('retention:no_verified_backup', 'media_reclaim:no_verified_backup');
   } else {
     try {
       result.retention = store.applyRetention({ olderThanMs: retentionMs, now });
     } catch (error) {
       result.retention = { error: error.message };
       log.error(`Workflow retention failed: ${error.message}`);
+    }
+
+    // Reclaim runs after retention, which is what actually drops the last
+    // item_media reference to a blob. Same backup-gated caution applies.
+    try {
+      result.mediaReclaim = store.reclaimUnreferencedMedia({ graceMs: mediaReclaimGraceMs, now });
+    } catch (error) {
+      result.mediaReclaim = { error: error.message };
+      log.error(`Workflow media reclaim failed: ${error.message}`);
     }
   }
 
@@ -196,6 +208,7 @@ module.exports = {
   gateBeforeRun,
   runStartupMaintenance,
   MIN_FREE_BYTES,
+  MEDIA_RECLAIM_GRACE_MS,
   BACKUP_INTERVAL_MS,
   RETENTION_MS,
   BACKUP_KEEP,
