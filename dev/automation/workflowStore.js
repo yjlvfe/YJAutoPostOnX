@@ -22,6 +22,16 @@ const ITEM_STATES = new Set([
   'discarded',
 ]);
 
+/**
+ * States an operator may discard from.
+ *
+ * All three are pre-boundary: the post was never handed to the transport, so a
+ * tombstone here cannot hide something that is live on X. `leased`,
+ * `dispatch_started`, `ambiguous` and `published` are deliberately absent —
+ * those must be resolved, not deleted.
+ */
+const DISCARDABLE_STATES = new Set(['queued', 'deferred', 'dead']);
+
 class WorkflowConflictError extends Error {
   constructor(code, message, details = undefined) {
     super(message);
@@ -360,6 +370,28 @@ function schemaSql() {
       created_at_ms INTEGER NOT NULL
     ) STRICT;
 
+    /*
+     * Compact tombstones for work retention has removed from the live tables.
+     *
+     * Deliberately NOT a copy of workflow_items. Retention exists to drop the
+     * audit bulk — events, attempts, resolution blobs — while keeping what the
+     * app still needs: the published text (the semantic-dedup corpus reads it,
+     * so dropping it would make the app willing to republish everything past
+     * the cutoff) and the proof that it went out.
+     *
+     * No foreign key to workflow_items: the point is that the row is gone.
+     */
+    CREATE TABLE IF NOT EXISTS archived_items (
+      id TEXT PRIMARY KEY,
+      state TEXT NOT NULL CHECK (state IN ('published', 'discarded', 'dead')),
+      text TEXT NOT NULL,
+      published_at_ms INTEGER,
+      archived_at_ms INTEGER NOT NULL,
+      external_url TEXT
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS archived_items_scan_idx
+      ON archived_items (archived_at_ms, id);
+
     CREATE INDEX IF NOT EXISTS workflow_items_ready_idx
       ON workflow_items (available_at_ms, queue_seq)
       WHERE state IN ('queued', 'deferred');
@@ -438,10 +470,28 @@ function schemaSql() {
     BEGIN
       SELECT RAISE(ABORT, 'workflow events are append-only');
     END;
-    CREATE TRIGGER IF NOT EXISTS workflow_events_append_only_delete
+    -- Events are append-only, but not eternal — same reasoning, and the same
+    -- mechanism, as api_requests below.
+    --
+    -- The unconditional version of this trigger made retention impossible: the
+    -- event log grew at four rows per published post and nothing could ever
+    -- remove it, so a two-year install carried ~292,000 rows describing posts
+    -- whose items had long since served their purpose. An audit record that
+    -- outlives its subject by years is cost, not evidence.
+    --
+    -- Deletion stays impossible by default: it requires a cutoff written into
+    -- workflow_metadata inside the SAME transaction, which applyRetention sets
+    -- and clears. Recent events remain untouchable.
+    DROP TRIGGER IF EXISTS workflow_events_append_only_delete;
+    CREATE TRIGGER IF NOT EXISTS workflow_events_retention_delete
     BEFORE DELETE ON workflow_events
+    WHEN OLD.created_at_ms > COALESCE(
+      (SELECT CAST(json_extract(value_json, '$.cutoffMs') AS INTEGER)
+       FROM workflow_metadata WHERE key = 'workflow_events_prune_cutoff'),
+      -1
+    )
     BEGIN
-      SELECT RAISE(ABORT, 'workflow events are append-only');
+      SELECT RAISE(ABORT, 'workflow events are append-only until their retention cutoff');
     END;
     CREATE TRIGGER IF NOT EXISTS api_requests_immutable_update
     BEFORE UPDATE ON api_requests
@@ -481,10 +531,23 @@ function schemaSql() {
     BEGIN
       SELECT RAISE(ABORT, 'item media links are immutable');
     END;
-    CREATE TRIGGER IF NOT EXISTS item_media_no_delete
+    -- item_media has no timestamp of its own, so its retention gate is a flag
+    -- rather than a cutoff: applyRetention sets it inside its transaction and
+    -- clears it before returning. Outside that window the link is immutable, so
+    -- nothing can quietly detach a post from the bytes it was published with.
+    --
+    -- The blob itself is never deleted here — media_blobs remains a durable
+    -- tombstone, and sweepOrphanMedia is what reclaims unreferenced bytes.
+    DROP TRIGGER IF EXISTS item_media_no_delete;
+    CREATE TRIGGER IF NOT EXISTS item_media_retention_delete
     BEFORE DELETE ON item_media
+    WHEN COALESCE(
+      (SELECT json_extract(value_json, '$.active')
+       FROM workflow_metadata WHERE key = 'item_media_prune_gate'),
+      0
+    ) <> 1
     BEGIN
-      SELECT RAISE(ABORT, 'item media links are durable');
+      SELECT RAISE(ABORT, 'item media links are durable outside a retention pass');
     END;
   `;
 }
@@ -1645,6 +1708,23 @@ class WorkflowStore {
           );
         }
 
+        // The store must be healthy AT the boundary.
+        //
+        // integrityCheck() hashes every managed media file, so it cannot run per
+        // post. It runs at startup and between runs, and latches its verdict
+        // here — a single metadata read inside the same transaction. Without
+        // this, a store that fails its own integrity check kept handing out
+        // leases and kept committing dispatches: the app published from a
+        // database it already knew was damaged, and said nothing.
+        const gate = this._readHealthGate();
+        if (gate.blocked) {
+          conflict(
+            'STORE_UNHEALTHY',
+            `Publishing is blocked: the durable store failed its health check (${gate.reason})`,
+            { reason: gate.reason, checkedAtMs: gate.checkedAtMs },
+          );
+        }
+
         // The owning run and profile must still be alive AT the boundary. A Stop
         // or profile deletion that wins during preparation must prevent the
         // irreversible action, not merely be ignored.
@@ -1887,25 +1967,42 @@ class WorkflowStore {
     return rows.map((row) => this._rowToItem(row));
   }
 
+  /**
+   * Resolve one unresolved recovery item.
+   *
+   * `expectedRevision` is optional but strongly preferred from the UI: the
+   * operator decides from a rendered list, and between the render and the click
+   * a reconciliation pass or a second window may have moved the row. Passing
+   * the revision that was on screen turns "apply to whatever is there now" into
+   * "apply to exactly what I reviewed, or refuse".
+   */
   resolveRecovery({
     id,
     action,
     confirmedNotPublished = false,
     evidence = null,
+    expectedRevision = null,
     requestId,
   }) {
     const normalizedId = assertNonEmptyString(id, 'id');
     const normalizedAction = assertNonEmptyString(action, 'action');
+    if (expectedRevision !== null
+      && (!Number.isInteger(expectedRevision) || expectedRevision < 0)) {
+      throw new TypeError('expectedRevision must be a non-negative integer or null');
+    }
 
     return this._mutate(
       'resolveRecovery',
       requestId,
-      { id: normalizedId, action: normalizedAction, confirmedNotPublished, evidence },
+      { id: normalizedId, action: normalizedAction, confirmedNotPublished, evidence, expectedRevision },
       () => {
         const row = this._getItemRow(normalizedId);
         if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
         if (row.state !== 'ambiguous') {
           conflict('INVALID_STATE', `Cannot resolve recovery from state ${row.state}`);
+        }
+        if (expectedRevision !== null && row.revision !== expectedRevision) {
+          conflict('REVISION_CONFLICT', 'The recovery item changed since it was reviewed');
         }
 
         if (normalizedAction === 'close') {
@@ -2013,7 +2110,16 @@ class WorkflowStore {
         if (!row) conflict('ITEM_NOT_FOUND', `Unknown workflow item: ${normalizedId}`);
         // Deferred items are still user-visible backlog; the schema allows
         // deferred -> discarded, so the API must too.
-        if (row.state !== 'queued' && row.state !== 'deferred') {
+        //
+        // `dead` belongs here for the same reason. The schema has always
+        // permitted dead -> discarded, but this method refused it, and it is
+        // the only discard the store exposes — so the delete button on a dead
+        // letter in the recovery panel could never succeed. It routed through
+        // resolveRecovery(), which accepts `ambiguous` only, and raised
+        // "Cannot resolve recovery from state dead" at the operator every
+        // time. A dead letter failed BEFORE the boundary and was never sent,
+        // so discarding it cannot lose a published post.
+        if (!DISCARDABLE_STATES.has(row.state)) {
           conflict('INVALID_STATE', `Cannot discard an item in state ${row.state}`);
         }
         if (row.revision !== expectedRevision) {
@@ -2435,6 +2541,312 @@ class WorkflowStore {
       orphanedMediaFiles,
       orphanedTempFiles,
     };
+  }
+
+  // ── Health gate ────────────────────────────────────────────────────────────
+  //
+  // integrityCheck() hashes every managed media file — far too expensive to run
+  // per post. Its verdict is therefore latched in workflow_metadata, and
+  // beginDispatch reads that latch inside its own transaction. The expensive
+  // check runs at startup and between runs; the boundary pays one row read.
+  //
+  // The latch is deliberately durable rather than in-memory: a process that
+  // crashes right after detecting damage must not come back up believing the
+  // store is fine.
+
+  /** @returns {{blocked: boolean, reason: string|null, checkedAtMs: number|null}} */
+  _readHealthGate() {
+    const row = this.db
+      .prepare(`SELECT value_json AS value FROM workflow_metadata WHERE key = 'health_gate'`)
+      .get();
+    if (!row || !row.value) return { blocked: false, reason: null, checkedAtMs: null };
+    try {
+      const parsed = JSON.parse(row.value);
+      return {
+        blocked: parsed.blocked === true,
+        reason: parsed.reason || null,
+        checkedAtMs: parsed.checkedAtMs || null,
+      };
+    } catch {
+      // An unreadable gate is treated as blocking. Fail closed: the one thing
+      // worse than refusing to publish is publishing from a store whose health
+      // we cannot establish.
+      return { blocked: true, reason: 'HEALTH_GATE_UNREADABLE', checkedAtMs: null };
+    }
+  }
+
+  /** The current gate, for callers that want to report it. */
+  healthGate() {
+    this._assertOpen();
+    return this._readHealthGate();
+  }
+
+  /**
+   * Latch a health verdict.
+   *
+   * `reason` is required when blocking — a gate that cannot say why it is shut
+   * is one an operator will simply clear.
+   */
+  setHealthGate({ blocked, reason = null, details = null, now = Date.now() } = {}) {
+    this._assertOpen();
+    if (typeof blocked !== 'boolean') throw new TypeError('blocked must be a boolean');
+    if (blocked && (typeof reason !== 'string' || !reason.trim())) {
+      throw new TypeError('a blocking health gate requires a reason');
+    }
+    const value = canonicalStringify({
+      blocked,
+      reason: blocked ? reason : null,
+      details,
+      checkedAtMs: now,
+    });
+    this.db.prepare(`
+      INSERT INTO workflow_metadata (key, value_json, updated_at_ms)
+      VALUES ('health_gate', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms
+    `).run(value, now);
+    return this._readHealthGate();
+  }
+
+  // ── Backup ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Take an online backup of the database, verify it, and rotate old copies.
+   *
+   * Uses SQLite's backup API rather than copying the file: a plain copy of a WAL
+   * database while it is open produces a torn snapshot that looks fine until the
+   * day it is needed. The copy is then REOPENED and quick_check'd, because an
+   * unverified backup is a belief, not a backup.
+   *
+   * Media is not copied here. The blobs are content-addressed and immutable, and
+   * duplicating hundreds of megabytes on every backup would itself become the
+   * growth problem this is meant to bound; the manifest records which blobs the
+   * snapshot expects so a restore can report exactly what is missing.
+   */
+  async backup({ dir = null, keep = 5, now = Date.now(), label = null } = {}) {
+    this._assertOpen();
+    if (!Number.isInteger(keep) || keep < 1) throw new TypeError('keep must be a positive integer');
+
+    const backupDir = dir || path.join(this.rootDir, 'backups');
+    fs.mkdirSync(backupDir, { recursive: true });
+    const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
+    const name = `workflow-${stamp}${label ? `-${label}` : ''}.sqlite`;
+    const target = path.join(backupDir, name);
+
+    // Fold the WAL back in first so the snapshot is as complete as possible.
+    try { this.checkpoint('PASSIVE'); } catch { /* a busy checkpoint is not fatal */ }
+    await this.db.backup(target);
+
+    let verified = false;
+    let verifyError = null;
+    let itemCount = null;
+    let Database = null;
+    try {
+      Database = require('better-sqlite3');
+      const copy = new Database(target, { readonly: true, fileMustExist: true });
+      try {
+        const quick = copy.pragma('quick_check', { simple: true });
+        itemCount = copy.prepare('SELECT COUNT(*) n FROM workflow_items').get().n;
+        const live = this.db.prepare('SELECT COUNT(*) n FROM workflow_items').get().n;
+        // The live count may legitimately have moved on while the backup ran;
+        // it must never be SHORT of what the snapshot claims to hold.
+        verified = quick === 'ok' && itemCount <= live;
+        if (!verified) verifyError = `quick_check=${quick} items=${itemCount} live=${live}`;
+      } finally {
+        copy.close();
+      }
+    } catch (error) {
+      verified = false;
+      verifyError = error.message;
+    }
+
+    if (!verified) {
+      // A backup that does not verify is worse than none: it invites a restore
+      // from a file that cannot be restored. Remove it and report the failure.
+      try { fs.rmSync(target, { force: true }); } catch { /* best effort */ }
+      return { ok: false, path: null, verified: false, error: verifyError, rotated: [] };
+    }
+
+    const stat = fs.statSync(target);
+    const sha256 = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+    fs.writeFileSync(`${target}.json`, canonicalStringify({
+      createdAtMs: now,
+      sqliteBytes: stat.size,
+      sha256,
+      itemCount,
+      mediaBlobs: this.db.prepare('SELECT COUNT(*) n FROM media_blobs').get().n,
+      schemaVersion: (this.db.prepare(
+        `SELECT value_json AS value FROM workflow_metadata WHERE key = 'schema_version'`
+      ).get() || {}).value || null,
+    }));
+
+    // Rotation, newest-first. Only files this method wrote are ever considered.
+    const rotated = [];
+    const existing = fs.readdirSync(backupDir)
+      .filter((f) => /^workflow-.*\.sqlite$/.test(f))
+      .map((f) => ({ f, mtime: fs.statSync(path.join(backupDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const old of existing.slice(keep)) {
+      try {
+        fs.rmSync(path.join(backupDir, old.f), { force: true });
+        fs.rmSync(path.join(backupDir, `${old.f}.json`), { force: true });
+        rotated.push(old.f);
+      } catch { /* best effort */ }
+    }
+
+    this.db.prepare(`
+      INSERT INTO workflow_metadata (key, value_json, updated_at_ms)
+      VALUES ('last_backup', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms
+    `).run(canonicalStringify({ path: target, sha256, bytes: stat.size, atMs: now }), now);
+
+    return { ok: true, path: target, bytes: stat.size, sha256, itemCount, verified: true, rotated };
+  }
+
+  /** When the last verified backup was taken, or null. */
+  lastBackup() {
+    this._assertOpen();
+    const row = this.db
+      .prepare(`SELECT value_json AS value FROM workflow_metadata WHERE key = 'last_backup'`)
+      .get();
+    if (!row || !row.value) return null;
+    try { return JSON.parse(row.value); } catch { return null; }
+  }
+
+  // ── Retention ──────────────────────────────────────────────────────────────
+
+  /**
+   * Bound the growth of finished work without losing what the app still needs.
+   *
+   * Every published post left behind its row, its dispatch attempts and four
+   * event rows, forever: measured at ~7.4 KB and 4 events per post, a modest
+   * 100 posts/day install reaches roughly half a gigabyte and 292,000 event
+   * rows in two years, and every startup reconciliation and every dedup read
+   * pays for it.
+   *
+   * What is dropped is the audit BULK — events, attempt records, resolution
+   * blobs. What is kept is the knowledge: the published text, when it went out
+   * and its URL move into `archived_items`, so the semantic dedup corpus is
+   * unaffected and the operator can still prove a post was published.
+   *
+   * Only terminal states are eligible, and only past the cutoff. Nothing that
+   * still owes an outcome — queued, deferred, leased, dispatch_started,
+   * ambiguous — is touched at any age.
+   */
+  applyRetention({
+    olderThanMs = 90 * 86_400_000,
+    now = Date.now(),
+    limit = 5000,
+    states = ['published', 'discarded', 'dead'],
+  } = {}) {
+    this._assertOpen();
+    if (!Number.isInteger(olderThanMs) || olderThanMs < 86_400_000) {
+      throw new TypeError('olderThanMs must be at least one day');
+    }
+    const eligible = states.filter((s) => ['published', 'discarded', 'dead'].includes(s));
+    if (eligible.length === 0) throw new TypeError('no eligible retention states');
+    const cutoffMs = now - olderThanMs;
+
+    return this.db.transaction(() => {
+      const placeholders = eligible.map(() => '?').join(',');
+      const rows = this.db.prepare(`
+        SELECT id, state, payload_json, published_at_ms, updated_at_ms, current_attempt_id
+        FROM workflow_items
+        WHERE state IN (${placeholders})
+          AND updated_at_ms <= ?
+        ORDER BY updated_at_ms ASC
+        LIMIT ?
+      `).all(...eligible, cutoffMs, limit);
+
+      if (rows.length === 0) {
+        return { archived: 0, eventsDeleted: 0, attemptsDeleted: 0, cutoffMs, reclaimedMediaRefs: 0 };
+      }
+
+      // workflow_items.current_attempt_id and dispatch_attempts.item_id point at
+      // each other, so there is no delete order that satisfies both. Deferring
+      // the checks to COMMIT is the standard resolution: by then BOTH rows are
+      // gone, so nothing dangles. The pragma resets itself at end of
+      // transaction, so it cannot leak into anything else.
+      this.db.pragma('defer_foreign_keys = ON');
+
+      // Open the two append-only retention gates for the duration of this
+      // transaction only. Both are cleared in the finally below, so a throw
+      // cannot leave the audit tables deletable.
+      this.db.prepare(`
+        INSERT INTO workflow_metadata (key, value_json, updated_at_ms)
+        VALUES ('workflow_events_prune_cutoff', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms
+      `).run(canonicalStringify({ cutoffMs: now }), now);
+      this.db.prepare(`
+        INSERT INTO workflow_metadata (key, value_json, updated_at_ms)
+        VALUES ('item_media_prune_gate', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms
+      `).run(canonicalStringify({ active: 1 }), now);
+
+      try {
+        const insertArchive = this.db.prepare(`
+          INSERT OR IGNORE INTO archived_items
+            (id, state, text, published_at_ms, archived_at_ms, external_url)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        const delEvents = this.db.prepare('DELETE FROM workflow_events WHERE item_id = ?');
+        const delAttempts = this.db.prepare('DELETE FROM dispatch_attempts WHERE item_id = ?');
+        const delItemMedia = this.db.prepare('DELETE FROM item_media WHERE item_id = ?');
+        const delItem = this.db.prepare('DELETE FROM workflow_items WHERE id = ?');
+        const lastUrl = this.db.prepare(`
+          SELECT external_url FROM dispatch_attempts
+          WHERE item_id = ? AND external_url IS NOT NULL
+          ORDER BY created_at_ms DESC LIMIT 1
+        `);
+
+        let eventsDeleted = 0;
+        let attemptsDeleted = 0;
+        let reclaimedMediaRefs = 0;
+        for (const row of rows) {
+          let text = '';
+          try { text = (JSON.parse(row.payload_json) || {}).text || ''; } catch { text = ''; }
+          const url = (lastUrl.get(row.id) || {}).external_url || null;
+          insertArchive.run(row.id, row.state, text, row.published_at_ms, now, url);
+          eventsDeleted += delEvents.run(row.id).changes;
+          reclaimedMediaRefs += delItemMedia.run(row.id).changes;
+          delItem.run(row.id);
+          attemptsDeleted += delAttempts.run(row.id).changes;
+        }
+
+        return {
+          archived: rows.length,
+          eventsDeleted,
+          attemptsDeleted,
+          reclaimedMediaRefs,
+          cutoffMs,
+        };
+      } finally {
+        this.db.prepare(`DELETE FROM workflow_metadata WHERE key = 'workflow_events_prune_cutoff'`).run();
+        this.db.prepare(`DELETE FROM workflow_metadata WHERE key = 'item_media_prune_gate'`).run();
+      }
+    })();
+  }
+
+  /**
+   * Published texts that have been archived out of the live table.
+   *
+   * The dedup corpus must span these too, or retention would quietly make the
+   * app willing to republish everything older than the cutoff.
+   */
+  listArchivedTexts({ limit = 5000, after = null } = {}) {
+    this._assertOpen();
+    const rows = after
+      ? this.db.prepare(`
+          SELECT id, text, archived_at_ms FROM archived_items
+          WHERE state = 'published' AND text <> ''
+            AND (archived_at_ms > ? OR (archived_at_ms = ? AND id > ?))
+          ORDER BY archived_at_ms ASC, id ASC LIMIT ?
+        `).all(after.archivedAtMs, after.archivedAtMs, after.id, limit)
+      : this.db.prepare(`
+          SELECT id, text, archived_at_ms FROM archived_items
+          WHERE state = 'published' AND text <> ''
+          ORDER BY archived_at_ms ASC, id ASC LIMIT ?
+        `).all(limit);
+    return rows.map((r) => ({ id: r.id, text: r.text, archivedAtMs: r.archived_at_ms }));
   }
 
   checkpoint(mode = 'TRUNCATE') {

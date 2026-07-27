@@ -22,6 +22,7 @@ const log = require('../utils/logger');
 const { WorkflowStore } = require('./workflowStore');
 const { migrateLegacyWorkflow } = require('./workflowMigration');
 const { listProfilesOrdered, profileDataDir } = require('./profileRegistry');
+const storeHealth = require('./storeHealth');
 
 const SHARED_DIR = path.join(os.homedir(), '.config', 'x-poster-shared');
 
@@ -56,6 +57,29 @@ async function getStore() {
       store.reconcileStartup({ requestId: `startup:${Date.now()}` });
       store.reclaimExpiredLeases({ requestId: `startup-reclaim:${Date.now()}` });
       cachedStore = store;
+
+      // Health, then backup, then retention — in that order, and awaited, so
+      // the first lease of this session cannot happen before the gate has been
+      // evaluated. Publishing from a store nobody has checked is exactly the
+      // hole this closes.
+      try {
+        const maintenance = await storeHealth.runStartupMaintenance(store);
+        if (maintenance.health.blocked) {
+          log.error(`Durable store is unhealthy — publishing is blocked: ${maintenance.health.blocking.join('; ')}`);
+        } else if (maintenance.health.warnings.length) {
+          log.info(`Durable store warnings: ${maintenance.health.warnings.join('; ')}`);
+        }
+      } catch (error) {
+        // A maintenance failure must not open the gate. If we cannot establish
+        // health, we do not know it is safe to publish.
+        log.error('Startup store maintenance failed:', error?.message || error);
+        try {
+          store.setHealthGate({ blocked: true, reason: `MAINTENANCE_FAILED: ${error?.message || error}` });
+        } catch (gateError) {
+          log.error('Could not latch the health gate:', gateError?.message || gateError);
+        }
+      }
+
       return store;
     })();
     storePromise.catch(() => { storePromise = null; });
@@ -249,6 +273,22 @@ async function getPublishedTexts() {
     cursor = { updatedAtMs: last.updatedAtMs, id: last.id };
     if (page.length < 500) break;
   }
+
+  // Retention moves finished work out of the live table to bound growth. The
+  // dedup corpus must follow it there, or every post older than the retention
+  // cutoff silently becomes eligible to be generated and published again.
+  let archivedCursor = null;
+  for (;;) {
+    const page = store.listArchivedTexts({ limit: 500, after: archivedCursor });
+    if (page.length === 0) break;
+    for (const row of page) {
+      if (row.text.trim()) texts.push(row.text);
+    }
+    const last = page[page.length - 1];
+    archivedCursor = { archivedAtMs: last.archivedAtMs, id: last.id };
+    if (page.length < 500) break;
+  }
+
   return texts;
 }
 
@@ -288,7 +328,64 @@ async function addPosts(newPosts, _profileName) {
 }
 
 /**
- * Delete by text, addressed against live state.
+ * Delete the rows the operator selected, addressed by id.
+ *
+ * This is the path the queue screen uses. Deleting by text discarded EVERY row
+ * carrying that text, so selecting one of two identical posts removed both and
+ * the count returned to the UI was not the count of what was asked for.
+ *
+ * `expectedRevision` pins each deletion to the row as it was rendered. An item
+ * that has since been leased or crossed the dispatch boundary is reported
+ * blocked, never silently claimed as deleted — that post may still go out.
+ */
+async function bulkDeleteByIds(descriptors) {
+  const store = await getStore();
+  const list = Array.isArray(descriptors) ? descriptors : [];
+  let deleted = 0;
+  const blocked = [];
+
+  for (const entry of list) {
+    const id = typeof entry === 'string' ? entry : (entry && entry.id);
+    const expectedRevision = typeof entry === 'object' && entry && Number.isInteger(entry.expectedRevision)
+      ? entry.expectedRevision
+      : null;
+    if (typeof id !== 'string' || !id.trim()) {
+      blocked.push({ id: String(id), reason: 'MISSING_ID' });
+      continue;
+    }
+    const row = store.db
+      .prepare('SELECT state, revision FROM workflow_items WHERE id = ?')
+      .get(id);
+    if (!row) { blocked.push({ id, reason: 'ITEM_NOT_FOUND' }); continue; }
+    if (row.state !== 'queued' && row.state !== 'deferred') {
+      blocked.push({ id, reason: `IN_FLIGHT_${row.state.toUpperCase()}`, state: row.state });
+      continue;
+    }
+    if (expectedRevision !== null && row.revision !== expectedRevision) {
+      blocked.push({ id, reason: 'REVISION_CONFLICT', state: row.state });
+      continue;
+    }
+    try {
+      store.discardQueued({
+        id,
+        expectedRevision: row.revision,
+        requestId: `bulk-delete-id:${id}:${row.revision}`,
+      });
+      deleted += 1;
+    } catch (error) {
+      blocked.push({ id, reason: error.code || 'CONFLICT' });
+    }
+  }
+
+  return { deleted, blocked, remaining: readAllQueuedItems(store).length };
+}
+
+/**
+ * Delete EVERY row carrying one of these texts.
+ *
+ * Deliberately a bulk operation, and named as one. The per-row delete in the UI
+ * goes through bulkDeleteByIds — this exists for clear-all style callers and
+ * for scripts that only have a text.
  *
  * A queued item is discarded into a non-resurrectable tombstone. An item that
  * is already leased or past the dispatch boundary is NOT silently reported as
@@ -333,11 +430,17 @@ async function bulkDeleteByText(texts) {
  * `pending` are items that crossed the irreversible boundary with an unknown
  * outcome — they may or may not be live on X, so only the user can decide.
  * `deadLetters` are items that failed before the boundary and never went out.
+ *
+ * Both carry `id` and `revision`. Those are not decoration: they are the only
+ * way the operator's click can name the row they were actually looking at.
  */
 async function getRecoveryItems(_profileName) {
   const store = await getStore();
   const pending = store.listRecovery().map((item) => ({
     id: item.id,
+    revision: item.revision,
+    state: item.state,
+    kind: 'pending',
     text: textOf(item),
     reason: item.reason,
     profileName: item.lastProfile ? item.lastProfile.name : null,
@@ -347,6 +450,9 @@ async function getRecoveryItems(_profileName) {
   }));
   const deadLetters = readAllItems(store, ['dead']).map((item) => ({
     id: item.id,
+    revision: item.revision,
+    state: item.state,
+    kind: 'dead',
     text: textOf(item),
     reason: item.reason,
     error: item.error,
@@ -355,67 +461,195 @@ async function getRecoveryItems(_profileName) {
   return { pending, deadLetters };
 }
 
+// ── Identity-addressed mutations ─────────────────────────────────────────────
+//
+// Every mutation below names its target by the durable UUID, optionally pinned
+// to the revision the operator saw.
+//
+// The previous versions took the post TEXT and resolved it with
+// `.find(item => textOf(item) === postText)`. Text is not an identity. Two rows
+// may legally hold the same text — the enqueue dedup spans the backlog and the
+// unresolved states but not `dead`, and requeueing a dead row whose text is
+// already queued produces a matching pair — and `.find` returns whichever the
+// scan reaches first, which is not the row under the operator's cursor. The
+// observed result was a requeue reported as successful while a DIFFERENT post
+// went back into the queue and the clicked one stayed dead.
+//
+// These return a typed result rather than a boolean. `false` told the UI
+// nothing: "not found", "already resolved by another window" and "wrong state"
+// all collapsed into one silent failure.
+
+function failure(reason, code = null, extra = {}) {
+  return { ok: false, reason, code, ...extra };
+}
+
 /**
- * Put a recovery item back in the queue.
+ * Map a store conflict onto a result the UI can explain, without losing it.
+ *
+ * The original error rides along on `.error` so the text wrappers can keep
+ * their historical contract of propagating conflicts — a caller that expects
+ * CONFIRMATION_REQUIRED to throw must not silently receive `false` instead.
+ * Anything that is not a typed store conflict is a bug, and is rethrown.
+ */
+function fromConflict(error) {
+  if (error && error.code) {
+    return { ...failure(error.message, error.code), error };
+  }
+  throw error;
+}
+
+/** Look up one item by id, restricted to the states this action may touch. */
+async function findAddressed(id, states) {
+  const store = await getStore();
+  if (typeof id !== 'string' || !id.trim()) return { store, item: null, reason: 'MISSING_ID' };
+  const row = store.db
+    .prepare('SELECT state FROM workflow_items WHERE id = ?')
+    .get(id);
+  if (!row) return { store, item: null, reason: 'ITEM_NOT_FOUND' };
+  if (!states.includes(row.state)) {
+    return { store, item: null, reason: 'INVALID_STATE', state: row.state };
+  }
+  const item = readAllItems(store, [row.state]).find((i) => i.id === id);
+  return { store, item: item || null, reason: item ? null : 'ITEM_NOT_FOUND' };
+}
+
+/**
+ * Put one recovery item back in the queue, addressed by id.
  *
  * For an ambiguous item this REQUIRES the user to confirm it was not published,
  * because requeueing something already live on X duplicates it irreversibly.
  */
-async function requeueRecovery(_profileName, kind, postText, options = {}) {
-  const store = await getStore();
+async function requeueRecoveryById({ id, kind, expectedRevision = null, options = {} } = {}) {
   const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
-  // Paged, and deliberately so: an unresolved ambiguous item blocks publishing
-  // for EVERY profile, so one that fell outside the old 500-row window could
-  // never be resolved from the UI and the whole app stayed wedged.
-  const match = readAllItems(store, states).find((item) => textOf(item) === postText);
-  if (!match) return false;
-
-  if (kind === 'dead') {
-    store.requeueTerminal({
-      id: match.id,
-      expectedRevision: match.revision,
-      requestId: `requeue-dead:${match.id}:${match.revision}`,
-    });
-    return true;
+  const { store, item, reason, state } = await findAddressed(id, states);
+  if (!item) return failure(reason, reason, { id, state: state || null });
+  if (expectedRevision !== null && item.revision !== expectedRevision) {
+    return failure('REVISION_CONFLICT', 'REVISION_CONFLICT', { id, revision: item.revision });
   }
 
-  store.resolveRecovery({
-    id: match.id,
-    action: 'requeue',
-    confirmedNotPublished: options.confirmedNotPublished === true,
-    evidence: options.evidence || null,
-    requestId: `requeue-ambiguous:${match.id}:${match.revision}`,
-  });
-  return true;
+  try {
+    if (kind === 'dead') {
+      store.requeueTerminal({
+        id: item.id,
+        expectedRevision: item.revision,
+        requestId: `requeue-dead:${item.id}:${item.revision}`,
+      });
+    } else {
+      store.resolveRecovery({
+        id: item.id,
+        action: 'requeue',
+        confirmedNotPublished: options.confirmedNotPublished === true,
+        evidence: options.evidence || null,
+        expectedRevision: item.revision,
+        requestId: `requeue-ambiguous:${item.id}:${item.revision}`,
+      });
+    }
+  } catch (error) {
+    return fromConflict(error);
+  }
+  return { ok: true, id: item.id };
+}
+
+/**
+ * Close one recovery item, addressed by id.
+ *
+ * A dead letter never crossed the boundary, so it is tombstoned as `discarded`.
+ * An ambiguous item MAY be live on X, so it is closed as reviewed rather than
+ * deleted — its attempt and evidence stay on the record.
+ */
+async function discardRecoveryById({ id, kind, expectedRevision = null } = {}) {
+  const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
+  const { store, item, reason, state } = await findAddressed(id, states);
+  if (!item) return failure(reason, reason, { id, state: state || null });
+  if (expectedRevision !== null && item.revision !== expectedRevision) {
+    return failure('REVISION_CONFLICT', 'REVISION_CONFLICT', { id, revision: item.revision });
+  }
+
+  try {
+    if (kind === 'dead') {
+      store.discardQueued({
+        id: item.id,
+        expectedRevision: item.revision,
+        requestId: `discard-dead:${item.id}:${item.revision}`,
+      });
+    } else {
+      store.resolveRecovery({
+        id: item.id,
+        action: 'close',
+        evidence: { closedBy: 'user' },
+        expectedRevision: item.revision,
+        requestId: `discard-recovery:${item.id}:${item.revision}`,
+      });
+    }
+  } catch (error) {
+    return fromConflict(error);
+  }
+  return { ok: true, id: item.id };
+}
+
+/** Confirm one ambiguous item really was published, with proof, addressed by id. */
+async function confirmRecoveryPublishedById({ id, proof = {}, expectedRevision = null } = {}) {
+  const { store, item, reason, state } = await findAddressed(id, ['ambiguous']);
+  if (!item) return failure(reason, reason, { id, state: state || null });
+  if (expectedRevision !== null && item.revision !== expectedRevision) {
+    return failure('REVISION_CONFLICT', 'REVISION_CONFLICT', { id, revision: item.revision });
+  }
+  if (!item.currentAttemptId) {
+    return failure('NO_OPEN_ATTEMPT', 'NO_OPEN_ATTEMPT', { id: item.id });
+  }
+
+  try {
+    store.markPublished({
+      attemptId: item.currentAttemptId,
+      externalId: proof.externalId || null,
+      externalUrl: proof.externalUrl || null,
+      evidence: { confirmed: true, source: 'manual_operator_check', ...proof },
+      requestId: `confirm-published:${item.id}:${item.revision}`,
+    });
+  } catch (error) {
+    return fromConflict(error);
+  }
+  return { ok: true, id: item.id };
+}
+
+// ── Text-addressed wrappers ──────────────────────────────────────────────────
+//
+// Kept for callers that legitimately have only a text (scripts, migrations,
+// tests), but they now REFUSE an ambiguous text instead of guessing. If two
+// rows carry the same text there is no answer to "which one did you mean", and
+// picking the first was the defect.
+
+async function resolveUniqueByText(states, postText) {
+  const store = await getStore();
+  const matches = readAllItems(store, states).filter((item) => textOf(item) === postText);
+  if (matches.length === 0) return { id: null, reason: 'ITEM_NOT_FOUND' };
+  if (matches.length > 1) return { id: null, reason: 'AMBIGUOUS_TEXT', count: matches.length };
+  return { id: matches[0].id, reason: null };
+}
+
+/** Boolean contract, with store conflicts propagating as they always did. */
+function unwrap(result) {
+  if (result.ok) return true;
+  if (result.error) throw result.error;
+  return false;
+}
+
+async function requeueRecovery(_profileName, kind, postText, options = {}) {
+  const { id } = await resolveUniqueByText(kind === 'dead' ? ['dead'] : ['ambiguous'], postText);
+  if (!id) return false;
+  return unwrap(await requeueRecoveryById({ id, kind, options }));
 }
 
 async function discardRecovery(_profileName, kind, postText) {
-  const store = await getStore();
-  const states = kind === 'dead' ? ['dead'] : ['ambiguous'];
-  const match = readAllItems(store, states).find((item) => textOf(item) === postText);
-  if (!match) return false;
-  store.resolveRecovery({
-    id: match.id,
-    action: 'close',
-    evidence: { closedBy: 'user' },
-    requestId: `discard-recovery:${match.id}:${match.revision}`,
-  });
-  return true;
+  const { id } = await resolveUniqueByText(kind === 'dead' ? ['dead'] : ['ambiguous'], postText);
+  if (!id) return false;
+  return unwrap(await discardRecoveryById({ id, kind }));
 }
 
-/** Confirm an ambiguous item really was published, with proof. */
 async function confirmRecoveryPublished(postText, proof = {}) {
-  const store = await getStore();
-  const match = store.listRecovery().find((item) => textOf(item) === postText);
-  if (!match || !match.currentAttemptId) return false;
-  store.markPublished({
-    attemptId: match.currentAttemptId,
-    externalId: proof.externalId || null,
-    externalUrl: proof.externalUrl || null,
-    evidence: { confirmed: true, source: 'manual_operator_check', ...proof },
-    requestId: `confirm-published:${match.id}:${match.revision}`,
-  });
-  return true;
+  const { id } = await resolveUniqueByText(['ambiguous'], postText);
+  if (!id) return false;
+  return unwrap(await confirmRecoveryPublishedById({ id, proof }));
 }
 
 // ── Maintenance ──────────────────────────────────────────────────────────────
@@ -442,6 +676,30 @@ async function runMaintenance() {
 async function integrityCheck() {
   const store = await getStore();
   return store.integrityCheck();
+}
+
+/** Full health verdict, and the latch beginDispatch actually reads. */
+async function checkHealth({ verifyMedia = true } = {}) {
+  const store = await getStore();
+  return storeHealth.evaluate(store, { verifyMedia });
+}
+
+/** The cheap re-check a run must pass before it may publish anything. */
+async function gateBeforeRun(options = {}) {
+  const store = await getStore();
+  return storeHealth.gateBeforeRun(store, options);
+}
+
+/** Take a verified backup now, on the operator's request. */
+async function backupNow(options = {}) {
+  const store = await getStore();
+  return store.backup(options);
+}
+
+/** Apply the retention policy now, on the operator's request. */
+async function applyRetention(options = {}) {
+  const store = await getStore();
+  return store.applyRetention(options);
 }
 
 async function countUnresolved() {
@@ -473,13 +731,21 @@ module.exports = {
   UNRESOLVED_STATES,
   getPublishedTexts,
   addPosts,
+  bulkDeleteByIds,
   bulkDeleteByText,
   getRecoveryItems,
+  requeueRecoveryById,
+  discardRecoveryById,
+  confirmRecoveryPublishedById,
   requeueRecovery,
   discardRecovery,
   confirmRecoveryPublished,
   runMaintenance,
   integrityCheck,
+  checkHealth,
+  gateBeforeRun,
+  backupNow,
+  applyRetention,
   countUnresolved,
   toLegacyEntry,
   textOf,

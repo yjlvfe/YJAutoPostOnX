@@ -60,7 +60,12 @@
 
 ## 🚀 التشغيل
 
-> **المتطلبات:** Node.js v18+ — يعمل على Linux وmacOS وWindows
+> **المتطلبات:** Node.js v20+ — يعمل على Linux وmacOS وWindows
+>
+> ⚠️ `better-sqlite3` وحدة أصلية مبنية لـ **ABI الخاص بـ Electron** (`NODE_MODULE_VERSION 123`)،
+> لا لـ Node العادي. لذلك تُشغَّل الاختبارات عبر Electron نفسه
+> (`ELECTRON_RUN_AS_NODE=1 electron …` وهو ما يفعله `npm test`)، ولا تُشغَّل بـ `node` مباشرة.
+> بعد أي `npm install` أو `npm ci` شغّل `npm run rebuild:electron` لإعادة بناء الوحدات الأصلية.
 
 <div dir="ltr">
 

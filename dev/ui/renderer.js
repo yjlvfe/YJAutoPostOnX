@@ -17,7 +17,11 @@ let state = {
   outputFolder: '',
   isRunning: false,
   queue: [],       // raw queue from backend (shape preserved for start-posting)
-  queueView: [],   // display items: { id, index, text, media }
+  // display items keyed by the store's durable id:
+  // { id, revision, state, text, media, notBeforeMs, waitingMs, deferReason, attempts }
+  queueView: [],
+  queueCounts: null,        // { queued, deferred, leased, unresolved, backlog, readyNow }
+  queueUnavailable: false,  // a failed read is NOT an empty queue
   stats: { success: 0, failed: 0 },
   generated: [],   // last AI batch (array of strings) — cumulative preview
 };
@@ -651,6 +655,27 @@ function buildQueueRow(item) {
   const textCell = document.createElement('span');
   textCell.className = 'q-text';
   textCell.title = item.text.length > 400 ? item.text.slice(0, 400) + '…' : item.text;
+
+  // Why this row is not going out. A deferred post used to be invisible: the
+  // queue said empty, the operator added it again, and both copies published.
+  if (item.state && item.state !== 'queued') {
+    const meta = QUEUE_STATE_LABELS[item.state] || { label: item.state, title: item.state };
+    const badge = document.createElement('span');
+    badge.className = `q-state q-state--${item.state}`;
+    const wait = item.state === 'deferred' && item.waitingMs > 0
+      ? ` · ${formatWait(item.waitingMs)}`
+      : '';
+    badge.textContent = `${meta.label}${wait}`;
+    badge.title = [
+      meta.title,
+      item.deferReason ? `السبب: ${item.deferReason}` : null,
+      item.attempts ? `محاولات سابقة: ${item.attempts}` : null,
+      item.notBeforeMs ? `متاح في: ${new Date(item.notBeforeMs).toLocaleString('ar')}` : null,
+    ].filter(Boolean).join('\n');
+    textCell.appendChild(badge);
+    textCell.appendChild(document.createTextNode(' '));
+  }
+
   if (item.media) {
     const m = document.createElement('span');
     m.className = 'q-media';
@@ -690,33 +715,120 @@ queueEmptyNote.textContent = 'الطابور فارغ — استورد CSV أو 
 $('queue-list').appendChild(queueEmptyNote);
 
 async function loadQueue(profile) {
-  const raw = await window.api.getQueue(profile || profileSelect.value);
-  state.queue = Array.isArray(raw) ? raw : [];
-  const seq = ++_queueLoadSeq;
-  state.queueView = state.queue.map((p, i) => {
-    const isObj = p && typeof p === 'object';
-    return {
-      // `id` is for list bookkeeping only (selection + DOM keys) — never send it
-      // to the backend. Deliberately NO `index` field: a stored row position
-      // goes stale the moment publishing consumes a post, and deleting by a
-      // stale index removes the wrong post. Deletion addresses posts by `text`.
-      id: `q${seq}-${i}`,
-      text: isObj ? (p.text || '') : String(p ?? ''),
-      media: isObj ? (p.media_path || null) : null,
-    };
-  });
+  const view = await window.api.getQueueView();
+  _queueLoadSeq++;
+
+  if (!view || view.success !== true || !Array.isArray(view.items)) {
+    // A failed read must NOT render as an empty queue. That is the lie that
+    // makes the operator add every post again; the backlog they cannot see is
+    // still there and both copies eventually publish.
+    addLog(`❌ تعذر قراءة الطابور: ${(view && view.error) || 'خطأ غير معروف'} — العرض قد يكون قديمًا`, 'error');
+    state.queueUnavailable = true;
+    queueEmptyNote.textContent = '⚠️ تعذّر قراءة الطابور — لا تفترض أنه فارغ. أعد المحاولة قبل إضافة منشورات.';
+    queueEmptyNote.classList.remove('hidden');
+    return;
+  }
+
+  state.queueUnavailable = false;
+  queueEmptyNote.textContent = 'الطابور فارغ — استورد CSV أو ولّد تغريدات من الاستوديو.';
+  state.queueCounts = view.counts || null;
+  // The durable row IS the identity. Selection, deletion and DOM keys all use
+  // the store's UUID plus the revision this render saw, so a click can never
+  // land on a different row than the one drawn — and a click on a list that has
+  // moved on is refused instead of applied to whatever is there now.
+  state.queueView = view.items.map((item) => ({
+    id: item.id,
+    revision: item.revision,
+    state: item.state,
+    text: item.text || '',
+    media: item.media || null,
+    notBeforeMs: item.notBeforeMs,
+    waitingMs: item.waitingMs,
+    deferReason: item.deferReason,
+    attempts: item.attempts || 0,
+  }));
+  state.queue = state.queueView.map((v) => (v.media ? { text: v.text, media_path: v.media } : v.text));
+
   qSelection.clear(); // معرفات جديدة بعد كل تحميل
   queueList.setItems(state.queueView);
   queueEmptyNote.classList.toggle('hidden', state.queueView.length > 0);
   updateQueueCounters();
   updateSelectionUI();
+  await renderStoreHealth();
   await loadRecoveryItems(profile || profileSelect.value);
+}
+
+/**
+ * Show the durable store's health, and above all whether publishing is BLOCKED.
+ *
+ * The backend has always been able to answer this and nothing asked. When the
+ * integrity gate is shut, every run refuses at the boundary — an operator with
+ * no explanation sees posts that simply never go out.
+ */
+async function renderStoreHealth() {
+  const host = $('store-health');
+  if (!host) return;
+  let health;
+  try {
+    health = await window.api.workflowHealth();
+  } catch (e) {
+    health = { success: false, error: e.message };
+  }
+  host.replaceChildren();
+  host.className = 'store-health';
+
+  if (!health || health.success !== true) {
+    host.classList.add('store-health--blocked');
+    host.textContent = `⚠️ تعذّر فحص حالة المخزن الدائم: ${(health && health.error) || 'خطأ غير معروف'}`;
+    return;
+  }
+  if (health.blocked) {
+    host.classList.add('store-health--blocked');
+    host.textContent = `🛑 النشر متوقف — المخزن الدائم لم يجتز فحص السلامة: ${health.blocking.join(' · ')}`;
+    return;
+  }
+  const bits = [];
+  if (health.warnings.length) bits.push(`⚠️ ${health.warnings.join(' · ')}`);
+  bits.push(health.lastBackupAtMs
+    ? `آخر نسخة احتياطية: ${new Date(health.lastBackupAtMs).toLocaleString('ar')}`
+    : 'لا توجد نسخة احتياطية بعد');
+  if (Number.isFinite(health.dbBytes)) {
+    bits.push(`حجم القاعدة: ${(health.dbBytes / 1048576).toFixed(1)} م.ب`);
+  }
+  host.textContent = `✅ المخزن الدائم سليم — ${bits.join(' · ')}`;
+  if (health.warnings.length) host.classList.add('store-health--warn');
+}
+
+/** Arabic label + tooltip explaining why a backlog row is not going out. */
+const QUEUE_STATE_LABELS = {
+  queued: { label: 'جاهز', title: 'جاهز للنشر الآن' },
+  deferred: { label: 'مؤجل', title: 'فشلت محاولة سابقة — ينتظر انقضاء مهلة إعادة المحاولة' },
+  leased: { label: 'قيد التجهيز', title: 'محجوز بواسطة جلسة نشر جارية' },
+};
+
+function formatWait(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return 'الآن';
+  const totalSec = Math.ceil(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h} س ${m} د`;
+  if (m > 0) return `${m} د ${s} ث`;
+  return `${s} ث`;
 }
 
 async function loadRecoveryItems(profile) {
   const host = $('recovery-list');
   host.replaceChildren();
   const result = await window.api.getRecoveryItems(profile || profileSelect.value);
+  if (result && result.success === false) {
+    // Same rule as the queue: a failed read is not an empty list.
+    const failed = document.createElement('div');
+    failed.className = 'recovery-empty';
+    failed.textContent = `⚠️ تعذّر قراءة قائمة الاستعادة (${result.error || 'خطأ غير معروف'}) — لا تفترض أنها فارغة.`;
+    host.appendChild(failed);
+    return;
+  }
   const items = [
     ...(result.pending || []).map(item => ({ ...item, kind: 'pending', label: 'بانتظار التحقق' })),
     ...(result.deadLetters || []).map(item => ({ ...item, kind: 'dead', label: 'فشل نهائي' })),
@@ -739,34 +851,94 @@ async function loadRecoveryItems(profile) {
     text.textContent = item.text || '';
     const actions = document.createElement('span');
     actions.className = 'recovery-actions';
+    // The durable identity of the row THIS button was drawn for, pinned to the
+    // revision on screen. Sending the text instead meant the store resolved it
+    // with a first-match scan, so a click could requeue or close a different
+    // post that happened to carry the same words — while the UI reported
+    // success for the one under the cursor.
+    const target = { id: item.id, kind: item.kind, expectedRevision: item.revision };
+
     const retry = document.createElement('button');
     retry.className = 'btn btn--secondary btn--sm';
     retry.textContent = 'إعادة للطابور';
     retry.addEventListener('click', async () => {
-      const r = await window.api.requeueRecoveryItem(profile, item.kind, item.text);
+      // A 'pending' item crossed the irreversible boundary: it may already be
+      // live on X. Requeueing it needs an explicit human statement, not a
+      // silent default.
+      let options = {};
+      if (item.kind === 'pending') {
+        if (!confirm(
+          'هذا المنشور تجاوز نقطة اللا-رجعة وقد يكون منشوراً بالفعل على X.\n\n'
+          + 'تحقق من الحساب أولاً. اضغط موافق فقط إذا تأكدت أنه لم يُنشر — '
+          + 'وإلا فسيُنشر مرتين.'
+        )) return;
+        options = { confirmedNotPublished: true };
+      }
+      const r = await window.api.requeueRecoveryItem(target, options);
       addLog(r.success ? '↩️ أُعيد المنشور للطابور' : `❌ ${r.error || 'تعذرت الاستعادة'}`, r.success ? 'success' : 'error');
       await loadQueue(profile);
     });
     const discard = document.createElement('button');
     discard.className = 'btn btn--danger btn--sm';
-    discard.textContent = 'حذف';
+    discard.textContent = item.kind === 'dead' ? 'حذف' : 'إغلاق المراجعة';
     discard.addEventListener('click', async () => {
-      if (!confirm('حذف هذا العنصر نهائياً من قائمة الاستعادة؟')) return;
-      const r = await window.api.discardRecoveryItem(profile, item.kind, item.text);
-      addLog(r.success ? '🗑️ حُذف عنصر الاستعادة' : `❌ ${r.error || 'تعذر الحذف'}`, r.success ? 'warning' : 'error');
+      const prompt = item.kind === 'dead'
+        ? 'حذف هذا العنصر نهائياً من قائمة الاستعادة؟'
+        : 'إغلاق المراجعة لهذا العنصر؟ سيبقى سجل المحاولة محفوظاً ولن يُعاد نشره.';
+      if (!confirm(prompt)) return;
+      const r = await window.api.discardRecoveryItem(target);
+      addLog(r.success ? '🗑️ أُغلق عنصر الاستعادة' : `❌ ${r.error || 'تعذر الحذف'}`, r.success ? 'warning' : 'error');
       await loadRecoveryItems(profile);
     });
     actions.append(retry, discard);
+
+    // Only an ambiguous item can be confirmed published — a dead letter never
+    // crossed the boundary, so there is nothing on X to confirm.
+    if (item.kind === 'pending') {
+      const confirmPub = document.createElement('button');
+      confirmPub.className = 'btn btn--secondary btn--sm';
+      confirmPub.textContent = 'تم نشره فعلاً';
+      confirmPub.addEventListener('click', async () => {
+        const url = window.prompt('ألصق رابط التغريدة على X كإثبات (اختياري لكنه مُستحسن):', '');
+        if (url === null) return;
+        const r = await window.api.confirmRecoveryPublished(
+          { id: item.id, kind: 'pending', expectedRevision: item.revision },
+          url.trim() ? { externalUrl: url.trim() } : {},
+        );
+        addLog(r.success ? '✅ سُجّل المنشور كمنشور فعلاً' : `❌ ${r.error || 'تعذر التأكيد'}`, r.success ? 'success' : 'error');
+        await loadRecoveryItems(profile);
+      });
+      actions.appendChild(confirmPub);
+    }
     row.append(kind, text, actions);
     host.appendChild(row);
   }
 }
 
+/**
+ * Counters report the BACKLOG, and say how much of it is ready.
+ *
+ * A single number that only counted claimable rows read "0" while deferred
+ * posts were waiting out their backoff, so the operator queued them a second
+ * time. The badge now carries everything outstanding; the queue screen breaks
+ * it down so "ready now" is still visible.
+ */
 function updateQueueCounters() {
-  const n = state.queue.length;
-  navQueueBadge.textContent = n;
-  mQueue.textContent = n;
-  queueTotalNum.textContent = n;
+  const counts = state.queueCounts;
+  const total = counts ? counts.backlog : state.queueView.length;
+  navQueueBadge.textContent = total;
+  mQueue.textContent = total;
+  queueTotalNum.textContent = total;
+
+  const breakdown = $('queue-breakdown');
+  if (!breakdown) return;
+  if (!counts) { breakdown.textContent = ''; return; }
+  const parts = [`جاهز الآن: ${counts.readyNow}`];
+  if (counts.deferred > 0) parts.push(`مؤجل: ${counts.deferred}`);
+  if (counts.leased > 0) parts.push(`قيد التجهيز: ${counts.leased}`);
+  if (counts.unresolved > 0) parts.push(`⚠️ بانتظار تحقق يدوي: ${counts.unresolved}`);
+  breakdown.textContent = parts.join(' · ');
+  breakdown.classList.toggle('queue-breakdown--blocked', counts.unresolved > 0);
 }
 
 function updateSelectionUI() {
@@ -788,23 +960,50 @@ $('select-all').addEventListener('change', (e) => {
   updateSelectionUI();
 });
 
+/**
+ * Report a deletion honestly.
+ *
+ * Asking for N and getting back fewer is not an error to hide: the difference
+ * is rows that were leased or already past the dispatch boundary, and those
+ * posts may still go out. Saying "deleted N" regardless was the lie.
+ */
+function reportDeletion(requested, result) {
+  if (!result) {
+    addLog('❌ تعذر تنفيذ الحذف — لم يُحذف أي منشور', 'error');
+    return;
+  }
+  if (result.deleted > 0) {
+    addLog(`🗑️ حُذف ${result.deleted} من ${requested} منشور`, 'warning');
+  }
+  for (const b of result.blocked || []) {
+    addLog(`⛔ لم يُحذف منشور (${b.reason}) — قد يكون قيد النشر الآن`, 'error');
+  }
+  if (result.deleted === 0 && (!result.blocked || result.blocked.length === 0)) {
+    addLog('⚠️ لم يُحذف أي منشور — ربما تغيّرت القائمة، أعد التحميل', 'warning');
+  }
+}
+
+/** Descriptor for a row exactly as it was rendered: id + the revision we saw. */
+const toDescriptor = (v) => ({ id: v.id, expectedRevision: v.revision });
+
 async function deleteQueueItem(id) {
   // ⚡ H7: capture the profile at call time so a profile switch mid-await
   // doesn't delete or reload the wrong queue.
   const profile = profileSelect.value;
   const item = state.queueView.find(v => v.id === id);
   if (!item) return;
-  await window.api.bulkDelete([item.text], profile);
+  const result = await window.api.bulkDelete([toDescriptor(item)]);
+  reportDeletion(1, result);
   await loadQueue(profile);
 }
 
 $('btn-delete-selected').addEventListener('click', async () => {
   if (!qSelection.size) { addLog('لم تحدد أي منشور', 'warning'); return; }
   const profile = profileSelect.value;
-  const texts = state.queueView.filter(v => qSelection.has(v.id)).map(v => v.text);
-  await window.api.bulkDelete(texts, profile);
+  const targets = state.queueView.filter(v => qSelection.has(v.id)).map(toDescriptor);
+  const result = await window.api.bulkDelete(targets);
+  reportDeletion(targets.length, result);
   await loadQueue(profile);
-  addLog(`🗑️ حُذف ${texts.length} منشور`, 'warning');
 });
 
 // import CSV (two buttons share logic)

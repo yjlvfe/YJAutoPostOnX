@@ -107,6 +107,18 @@ class DurableSession {
     return durableQueue.readAllQueuedItems(this.store).length;
   }
 
+  /**
+   * Everything still outstanding — what the operator's counter must show.
+   *
+   * Distinct from queuedCount() on purpose. The publisher's loop cares about
+   * what it may claim right now; the operator's counter must include posts that
+   * are merely waiting out a backoff or held by another worker, or the display
+   * drops to 0 while work remains and the natural response is to add it again.
+   */
+  backlogCount() {
+    return durableQueue.readAllBacklogItems(this.store).length;
+  }
+
   /** Items awaiting a human decision — publishing is blocked while > 0. */
   unresolvedCount() {
     return this.store.countUnresolvedRecovery();

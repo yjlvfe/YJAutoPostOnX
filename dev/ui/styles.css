@@ -602,6 +602,39 @@ input[type="checkbox"] {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .q-media { margin-inline-start: var(--space-2); }
+
+/* شارة حالة الصف: لماذا لا يخرج هذا المنشور الآن */
+.q-state {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  margin-inline-end: var(--space-2);
+  border-radius: var(--radius-pill, 999px);
+  font-size: var(--fs-xs); font-weight: var(--fw-bold);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  white-space: nowrap;
+}
+.q-state--deferred { color: var(--warn, #d08700); border-color: currentColor; }
+.q-state--leased   { color: var(--accent, #3b82f6); border-color: currentColor; }
+
+.queue-breakdown {
+  font-size: var(--fs-xs); color: var(--text-1);
+  direction: rtl;
+}
+.queue-breakdown--blocked { color: var(--danger, #dc2626); font-weight: var(--fw-bold); }
+
+/* حالة المخزن الدائم — بوابة السلامة */
+.store-health {
+  flex-shrink: 0;
+  font-size: var(--fs-xs); color: var(--text-1);
+  padding: var(--space-1) 0;
+}
+.store-health--warn { color: var(--warn, #d08700); }
+.store-health--blocked {
+  color: var(--danger, #dc2626);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-sm);
+}
 .q-len {
   font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-1);
   text-align: center; direction: ltr;
