@@ -12,3 +12,4 @@ dist/
 *.AppImage
 .opencode/\ngraphify-out/
 .opencode/\ngraphify-out/\n*.log
+graphify-out/
