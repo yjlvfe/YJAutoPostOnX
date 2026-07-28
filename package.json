@@ -47,6 +47,7 @@
   "build": {
     "appId": "com.yj.autopostonx",
     "productName": "YJAutoPostOnX",
+    "publish": null,
     "directories": {
       "output": "dist"
     },
