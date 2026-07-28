@@ -2,6 +2,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const { launchBrowser } = require('./browserManager');
 const { DurableSession } = require('./durableSession');
+const durableQueue = require('./durableQueue');
 const { profileDataDir } = require('./profileRegistry');
 const { ReportEngine } = require('./reportEngine');
 const rateLimitStore = require('./rateLimitStore');
@@ -406,6 +407,32 @@ async function start(config, onStatus) {
     // store opened, so anything left mid-flight by a previous process has been
     // resolved into a durable state before we claim anything.
     session = await DurableSession.open(profileName);
+
+    // The durable store must be healthy BEFORE a browser is launched.
+    //
+    // integrityCheck() existed but nothing consulted it: a store that failed
+    // its own check kept handing out leases and kept committing dispatches, so
+    // the app published from a database it already knew was damaged. The gate
+    // is re-evaluated here rather than trusted from startup, because damage —
+    // a full disk, a corrupted media file — arrives while the app is running.
+    const gate = await durableQueue.gateBeforeRun();
+    if (!gate.allowed) {
+      onStatus({
+        type: 'error',
+        message: `🛑 النشر متوقف: قاعدة البيانات الدائمة لم تجتز فحص السلامة (${gate.reason}). راجع النسخة الاحتياطية قبل المتابعة.`,
+      });
+      return {
+        status: 'refused',
+        reason: 'store_unhealthy',
+        detail: gate.reason,
+        successCount: 0,
+        failCount: 0,
+      };
+    }
+    if (gate.warnings.length) {
+      onStatus({ type: 'warning', message: `⚠️ تحذيرات المخزن الدائم: ${gate.warnings.join(' · ')}` });
+    }
+
     const unresolvedAtStart = session.unresolvedCount();
     if (unresolvedAtStart > 0) {
       onStatus({
@@ -487,7 +514,7 @@ async function start(config, onStatus) {
       onStatus({
         type: 'action',
         message: progressMessage,
-        queueCount: session.queuedCount(),
+        queueCount: session.backlogCount(),
         stats: liveStats()
       });
 
@@ -1064,7 +1091,7 @@ async function start(config, onStatus) {
       onStatus({ 
         type: statusType, 
         message: statusMessage,
-        queueCount: session.queuedCount(),
+        queueCount: session.backlogCount(),
         stats: liveStats()
       });
 

@@ -45,7 +45,20 @@ function normalizeUrl(url) {
 
 /**
  * Validate a single post against the active referral link & toggle state.
- * 
+ *
+ * DELIBERATELY NOT ON THE PUBLISH PATH, and that is not an oversight.
+ *
+ * It once ran inside the publisher, where a LINK_MISMATCH verdict dead-lettered
+ * the post mid-run: a configuration mistake silently destroyed queue entries
+ * one at a time while the run reported progress. Publishing must not make
+ * content judgements — it either sends what was queued or refuses before the
+ * boundary, and the operator decides.
+ *
+ * So this is a STUDIO/authoring tool: callers validate before enqueueing, when
+ * a rejection costs nothing. `test/publish-decoupling.test.js` pins the
+ * separation by asserting xPoster.js contains no call to it — if you are adding
+ * one, that test is the argument you have to answer first.
+ *
  * @param {string} postText - The fully rendered post text
  * @param {string} [sessionLink] - Optional override link (uses ReferralService if omitted)
  * @returns {{ valid: boolean, reason?: string, detectedUrls: string[], diagnostics: object }}

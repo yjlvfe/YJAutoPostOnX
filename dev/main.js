@@ -425,25 +425,46 @@ ipcMain.handle('get-queue', async (event, profileName) => {
   }
 });
 
-ipcMain.handle('get-queue-state', async () => {
+/**
+ * The queue screen's view: every outstanding row with its durable identity and
+ * the reason it is not going out yet.
+ *
+ * `get-queue` returns the legacy text/media shape and cannot say WHY a row is
+ * waiting or WHICH row it is. A post whose attempt failed sits in `deferred`
+ * until its backoff elapses; the operator saw nothing, assumed it was lost, and
+ * added it again. Sending state, the eligible-at time and the defer reason is
+ * what makes the counter stop lying.
+ *
+ * `counts` is split so "0 ready" can never be rendered as "0 total".
+ */
+ipcMain.handle('get-queue-view', async () => {
   try {
-    const [items, counts, integrity, unresolved] = await Promise.all([
+    const [items, counts] = await Promise.all([
       durableQueue.getQueueDetailed(),
       durableQueue.getBacklogCounts(),
-      durableQueue.integrityCheck({ verifyMedia: false }),
-      durableQueue.countUnresolved(),
     ]);
-    return { success: true, items, counts, integrity, unresolved };
-  } catch (error) {
     return {
-      success: false,
-      error: error?.message || 'تعذر قراءة مخزن العمل',
-      code: error?.code || 'WORKFLOW_READ_FAILED',
-      items: [],
-      counts: null,
-      integrity: error?.health || null,
-      unresolved: null,
+      success: true,
+      counts,
+      items: items.map((item) => ({
+        id: item.id,
+        revision: item.revision,
+        state: item.state,
+        text: (item.payload && item.payload.text) || '',
+        media: item.media && item.media.length
+          ? (item.media[0].managedPath || item.media[0].originalPath)
+          : null,
+        notBeforeMs: item.notBeforeMs,
+        waitingMs: item.waitingMs,
+        deferReason: item.deferReason,
+        attempts: item.attempts,
+      })),
     };
+  } catch (e) {
+    console.error('get-queue-view IPC error:', e?.message || e);
+    // An exception must not present as an empty queue — that is the same lie in
+    // a different shape, and the operator's next move is to add the posts again.
+    return { success: false, error: e?.message || 'unknown error', items: null, counts: null };
   }
 });
 
@@ -487,80 +508,132 @@ ipcMain.handle('add-posts', async (event, newPosts, profileName) => {
   }
 });
 
-// Destructive operations use durable UUID + expected revision + request ID.
-ipcMain.handle('bulk-delete', async (_event, mutations) => {
+// Deletes by durable id, not by row position and not by text.
+//
+// A position captured when the UI last loaded the list goes stale the moment
+// publishing consumes a post. Text is no better: two rows may carry the same
+// text, so deleting "the post that says X" removed both when the operator had
+// selected one, and the returned count did not describe what they asked for.
+// The renderer already holds the id and revision of every row it drew.
+ipcMain.handle('bulk-delete', async (_event, descriptors) => {
+  // 🔒 C3: try/catch on all IPC handlers — never crash the main process.
   try {
-    if (!Array.isArray(mutations)) throw new Error('mutations must be an array');
-    return await durableQueue.bulkDeleteById(mutations);
-  } catch (error) {
-    return { deleted: 0, blocked: [], error: error?.message || 'unknown error', code: error?.code || null };
+    if (!Array.isArray(descriptors)) return null;
+    // Deletion is authoritative: an item already leased or past the dispatch
+    // boundary is reported as blocked rather than silently claimed as deleted,
+    // because that post may still go out.
+    return await durableQueue.bulkDeleteByIds(descriptors);
+  } catch (e) {
+    console.error('bulk-delete IPC error:', e?.message || e);
+    return null;
   }
 });
 
 ipcMain.handle('get-recovery-items', async (_event, profileName) => {
   try { return { success: true, ...(await durableQueue.getRecoveryItems(profileName || 'Default')) }; }
-  catch (error) {
-    return { success: false, error: error.message, code: error.code || null, pending: [], deadLetters: [] };
-  }
+  catch (e) { return { success: false, error: e.message, pending: [], deadLetters: [] }; }
 });
 
-ipcMain.handle('recovery-confirm-published', async (_event, mutation, proof) => {
-  try { return { success: await durableQueue.confirmPublished(mutation, proof || {}) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
-});
+/**
+ * Recovery mutations are addressed by the durable id the renderer was given,
+ * pinned to the revision it rendered.
+ *
+ * They used to take the post TEXT. Two rows may legally carry the same text, so
+ * the lookup returned whichever row came first and the operator's click landed
+ * on a post they were not looking at — while the UI reported success for the
+ * one they clicked. `kind` is still validated, because it decides whether the
+ * row is treated as pre-boundary (deletable) or possibly-live (reviewable).
+ */
+function readRecoveryTarget(descriptor) {
+  const target = descriptor && typeof descriptor === 'object' ? descriptor : {};
+  const { id, kind, expectedRevision } = target;
+  if (typeof id !== 'string' || !id.trim()) throw new Error('طلب غير صالح: معرّف العنصر مفقود');
+  if (!['pending', 'dead'].includes(kind)) throw new Error('طلب غير صالح: نوع العنصر غير معروف');
+  return {
+    id: id.trim(),
+    kind,
+    expectedRevision: Number.isInteger(expectedRevision) ? expectedRevision : null,
+  };
+}
 
-ipcMain.handle('recovery-confirm-not-published', async (_event, mutation, acknowledgement) => {
+/** Turn a typed durableQueue result into the {success,...} shape the UI reads. */
+function toIpcResult(result) {
+  if (result && result.ok === true) return { success: true, id: result.id || null };
+  return {
+    success: false,
+    error: (result && result.reason) || 'تعذر تنفيذ الطلب',
+    code: (result && result.code) || null,
+    state: (result && result.state) || null,
+  };
+}
+
+ipcMain.handle('requeue-recovery-item', async (_event, descriptor, options) => {
   try {
-    return {
-      success: await durableQueue.confirmNotPublishedAndRequeue(mutation, acknowledgement || {}),
-    };
-  } catch (error) { return { success: false, error: error.message, code: error.code || null }; }
+    const target = readRecoveryTarget(descriptor);
+    // A 'pending' item crossed the irreversible boundary with an unknown
+    // outcome. Requeueing it without the user confirming it was NOT published
+    // would post it twice, so the store demands explicit confirmation.
+    return toIpcResult(await durableQueue.requeueRecoveryById({ ...target, options: options || {} }));
+  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
 });
 
-ipcMain.handle('recovery-requeue-dead', async (_event, mutation) => {
-  try { return { success: await durableQueue.requeueDead(mutation) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
-});
-
-ipcMain.handle('recovery-discard-dead', async (_event, mutation) => {
-  try { return { success: await durableQueue.discardDead(mutation) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
-});
-
-// Backward-compatible channels fail safely and still require explicit evidence.
-ipcMain.handle('requeue-recovery-item', async (_event, profileName, kind, identity, options) => {
-  try { return { success: await durableQueue.requeueRecovery(profileName, kind, identity, options || {}) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
-});
-ipcMain.handle('confirm-recovery-published', async (_event, identity, proof) => {
-  try { return { success: await durableQueue.confirmRecoveryPublished(identity, proof || {}) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
-});
-ipcMain.handle('discard-recovery-item', async (_event, profileName, kind, identity) => {
-  try { return { success: await durableQueue.discardRecovery(profileName, kind, identity) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
-});
-
-ipcMain.handle('workflow-health', async () => {
+ipcMain.handle('confirm-recovery-published', async (_event, descriptor, proof) => {
   try {
-    const [integrity, unresolved, backups, counts] = await Promise.all([
-      durableQueue.integrityCheck(),
+    const target = readRecoveryTarget({ kind: 'pending', ...(descriptor || {}) });
+    return toIpcResult(await durableQueue.confirmRecoveryPublishedById({
+      id: target.id, expectedRevision: target.expectedRevision, proof: proof || {},
+    }));
+  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
+});
+
+ipcMain.handle('discard-recovery-item', async (_event, descriptor) => {
+  try {
+    return toIpcResult(await durableQueue.discardRecoveryById(readRecoveryTarget(descriptor)));
+  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
+});
+
+/**
+ * Store health for the operator, including the gate that blocks publishing.
+ *
+ * This handler existed and nothing in the UI called it, so the one thing the
+ * operator most needs to know — that publishing is currently refused because
+ * the durable store failed its integrity check — was reachable only from a
+ * debugger. The gate, the last verified backup and the warnings are all
+ * reported here so the queue screen can say it out loud.
+ *
+ * `verifyMedia` defaults to false: hashing every managed media file is a
+ * startup/between-runs cost, not something a UI refresh should pay.
+ */
+ipcMain.handle('workflow-health', async (_event, options) => {
+  try {
+    const verifyMedia = !!(options && options.verifyMedia);
+    const [health, unresolved] = await Promise.all([
+      durableQueue.checkHealth({ verifyMedia }),
       durableQueue.countUnresolved(),
-      durableQueue.listWorkflowSnapshots(),
-      durableQueue.getBacklogCounts(),
     ]);
-    return { success: true, integrity, unresolved, backups, counts };
-  } catch (error) {
-    return { success: false, error: error.message, code: error.code || null, health: error.health || null };
-  }
+    return {
+      success: true,
+      unresolved,
+      blocked: health.blocked,
+      blocking: health.blocking,
+      warnings: health.warnings,
+      dbBytes: health.dbBytes,
+      walBytes: health.walBytes,
+      freeBytes: health.freeBytes,
+      lastBackupAtMs: health.lastBackupAtMs,
+      integrity: health.integrity,
+    };
+  } catch (e) { return { success: false, error: e.message }; }
 });
 
-ipcMain.handle('create-workflow-backup', async () => {
-  try { return { success: true, snapshot: await durableQueue.createWorkflowSnapshot({ force: true }) }; }
-  catch (error) { return { success: false, error: error.message, code: error.code || null }; }
+/** Take a verified backup on demand. */
+ipcMain.handle('workflow-backup', async () => {
+  try { return { success: true, ...(await durableQueue.backupNow({})) }; }
+  catch (e) { return { success: false, error: e.message }; }
 });
 
 let automationRunning = false;
+
 ipcMain.handle('start-posting', async (event, config) => {
   // Fail closed. After a fatal fault this process is on its way down and its
   // in-memory state is not trustworthy enough to own an irreversible action.
@@ -569,16 +642,6 @@ ipcMain.handle('start-posting', async (event, config) => {
   }
   if (stopInProgress) {
     return { success: false, error: 'جارٍ إيقاف تشغيل سابق — انتظر حتى يكتمل.', code: 'STOP_IN_PROGRESS' };
-  }
-  try {
-    await durableQueue.assertHealthy();
-  } catch (error) {
-    return {
-      success: false,
-      error: 'فشل فحص سلامة مخزن العمل. أُوقف النشر لحماية الطابور؛ افتح فحص الصحة أو استعد نسخة احتياطية.',
-      code: error.code || 'WORKFLOW_HEALTH_FAILED',
-      health: error.health || null,
-    };
   }
   if (automationRunning) {
     mainWindow.webContents.send('status-update', { type: 'warning', message: 'Automation already running' });

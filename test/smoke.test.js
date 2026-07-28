@@ -30,6 +30,11 @@ const path = require('path');
 const os = require('os');
 const SANDBOX = path.join(os.tmpdir(), `xposter-smoke-${process.pid}-${Date.now()}`);
 os.homedir = () => SANDBOX;
+// Belt-and-suspenders: os.homedir() itself reads process.env.HOME live, so
+// setting this too means isolation doesn't depend solely on every caller
+// having picked up the monkey-patched function reference (module-load
+// ordering, a require() that ran before this line, etc.).
+process.env.HOME = SANDBOX;
 fs.mkdirSync(SANDBOX, { recursive: true });
 process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {} });
 const { app } = require('electron');

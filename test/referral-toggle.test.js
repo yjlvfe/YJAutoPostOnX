@@ -24,6 +24,7 @@ const os = require('os');
 const STRESS_DIR = path.join(os.tmpdir(), 'xposter-referral-toggle-test-' + Date.now());
 const origHomedir = os.homedir;
 os.homedir = () => STRESS_DIR;
+process.env.HOME = STRESS_DIR; // belt-and-suspenders: see smoke.test.js for why
 
 // Clear cache for clean imports
 delete require.cache[require.resolve('../dev/automation/referralService')];

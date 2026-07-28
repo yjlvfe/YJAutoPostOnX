@@ -1,0 +1,48 @@
+{
+  "name": "puppeteer-extra-plugin-user-data-dir",
+  "version": "2.4.1",
+  "description": "Custom user data directory for puppeteer.",
+  "main": "index.js",
+  "repository": "berstend/puppeteer-extra",
+  "author": "berstend",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.14"
+  },
+  "keywords": [
+    "puppeteer",
+    "puppeteer-extra",
+    "puppeteer-extra-plugin",
+    "user-data",
+    "userDataDir",
+    "profile",
+    "chrome",
+    "headless",
+    "pupeteer"
+  ],
+  "dependencies": {
+    "debug": "^4.1.1",
+    "fs-extra": "^10.0.0",
+    "puppeteer-extra-plugin": "^3.2.3"
+  },
+  "peerDependencies": {
+    "playwright-extra": "*",
+    "puppeteer-extra": "*"
+  },
+  "peerDependenciesMeta": {
+    "puppeteer-extra": {
+      "optional": true
+    },
+    "playwright-extra": {
+      "optional": true
+    }
+  },
+  "xposterVendorPatch": {
+    "reason": "GHSA-mh99-v99m-4gvg: drop the rimraf@^3.0.2 dependency (-> glob@7 -> minimatch@3 -> brace-expansion@1.1.16, unbounded brace-expansion DoS) in favor of node's built-in fs.rm, which has offered the same recursive/force/retry contract since Node 14.14.",
+    "upstreamVersion": "2.4.1",
+    "upstreamVerifiedLatest": true,
+    "publicApiChanged": false,
+    "patchedFile": "index.js",
+    "originalLicensePreserved": "LICENSE"
+  }
+}

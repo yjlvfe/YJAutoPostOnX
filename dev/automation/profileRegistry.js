@@ -28,6 +28,21 @@ function assertSafeProfileName(name, { allowDefault = true } = {}) {
     throw new Error('اسم البروفايل يحتوي على مسار غير مسموح');
   }
   if (path.basename(value) !== value) throw new Error('اسم البروفايل غير صالح');
+  // Glob metacharacters are rejected, not escaped.
+  //
+  // The profile name becomes a filesystem path that reaches glob/minimatch
+  // through puppeteer-extra-plugin-user-data-dir -> rimraf on teardown. Those
+  // carry an unfixable brace-expansion advisory (GHSA-mh99-v99m-4gvg: DoS via
+  // unbounded brace expansion) — the patched 5.0.8 exports an object where
+  // minimatch@3 calls a function, so it cannot be overridden into this chain,
+  // and npm's only other remedy is a semver-major downgrade of the stealth
+  // plugin that changes publishing behaviour.
+  //
+  // This closes the one route by which a name could reach it. `a{b,c}` is also
+  // an ambiguous thing to name a directory, so nothing legitimate is lost.
+  if (/[{}[\]*?!()]/.test(value)) {
+    throw new Error('اسم البروفايل يحتوي على رموز غير مسموحة: { } [ ] * ? ! ( )');
+  }
   return value;
 }
 

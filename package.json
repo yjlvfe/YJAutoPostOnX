@@ -1,19 +1,20 @@
 {
   "name": "YJAutoPostOnX",
-  "version": "5.20.0",
+  "version": "5.21.0",
   "description": "Automated posting tool for X.com (Twitter) — AI tweet generation, CSV-based scheduling, Playwright automation",
   "main": "dev/main.js",
   "scripts": {
     "start": "electron .",
     "build:linux": "electron-builder --linux AppImage",
     "build-deploy": "electron-builder --linux AppImage",
-    "audit": "node -e \"const {runAudit,printReport}=require('./dev/security/auditor');printReport(runAudit());\"",
+    "audit": "node -e \"const {runAudit,printReport}=require('./dev/security/auditor');const r=runAudit();printReport(r);process.exit(r.status==='FAIL'?1:0);\"",
     "postinstall": "electron-builder install-app-deps",
     "rebuild:electron": "electron-builder install-app-deps",
     "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron test/run-all.js",
     "test:baseline": "cross-env ELECTRON_RUN_AS_NODE=1 XPOSTER_TEST_SCOPE=baseline electron test/run-all.js",
     "test:workflow": "cross-env ELECTRON_RUN_AS_NODE=1 XPOSTER_TEST_SCOPE=workflow electron test/run-all.js",
-    "test:electron": "xvfb-run -a electron --no-sandbox test/smoke.test.js && xvfb-run -a electron --no-sandbox test/ipc-generation.test.js && xvfb-run -a electron --no-sandbox test/full-ui.test.js"
+    "test:electron": "xvfb-run -a electron --no-sandbox test/smoke.test.js && xvfb-run -a electron --no-sandbox test/ipc-generation.test.js && xvfb-run -a electron --no-sandbox test/full-ui.test.js",
+    "test:live": "xvfb-run -a electron --no-sandbox test/list-models.test.js"
   },
   "keywords": [
     "electron",
@@ -23,22 +24,30 @@
     "ubuntu"
   ],
   "author": "Antigravity",
-  "license": "ISC",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
-    "better-sqlite3": "12.4.1",
+    "better-sqlite3": "13.0.1",
     "csv-parser": "^3.0.0",
-    "playwright": "^1.43.0",
+    "playwright": "^1.62.0",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "puppeteer-extra-plugin-user-data-dir": "file:vendor/puppeteer-extra-plugin-user-data-dir"
   },
   "devDependencies": {
     "cross-env": "10.1.0",
-    "electron": "30.0.0",
-    "electron-builder": "^24.13.3"
+    "electron": "42.7.1",
+    "electron-builder": "^26.15.3"
+  },
+  "overrides": {
+    "puppeteer-extra-plugin-user-data-dir": "file:vendor/puppeteer-extra-plugin-user-data-dir"
   },
   "build": {
     "appId": "com.yj.autopostonx",
     "productName": "YJAutoPostOnX",
+    "publish": null,
     "directories": {
       "output": "dist"
     },
@@ -55,8 +64,5 @@
       "target": "AppImage",
       "category": "Utility"
     }
-  },
-  "allowScripts": {
-    "electron@30.0.0": true
   }
 }

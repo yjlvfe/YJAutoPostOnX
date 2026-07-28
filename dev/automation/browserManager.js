@@ -7,23 +7,49 @@ const { resolveProfilePath } = require('./profileRegistry');
 
 /**
  * Chromium's Linux sandbox needs its `chrome-sandbox` helper to be a setuid-root
- * binary (mode 4755, owner root) — Electron places it next to the running
- * executable (node_modules/electron/dist in dev, or the app dir once packaged).
+ * binary (mode 4755, owner root), sitting next to the browser executable.
  * Without that bit, requesting the sandbox doesn't just make things "less safe":
- * Chromium refuses to launch at all. electron-builder/AppImage packaging does
- * NOT set the setuid bit on its own (it stays 0755, unprivileged), so this must
- * be checked at runtime rather than assumed from "not running as root" — the
- * real-world desktop user this exists to protect is exactly who'd hit a broken
- * launch if we assumed wrong.
+ * Chromium refuses to launch at all.
+ *
+ * The helper must be looked up next to the browser we are ABOUT TO LAUNCH.
+ *
+ * This used to inspect `path.dirname(process.execPath)` — Electron's own
+ * chrome-sandbox — and then apply the verdict to a completely different
+ * process. Playwright launches either system Chrome (/usr/bin/google-chrome) or
+ * its bundled Chromium under ~/.cache/ms-playwright/chromium-NNNN/chrome-linux64,
+ * each shipping its own helper with independent permissions. Measured here:
+ * Electron's helper is 0755 non-setuid while Playwright's bundled Chromium has
+ * no helper at all. Reading one to decide for the other is wrong in both
+ * directions — it can leave the sandbox on when the target cannot start (the
+ * run dies at browser launch), or silently disable it when the target was fine.
  */
-function sandboxHelperIsSetuidRoot() {
+function sandboxHelperIsSetuidRoot(executablePath) {
   if (process.platform !== 'linux') return true; // no SUID helper involved on win/mac
+  if (!executablePath) return false;             // unknown target — assume unusable
   try {
-    const helperPath = path.join(path.dirname(process.execPath), 'chrome-sandbox');
+    const helperPath = path.join(path.dirname(executablePath), 'chrome-sandbox');
     const st = fs.statSync(helperPath);
     return st.uid === 0 && (st.mode & 0o4000) !== 0;
   } catch (e) {
     return false; // helper missing/unreadable — assume sandbox unusable
+  }
+}
+
+/**
+ * The browser binary Playwright will actually start.
+ *
+ * `executablePath` when we pinned one, otherwise Playwright's own bundled
+ * Chromium. Resolving this is what makes the sandbox check meaningful; if we
+ * cannot resolve it we return null and the caller fails safe.
+ */
+function resolveBrowserExecutable(explicitPath) {
+  if (explicitPath) return explicitPath;
+  try {
+    // playwright-extra proxies executablePath() through to playwright itself.
+    const resolved = chromium.executablePath();
+    return resolved || null;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -59,11 +85,8 @@ function getLaunchOptions(browserName) {
       '--disable-blink-features=AutomationControlled'
     ],
   };
-  const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-  if (process.platform === 'linux' && (runningAsRoot || !sandboxHelperIsSetuidRoot())) {
-    opts.args.unshift('--no-sandbox', '--disable-setuid-sandbox');
-  }
-
+  // Pick the executable FIRST. The sandbox decision depends on which binary
+  // launches, so it cannot be made before that binary is known.
   if (browserName === 'chrome') {
     const chromePath = detectChromePath();
     if (chromePath) {
@@ -74,6 +97,12 @@ function getLaunchOptions(browserName) {
     // ⚡ C8: if NO system Chrome is found we intentionally do NOT set
     // channel='chrome' — Playwright will fall back to its bundled
     // Chromium instead of crashing with a "channel not found" error.
+  }
+
+  const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const targetExecutable = resolveBrowserExecutable(opts.executablePath);
+  if (process.platform === 'linux' && (runningAsRoot || !sandboxHelperIsSetuidRoot(targetExecutable))) {
+    opts.args.unshift('--no-sandbox', '--disable-setuid-sandbox');
   }
 
   return opts;
@@ -109,4 +138,15 @@ async function openProfileForLogin(profileName) {
   }
 }
 
-module.exports = { launchBrowser, resolveProfilePath, openProfileForLogin };
+module.exports = {
+  launchBrowser,
+  resolveProfilePath,
+  openProfileForLogin,
+  // Exported so the sandbox decision is testable. It was not, which is how it
+  // went on inspecting the wrong binary: nothing could observe the verdict
+  // without actually launching a browser.
+  getLaunchOptions,
+  sandboxHelperIsSetuidRoot,
+  resolveBrowserExecutable,
+  detectChromePath,
+};

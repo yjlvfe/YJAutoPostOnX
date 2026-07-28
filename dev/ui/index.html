@@ -255,7 +255,12 @@
           <button id="btn-export-queue" class="btn btn--secondary">💾 تصدير CSV</button>
           <button id="btn-delete-selected" class="btn btn--danger">🗑️ حذف المحدد (<span id="selected-count">0</span>)</button>
           <span class="queue-total">الإجمالي: <b id="queue-total-num">0</b></span>
+          <!-- تفصيل المتراكم: "جاهز الآن" وحده كان يُقرأ كأن الطابور فارغ
+               بينما منشورات مؤجلة تنتظر انقضاء مهلة إعادة المحاولة -->
+          <span class="queue-breakdown" id="queue-breakdown"></span>
         </div>
+        <!-- حالة المخزن الدائم: بوابة السلامة توقف النشر، ويجب أن يراها المشغّل -->
+        <div class="store-health" id="store-health"></div>
         <div class="queue-card">
           <div class="qcols qhead">
             <span class="q-center"><input type="checkbox" id="select-all" title="تحديد الكل"></span>

@@ -15,6 +15,7 @@ process.env.HOME = home;
 process.env.USERPROFILE = home;
 const realHomedir = os.homedir;
 os.homedir = () => home;
+process.env.HOME = home; // belt-and-suspenders: see smoke.test.js for why
 
 const durableQueue = require('../dev/automation/durableQueue');
 const { DurableSession } = require('../dev/automation/durableSession');

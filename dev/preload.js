@@ -33,18 +33,32 @@ contextBridge.exposeInMainWorld('api', {
 
   // Queue operations
   getQueue: (profileName) => ipcRenderer.invoke('get-queue', profileName),
-  getQueueState: () => ipcRenderer.invoke('get-queue-state'),
+  // The queue screen's view: durable id + revision per row, plus the state and
+  // countdown that explain why a row is not going out. See main's
+  // 'get-queue-view'.
+  getQueueView: () => ipcRenderer.invoke('get-queue-view'),
   addPosts: (posts, profileName) => ipcRenderer.invoke('add-posts', posts, profileName),
-  bulkDelete: (mutations, profileName) => ipcRenderer.invoke('bulk-delete', mutations, profileName),
+  // Takes [{ id, expectedRevision }] — the durable identity of each row the
+  // renderer drew. Not an index (stale the moment publishing consumes a post)
+  // and not a text (two rows may share one, so deleting "the post that says X"
+  // removed both when one was selected). See durableQueue.bulkDeleteByIds.
+  bulkDelete: (descriptors) => ipcRenderer.invoke('bulk-delete', descriptors),
   getRecoveryItems: (profileName) => ipcRenderer.invoke('get-recovery-items', profileName),
-  confirmRecoveryPublished: (mutation, proof) =>
-    ipcRenderer.invoke('recovery-confirm-published', mutation, proof),
-  confirmRecoveryNotPublished: (mutation, acknowledgement) =>
-    ipcRenderer.invoke('recovery-confirm-not-published', mutation, acknowledgement),
-  requeueDeadRecovery: (mutation) => ipcRenderer.invoke('recovery-requeue-dead', mutation),
-  discardDeadRecovery: (mutation) => ipcRenderer.invoke('recovery-discard-dead', mutation),
-  workflowHealth: () => ipcRenderer.invoke('workflow-health'),
-  createWorkflowBackup: () => ipcRenderer.invoke('create-workflow-backup'),
+  // All three take { id, kind, expectedRevision } for the same reason: the
+  // operator's click must name the row they were looking at, and `revision`
+  // makes a click on a stale list refuse instead of applying to whatever the
+  // row has become.
+  //
+  // `options.confirmedNotPublished` is REQUIRED to requeue a 'pending' item:
+  // it crossed the irreversible boundary, so requeueing it without the user
+  // verifying on X would publish it twice.
+  requeueRecoveryItem: (target, options) =>
+    ipcRenderer.invoke('requeue-recovery-item', target, options),
+  confirmRecoveryPublished: (target, proof) =>
+    ipcRenderer.invoke('confirm-recovery-published', target, proof),
+  discardRecoveryItem: (target) => ipcRenderer.invoke('discard-recovery-item', target),
+  workflowHealth: (options) => ipcRenderer.invoke('workflow-health', options),
+  workflowBackup: () => ipcRenderer.invoke('workflow-backup'),
 
   // Automation control
   startPosting: (config) => ipcRenderer.invoke('start-posting', config),
@@ -86,7 +100,11 @@ contextBridge.exposeInMainWorld('api', {
   exportQueue: (filePath, profileName) => ipcRenderer.invoke('export-queue', filePath, profileName),
   getLogs: () => ipcRenderer.invoke('get-logs'),
   readLog: (logName) => ipcRenderer.invoke('read-log', logName),
-  exportLogsToCsv: (targetPath) => ipcRenderer.invoke('export-logs-to-csv', targetPath),
+  // `exportLogsToCsv` was removed. It invoked 'export-logs-to-csv', for which no
+  // handler has ever been registered, so every call could only reject with
+  // "No handler registered". A bridge entry that cannot succeed is not a
+  // feature waiting to be wired up — it is a surface that lies about what the
+  // app can do, and the next reader has to prove the negative to find out.
 
   // Security
   runAudit: () => ipcRenderer.invoke('run-audit'),
