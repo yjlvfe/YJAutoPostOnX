@@ -74,10 +74,18 @@ class TelegramTransport {
   }
   async sendMessage(chatId, text, extra = {}) {
     if (extra.rich_message) return this.sendRich({ chat_id: chatId, ...extra });
+    if (typeof text === 'string' && text.includes('<table')) {
+      const { parse_mode, ...rest } = extra;
+      return this.sendRich({ chat_id: chatId, rich_message: { html: text }, ...rest });
+    }
     return this.send({ chat_id: chatId, text, ...extra });
   }
   async editMessageText(chatId, messageId, text, extra = {}) {
     if (extra.rich_message) return this._editMessageText({ chat_id: chatId, message_id: messageId, ...extra });
+    if (typeof text === 'string' && text.includes('<table')) {
+      const { parse_mode, ...rest } = extra;
+      return this._editMessageText({ chat_id: chatId, message_id: messageId, rich_message: { html: text }, ...rest });
+    }
     return this._editMessageText({ chat_id: chatId, message_id: messageId, text, ...extra });
   }
   keyboard(page = 'main', customRows) {

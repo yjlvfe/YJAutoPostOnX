@@ -5,8 +5,7 @@ const fs = require('node:fs/promises');
 const { accountCapacity, quotaAdmission } = require('./quota');
 const { DEFAULT_SETTINGS, parseDuration, formatDuration } = require('./settings');
 const { TelegramFlows } = require('./telegramFlows');
-const { accountStatus } = require('./accountTable');
-const { preTable } = require('./tableUtils');
+const { preTable, richTable, accountStatus } = require('./accountTable');
 
 const formatHms = seconds => {
   if (!Number.isFinite(seconds)) return '-';
@@ -201,7 +200,7 @@ class TelegramUi {
     const settings = state.settings || {};
     const runIds = new Set(run.itemIds || []);
     const published = items.filter(x => runIds.has(x.id) && x.state === 'published').length;
-    const active = (state.accounts || []).filter(a => eligible(a) && ['فعال', 'نشط'].includes(accountStatus(a, accountCapacity(state, a, this.clock()), state.telegramUi?.accountChecks?.[a.id], this.clock()))).length;
+    const active = (state.accounts || []).filter(a => eligible(a) && accountStatus(a, accountCapacity(state, a, this.clock()), state.telegramUi?.accountChecks?.[a.id], this.clock()) === 'فعال').length;
     const next = cycleRunning(state) && state.posting?.nextPostAt ? new Date(state.posting.nextPostAt).getTime() : NaN;
     const countdown = Number.isFinite(next) ? durationText(Math.max(0, (next - new Date(this.clock()).getTime()) / 1000)) : '-';
     const running = cycleRunning(state);
@@ -217,8 +216,7 @@ class TelegramUi {
     }
     remaining += Math.min(unpinned, [...capacity.values()].reduce((a, b) => a + b, 0));
     const elapsed = running && state.cycle?.startedAt ? Math.max(0, Math.floor((new Date(this.clock()).getTime() - new Date(state.cycle.startedAt).getTime()) / 1000)) : 0;
-    const capacityExhausted = !running && state.cycle?.reason === 'daily_quota_exhausted' && quotaAdmission(state, { now: this.clock() }).exhausted;
-    const status = running ? `قيد التشغيل (منذ ${elapsed} ثانية)` : capacityExhausted ? 'متوقف — الكوتا اليومية ممتلئة' : 'متوقف';
+    const status = running ? `قيد التشغيل (منذ ${elapsed} ثانية)` : state.cycle?.reason === 'daily_quota_exhausted' ? 'متوقف — الكوتا اليومية ممتلئة' : 'متوقف';
     const delay = Math.max(15, ((settings.delayMinSeconds ?? 15) + (settings.delayMaxSeconds ?? 30)) / 2);
     const wait = Number.isFinite(next) ? Math.max(0, (next - new Date(this.clock()).getTime()) / 1000) : 0;
     const estimate = running ? durationText(remaining ? wait + Math.max(0, remaining - 1) * delay : 0) : '-';
@@ -226,13 +224,13 @@ class TelegramUi {
     const nextLine = Number.isFinite(publishing) ? `جاري النشر الآن... (${Math.max(0, Math.floor((new Date(this.clock()).getTime() - publishing) / 1000))} ث)` : countdown;
     const queueTotal = items.filter(x => x.state === 'pending').length;
 
-    return preTable(['القيمة', 'البند'], [
-      [status, 'حالة العمل'],
-      [String(queueTotal), 'المنشورات في الطابور'],
-      [String(published), 'المنشورات الناجحة'],
-      [`${active}/5`, 'الحسابات الفعالة'],
-      [nextLine, 'المنشور التالي بعد'],
-      [estimate, 'الوقت المقدر للانتهاء']
+    return richTable(['البند', 'القيمة'], [
+      ['حالة العمل', status],
+      ['المنشورات في الطابور', String(queueTotal)],
+      ['المنشورات الناجحة', String(published)],
+      ['الحسابات الفعالة', `${active}/5`],
+      ['المنشور التالي بعد', nextLine],
+      ['الوقت المقدر للانتهاء', estimate]
     ], 'لوحة التحكم والتشغيل');
   }
   async panel(id, force = false, fresh = false) {
@@ -242,7 +240,7 @@ class TelegramUi {
       let s = await this.bot.store.load(); let u = s.telegramUi?.users?.[id.key]; if (!u) return;
       const current = s.telegramUi?.dashboards?.[lockKey] || u.panel;
       const t = current?.token || token(); const text = await this.render(s);
-      const extra = { parse_mode: 'HTML', reply_markup: this.controls(s.cycle?.state, t) };
+      const extra = { rich_message: { html: text }, reply_markup: this.controls(s.cycle?.state, t) };
       const signature = JSON.stringify({ text, markup: extra.reply_markup });
       if (!force && current?.signature === signature) return;
       if (!fresh && current?.messageId) {

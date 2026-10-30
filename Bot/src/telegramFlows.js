@@ -84,7 +84,7 @@ class TelegramFlows {
     const labels = accounts.map((a, i) => a.username ? `@${clean(a.username)}` : String(i + 1));
     const rows = Array.from({ length: Math.ceil(labels.length / 3) }, (_, i) => labels.slice(i * 3, i * 3 + 3));
     rows.push(['إضافة حساب'], ['رجوع']);
-    return this.say(id, tableHtml, 'accounts', { parse_mode: 'HTML', reply_markup: this.bot.transport.keyboard('accounts', rows) });
+    return this.say(id, tableHtml, 'accounts', { rich_message: { html: tableHtml }, reply_markup: this.bot.transport.keyboard('accounts', rows) });
   }
 
   async cookies(id) {
