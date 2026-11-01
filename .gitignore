@@ -5,6 +5,11 @@
 !LICENSE.md
 !MASTER_TODO.md
 !PROGRESS_HISTORY.md
+
+# Reports whitelisting for handoff and audit
+!Bot/Reports/RepairHandoff/**/*.md
+!Bot/Reports/**/*.md
+
 __pycache__/
 *.pyc
 
@@ -16,6 +21,9 @@ Bot/.env.local
 .DS_Store
 *.log
 *.AppImage
-.opencode/\ngraphify-out/
-.opencode/\ngraphify-out/\n*.log
+.opencode/graphify-out/
 graphify-out/
+state.sqlite
+Bot/state.sqlite
+Bot/data/
+Bot/.venv-direct-x/
