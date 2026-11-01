@@ -13,6 +13,19 @@ class EnvValidationError extends Error {
   }
 }
 
+const PLACEHOLDERS = new Set([
+  'YOUR_BOT_TOKEN_HERE', 'YOUR_TOKEN_HERE', 'CHANGE_ME', 'REDACTED',
+  'TODO', 'xxx', 'undefined', 'null', ''
+]);
+
+function isPlaceholder(value) {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  if (PLACEHOLDERS.has(v)) return true;
+  if (/^YOUR_.*_HERE$/i.test(v) || /^change_me$/i.test(v) || /^insert_.*_here$/i.test(v)) return true;
+  return false;
+}
+
 function loadLocalEnv(file = path.join(__dirname, '..', '.env.local')) {
   if (!fs.existsSync(file)) return {};
   const out = {};
@@ -67,24 +80,34 @@ function validateEnv(env = config(), options = {}) {
   // Type and format validation for present keys
   if (env.TELEGRAM_BOT_TOKEN !== undefined && env.TELEGRAM_BOT_TOKEN !== null && env.TELEGRAM_BOT_TOKEN !== '') {
     const token = String(env.TELEGRAM_BOT_TOKEN).trim();
-    if (!/^\d{6,14}:[A-Za-z0-9_-]{30,60}$/.test(token)) {
+    if (isPlaceholder(token)) {
+      errors.push('Invalid TELEGRAM_BOT_TOKEN: value cannot be a placeholder string');
+    } else if (!/^\d{6,14}:[A-Za-z0-9_-]{30,60}$/.test(token)) {
       errors.push('Invalid TELEGRAM_BOT_TOKEN format: must match <bot_id>:<secret> (e.g. 123456789:ABCdef...)');
     }
   }
 
   if (env.BOT_OWNER_ID !== undefined && env.BOT_OWNER_ID !== null && env.BOT_OWNER_ID !== '') {
     const raw = String(env.BOT_OWNER_ID).trim();
-    const ids = raw.split(/[,\s]+/).filter(Boolean);
-    if (ids.length === 0 || ids.some(id => !/^\d+$/.test(id))) {
-      errors.push('Invalid BOT_OWNER_ID format: must be numeric Telegram user ID(s)');
+    if (isPlaceholder(raw)) {
+      errors.push('Invalid BOT_OWNER_ID: value cannot be a placeholder string');
+    } else {
+      const ids = raw.split(/[,\s]+/).filter(Boolean);
+      if (ids.length === 0 || ids.some(id => !/^\d+$/.test(id))) {
+        errors.push('Invalid BOT_OWNER_ID format: must be numeric Telegram user ID(s)');
+      }
     }
   }
 
   if (env.BOT_OWNER_CHAT_ID !== undefined && env.BOT_OWNER_CHAT_ID !== null && env.BOT_OWNER_CHAT_ID !== '') {
     const raw = String(env.BOT_OWNER_CHAT_ID).trim();
-    const ids = raw.split(/[,\s]+/).filter(Boolean);
-    if (ids.length === 0 || ids.some(id => !/^-?\d+$/.test(id))) {
-      errors.push('Invalid BOT_OWNER_CHAT_ID format: must be numeric Telegram chat ID(s)');
+    if (isPlaceholder(raw)) {
+      errors.push('Invalid BOT_OWNER_CHAT_ID: value cannot be a placeholder string');
+    } else {
+      const ids = raw.split(/[,\s]+/).filter(Boolean);
+      if (ids.length === 0 || ids.some(id => !/^-?\d+$/.test(id))) {
+        errors.push('Invalid BOT_OWNER_CHAT_ID format: must be numeric Telegram chat ID(s)');
+      }
     }
   }
 

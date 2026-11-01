@@ -25,11 +25,11 @@ class TestFinding012Requirements(unittest.TestCase):
     def test_curl_cffi_in_requirements(self):
         req_file = Path(__file__).resolve().parent.parent / 'requirements-direct-x.txt'
         content = req_file.read_text(encoding='utf-8')
-        self.assertIn('curl_cffi==0.16.3', content)
+        self.assertIn('curl_cffi==0.17.0', content)
 
     def test_curl_cffi_importable(self):
         import curl_cffi
-        self.assertEqual(curl_cffi.__version__, '0.16.3')
+        self.assertEqual(curl_cffi.__version__, '0.17.0')
 
 
 class TestFinding010ClassifyAccountFailure(unittest.TestCase):

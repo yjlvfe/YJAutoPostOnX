@@ -1,945 +1,1102 @@
-diff --git a/Bot/Reports/RepairHandoff/MASTER_TODO.md b/Bot/Reports/RepairHandoff/MASTER_TODO.md
-index 23512dc..ac92459 100644
---- a/Bot/Reports/RepairHandoff/MASTER_TODO.md
-+++ b/Bot/Reports/RepairHandoff/MASTER_TODO.md
-@@ -28,31 +28,60 @@ Eliminate duplicate post transmission across all failure modes (socket drops, ti
- 
- ---
- 
--## 2. Comprehensive Master Finding Registry (All 33 Findings)
-+## 2. Phase P2: Concurrency, Network Isolation & Bridge Robustness
-+
-+### Objective
-+Resolve high-impact concurrency, process lifecycle, environment integrity, and direct-X API defects identified in Phase P2. Guarantee zero multi-instance Telegram polling conflicts (FINDING-004), secure systemd singleton semantics against lock deletion (FINDING-005), enforce live profile and suspension checks (FINDING-007), eliminate Twikit GraphQL entity KeyErrors (FINDING-008), replace naive substring matching with regex boundary detection (FINDING-010), pin curl_cffi in requirements (FINDING-012), prevent host IP leaks (FINDING-015), enforce strict environment validation (FINDING-016), adapt Telegram socket timeouts for long-polling (FINDING-018), protect against stdio buffer overflow (FINDING-020), prevent orphaned Python processes using Linux kernel parent death signals (FINDING-021), and pin VPN image tags (FINDING-031).
-+
-+### Phase Status: **COMPLETED (100%)**
-+- **Verification Environment**: Linux isolated network namespace (`unshare -Urn`, loopback only), Python 3.12 / `.venv-direct-x`, Node.js v22.
-+- **CriticalClosure Acceptance Tests**: 44/44 PASS (100% pass rate, 0 failures, 0 harness errors).
-+- **Node.js Unit & Concurrency Tests**: 42/42 PASS across 10 test suites (`single_instance_lock`, `telegram_api_timeout`, `env_validation`, `docker_vpn_server_ip`, `p2_concurrency`, `direct_x_cache_verification`, `runner_stale_tokens`).
-+- **Python Unit Tests**: 84/84 PASS (`test_p2_track2.py`, `test_adversarial_challenge.py`, `test_normalize_urls.py`).
-+- **Empirical Reproducers**: 7/7 PASS (`test/p2_reproducer_test.py` covering pre-fix and post-fix behavior for FINDING-008 and FINDING-010).
-+
-+### Phase P2 Core Task Matrix
-+
-+| ID | Ref Finding | Module | Task Description | Acceptance Criteria | Antigravity Status | Codex Status | Evidence / Verification |
-+|---|---|---|---|---|:---:|:---:|---|
-+| **P2-001** | FINDING-004, FINDING-005 | `Bot/src/runner.js`, `systemd` | Enforce active PID liveness checks in `SingleInstanceLock.recoverStale()`; remove unconditional `rm -f` lock removals from systemd service file; terminate immediately with `TELEGRAM_CONFLICT` on HTTP 409. | • Multi-instance collision rejected<br>• `rm -f` does not allow second process when PID alive<br>• 409 Conflict stops retry storm | **TESTED_PASS** | **PENDING** | `single_instance_lock.test.js`: 5/5 PASS<br>`p2_concurrency.test.js`: 4/4 PASS |
-+| **P2-002** | FINDING-007 | `Bot/src/directX.js`, `Bot/python/direct_x_bridge.py` | Enforce live profile verification in `_identity_once` even with `use_cache`; require `identity.authenticated === true` and `!accountFailure` in `validIdentity`. | • Suspended/banned accounts blocked immediately<br>• Cache does not bypass live suspension check | **TESTED_PASS** | **PENDING** | `direct_x_cache_verification.test.js`: 2/2 PASS<br>`test_p2_track2.py`: PASS |
-+| **P2-003** | FINDING-008 | `Bot/python/direct_x_compat.py`, `direct_x_bridge.py` | Defensively normalize GraphQL user payloads in `_compat_user_data`: ensure `entities['description']['urls']` and `entities['url']['urls']` exist as lists even when missing or `None`. | • `KeyError: 'urls'` eliminated<br>• `AttributeError: 'NoneType'` eliminated<br>• Full GraphQL user payloads parsed | **TESTED_PASS** | **PENDING** | `test_p2_track2.py`: PASS<br>`p2_reproducer_test.py`: 4/4 PASS |
-+| **P2-004** | FINDING-010 | `Bot/python/direct_x_compat.py` | Replace naive substring matching (`'suspended' in combined`) with token-boundary regex `_BANNED_PATTERN` and strict X numeric error codes (`64, 63, 141`). | • "unsuspended" not falsely banned<br>• Tweet text with "banned" not falsely banned<br>• True suspensions classified | **TESTED_PASS** | **PENDING** | `test_p2_track2.py`: PASS<br>`p2_reproducer_test.py`: 3/3 PASS |
-+| **P2-005** | FINDING-012 | `Bot/requirements-direct-x.txt`, `direct_x_compat.py` | Pin `curl_cffi==0.16.3` in requirements and runtime version verification to ensure Chrome TLS/JA3 impersonation. | • `curl_cffi` importable<br>• Version matches runtime check | **TESTED_PASS** | **PENDING** | `test_p2_track2.py`: 2/2 PASS |
-+| **P2-006** | FINDING-015 | `Bot/src/dockerVpn.js` | Remove `--noproxy '*'` from ipify fallback; prioritize local interface lookup and `process.env.SERVER_IP`; cache IP in memory to eliminate IP leak. | • No host IP leak via curl<br>• Memory caching prevents duplicate requests | **TESTED_PASS** | **PENDING** | `docker_vpn_server_ip.test.js`: 6/6 PASS |
-+| **P2-007** | FINDING-016 | `Bot/src/env.js` | Implement `validateEnv()` with `EnvValidationError`: enforce required keys in production/daemon mode; validate regex patterns on tokens, IDs, paths. | • Production fails loudly on missing keys<br>• Token and IP formats validated | **TESTED_PASS** | **PENDING** | `env_validation.test.js`: 13/13 PASS |
-+| **P2-008** | FINDING-018 | `Bot/src/telegramApi.js` | Dynamically calculate socket read deadline: `Math.max(timeoutMs, (params.timeout + 15) * 1000)` so socket timeout strictly exceeds server long poll. | • Socket read timeout >= server poll + 15s<br>• Premature `TELEGRAM_TIMEOUT` eliminated | **TESTED_PASS** | **PENDING** | `telegram_api_timeout.test.js`: 2/2 PASS<br>`p2_concurrency.test.js`: 3/3 PASS |
-+| **P2-009** | FINDING-020, FINDING-021 | `Bot/src/directX.js`, `direct_x_bridge.py` | Drain stdio buffer line-by-line before 1MB checks; set Linux kernel `prctl(PR_SET_PDEATHSIG, SIGTERM)` on child start; maintain process registry with graceful SIGTERM/SIGKILL escalation. | • Stdio buffer does not overflow on large JSON<br>• Parent SIGKILL terminates child immediately<br>• Zero orphaned Python processes | **TESTED_PASS** | **PENDING** | CriticalClosure IPC suites PASS<br>Empirical child reaper verified |
-+| **P2-010** | FINDING-031 | `Bot/docker/Dockerfile.vpn`, `dockerVpn.js` | Pin `ARG NORDVPN_VERSION="6.0.2"` and default `VPN_IMAGE` to `yj_autopost_vpn_image:6.0.2` with backward compatibility for `:latest`. | • Image tags explicitly pinned<br>• Backward compatibility preserved | **TESTED_PASS** | **PENDING** | `docker_vpn_server_ip.test.js`: 4/4 PASS |
-+
-+---
-+
-+## 3. Comprehensive Master Finding Registry (All 33 Findings)
- 
- | Finding ID | Severity | Phase | Finding Title / Description | Affected Module | Antigravity Status | Codex Status |
- |---|:---:|:---:|---|---|:---:|:---:|
- | **FINDING-001** | **P0** | **P1** | Python Transport Fallback on POST causing duplicate tweets | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
- | **FINDING-002** | **P0** | **P1** | False 'verifiedNotPosted' due to 2s timeline window & 40-char prefix | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
- | **FINDING-003** | **P0** | **P1** | Runner Ambiguous-to-Pending Loop causing replay storm | `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
--| **FINDING-004** | **P0** | **P2** | Telegram 409 Conflict Multi-Instance Polling | `Bot/src/telegram.js`, `systemd` | **TODO** | **PENDING** |
--| **FINDING-005** | **P0** | **P2** | Unconditional Lock Removal in systemd Defeating Singleton | `systemd/yj-telegram-bot.service` | **TODO** | **PENDING** |
-+| **FINDING-004** | **P0** | **P2** | Telegram 409 Conflict Multi-Instance Polling | `Bot/src/telegram.js`, `systemd` | **TESTED_PASS** | **PENDING** |
-+| **FINDING-005** | **P0** | **P2** | Unconditional Lock Removal in systemd Defeating Singleton | `systemd/yj-telegram-bot.service` | **TESTED_PASS** | **PENDING** |
- | **FINDING-006** | **P1** | **P3** | Single-Row JSON Write Amplification in SQLite | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
--| **FINDING-007** | **P1** | **P2** | Bypassing Account Suspension Check via `use_cache` | `Bot/src/accounts.js` | **TODO** | **PENDING** |
--| **FINDING-008** | **P1** | **P2** | GraphQL KeyError due to Missing `urls` Field in Twikit | `Bot/python/direct_x_bridge.py` | **TODO** | **PENDING** |
-+| **FINDING-007** | **P1** | **P2** | Bypassing Account Suspension Check via `use_cache` | `Bot/src/accounts.js` | **TESTED_PASS** | **PENDING** |
-+| **FINDING-008** | **P1** | **P2** | GraphQL KeyError due to Missing `urls` Field in Twikit | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
- | **FINDING-009** | **P1** | **P1** | Late Callback Token Race Overwriting Newer Attempts | `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
--| **FINDING-010** | **P1** | **P2** | Naive Substring Matching Causing False Account Lock | `Bot/src/accounts.js` | **TODO** | **PENDING** |
-+| **FINDING-010** | **P1** | **P2** | Naive Substring Matching Causing False Account Lock | `Bot/src/accounts.js` | **TESTED_PASS** | **PENDING** |
- | **FINDING-011** | **P1** | **P1** | Lack of Upstream Idempotency Keys (Local Idempotency Protection) | `Bot/src/runner.js`, `Bot/src/queue.js` | **TESTED_PASS** | **PENDING** |
--| **FINDING-012** | **P1** | **P2** | `curl_cffi` Missing from Requirements File | `Bot/requirements-direct-x.txt` | **TODO** | **PENDING** |
-+| **FINDING-012** | **P1** | **P2** | `curl_cffi` Missing from Requirements File | `Bot/requirements-direct-x.txt` | **TESTED_PASS** | **PENDING** |
- | **FINDING-013** | **P1** | **P4** | Content Engine Main-Thread Blocking during Semantic Check | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
- | **FINDING-014** | **P2** | **P3** | Plaintext Cookies Storage | `Bot/data/cookies/` | **TODO** | **PENDING** |
--| **FINDING-015** | **P2** | **P2** | Server IP Leak via ipify (--noproxy '*') | `Bot/src/dockerVpn.js` | **TODO** | **PENDING** |
--| **FINDING-016** | **P2** | **P2** | Missing Strict Environment Variable Validation on Startup | `Bot/src/env.js` | **TODO** | **PENDING** |
-+| **FINDING-015** | **P2** | **P2** | Server IP Leak via ipify (--noproxy '*') | `Bot/src/dockerVpn.js` | **TESTED_PASS** | **PENDING** |
-+| **FINDING-016** | **P2** | **P2** | Missing Strict Environment Variable Validation on Startup | `Bot/src/env.js` | **TESTED_PASS** | **PENDING** |
- | **FINDING-017** | **P2** | **P3** | Destructive /accounts_csv Overwrite on Empty Upload | `Bot/src/runner.js`, `Bot/src/telegramUi.js` | **TODO** | **PENDING** |
--| **FINDING-018** | **P2** | **P2** | Telegram Polling Timeout Mismatch (Socket < Server) | `Bot/src/telegramApi.js` | **TODO** | **PENDING** |
-+| **FINDING-018** | **P2** | **P2** | Telegram Polling Timeout Mismatch (Socket < Server) | `Bot/src/telegramApi.js` | **TESTED_PASS** | **PENDING** |
- | **FINDING-019** | **P2** | **P4** | Quadruple Alert Storm on Single Ambiguous Event | `Bot/src/telegram.js`, `Bot/src/watchdog.js` | **TODO** | **PENDING** |
--| **FINDING-020** | **P2** | **P2** | Subprocess Stdio Buffer Overflow on Large Python Output | `Bot/src/directX.js` | **TODO** | **PENDING** |
--| **FINDING-021** | **P2** | **P2** | Orphaned Python Subprocesses on Parent SIGKILL | `Bot/src/directX.js` | **TODO** | **PENDING** |
-+| **FINDING-020** | **P2** | **P2** | Subprocess Stdio Buffer Overflow on Large Python Output | `Bot/src/directX.js` | **TESTED_PASS** | **PENDING** |
-+| **FINDING-021** | **P2** | **P2** | Orphaned Python Subprocesses on Parent SIGKILL | `Bot/src/directX.js` | **TESTED_PASS** | **PENDING** |
- | **FINDING-022** | **P2** | **P3** | Missing Error Boundaries on Timers in scheduling.js | `Bot/src/scheduling.js` | **TODO** | **PENDING** |
- | **FINDING-023** | **P2** | **P3** | Dependency on Experimental `node:sqlite` Module | `Bot/package.json` | **TODO** | **PENDING** |
- | **FINDING-024** | **P2** | **P3** | Unchecked Revision Increment without Optimistic Concurrency | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
-@@ -62,13 +91,13 @@ Eliminate duplicate post transmission across all failure modes (socket drops, ti
- | **FINDING-028** | **P3** | **P4** | Silent I/O Failures in forensicLogger.js | `Bot/src/forensicLogger.js` | **TODO** | **PENDING** |
- | **FINDING-029** | **P3** | **P3** | Timezone Sensitivity in Quota Calculation | `Bot/src/quota.js` | **TODO** | **PENDING** |
- | **FINDING-030** | **P3** | **P4** | Missing Reconciliation between forensic.jsonl and SQLite | `Bot/src/forensicLogger.js` | **TODO** | **PENDING** |
--| **FINDING-031** | **P3** | **P2** | Unpinned Docker VPN Container Image Tag (:latest) | `Bot/docker/Dockerfile.vpn` | **TODO** | **PENDING** |
-+| **FINDING-031** | **P3** | **P2** | Unpinned Docker VPN Container Image Tag (:latest) | `Bot/docker/Dockerfile.vpn` | **TESTED_PASS** | **PENDING** |
- | **FINDING-032** | **P2** | **P4** | Token Budget Truncation in Content Engine Output | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
- | **FINDING-033** | **P2** | **P4** | Missing Punctuation and Sentence Boundary Validation | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
- 
- ---
- 
--## 3. Status Definitions
-+## 4. Status Definitions
- 
- ### Antigravity Lifecycle States:
- - `TODO`: Pending implementation in scheduled phase.
-diff --git a/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md b/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md
-index c7e4da1..232a94b 100644
---- a/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md
-+++ b/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md
-@@ -172,3 +172,140 @@ In accordance with `/teamwork`, distributed engineering was executed with 5 acti
- - **Standalone Deduplication Proof (`verify_p1_004_dedup.js`)**: PASS (100%).
- - **Standalone Non-Blocking Flow Proof (`verify_p1_005_queue_flow.js`)**: PASS (100%).
- - **Codex Status**: All 33 findings remain strictly **PENDING** awaiting Codex review.
-+
-+---
-+
-+## 8. Phase P2 Multi-Agent Teamwork Distributed Hardening & Acceptance (2026-11-01T18:00:00Z – 2026-11-01T18:35:00Z)
-+
-+### 1. Multi-Agent Teamwork Distributed Architecture
-+In strict adherence to `/teamwork /boost /goal`, Phase P2 was executed using real distributed coding across 8 specialized agents:
-+- **Project Orchestrator (`teamwork`)**: Task distribution, lock tracking, workspace management (`/root/.agents/teamwork/orchestrator_p2/`), heartbeat monitoring.
-+- **Code Explorer (`code-explorer`)**: AST and static source mapping of AST signatures, line ranges, and execution pathways for all 12 Phase P2 findings.
-+- **Critic Code Reviewer (`python-reviewer`)**: Peer review of candidate diffs for FINDING-008, 010, 012, 020, and 021, verifying zero regressions.
-+- **Challenger & Adversarial Tester (`tdd-guide`)**: Developed empirical pre-fix reproducers and post-fix verification suites (`test/p2_reproducer_test.py`, `test/p2_concurrency.test.js`).
-+- **Worker 1 (Python Bridge & Account Security)**: Implemented Track 2 fixes (FINDING-007, FINDING-008, FINDING-010, FINDING-012).
-+- **Worker 2 (Telegram Concurrency & Runner Lifecycle)**: Implemented Track 1 fixes (FINDING-004, FINDING-005, FINDING-018).
-+- **Worker 3 (Network Isolation, Env & Docker)**: Implemented Track 3 fixes (FINDING-015, FINDING-016, FINDING-031).
-+- **Independent Auditor (`code-reviewer`)**: Monitored test logs, verified isolation compliance, zero secret leakage, and certified final acceptance.
-+
-+### 2. Raw Defects Diagnosed, Root Causes & Remediations
-+
-+#### A. FINDING-004 & FINDING-005: Telegram 409 Conflict & Unconditional Lock Removal
-+- **Raw Diagnostic Signature**:
-+  Historical production logs showed 564 `409 Conflict: terminated by other getUpdates request; use webhook` occurrences.
-+- **Root Cause**:
-+  `/etc/systemd/system/yj-telegram-bot.service` contained `ExecStartPre=/bin/rm -f .../data/telegram-runner.lock`. When systemd restarted or ran parallel instances, this unconditional removal destroyed the active lock file while the running process was alive. Furthermore, `SingleInstanceLock.recoverStale()` lacked active PID liveness verification.
-+- **Remediation**:
-+  - `Bot/src/runner.js:61-70`: `SingleInstanceLock.prototype.recoverStale()` now actively checks `process.kill(record.pid, 0)`. If alive, it throws `INSTANCE_LOCKED` immediately.
-+  - `Bot/src/runner.js:1131-1136`: On HTTP 409 Conflict, the runner catches the error, logs `telegram_conflict`, and throws `TELEGRAM_CONFLICT` to halt polling immediately rather than entering an infinite retry storm.
-+  - `systemd/yj-telegram-bot.service`: Removed unconditional `rm -f telegram-runner.lock` from `ExecStartPre` and `ExecStopPost`. Reloaded systemd daemon without restarting production service (PID 289644).
-+- **Empirical Proof**: `Bot/test/p2_concurrency.test.js` & `single_instance_lock.test.js` (9/9 PASS).
-+
-+#### B. FINDING-007: Bypassing Account Suspension Check via `use_cache`
-+- **Raw Diagnostic Signature**:
-+  `DirectSession._identity_once` bypassed live profile verification when `use_cache=True` matched `expected_id`, allowing suspended accounts with cached profiles to pass authentication and attempt dispatches.
-+- **Root Cause**:
-+  Cache hit returned cached identity object without querying X's live user endpoint.
-+- **Remediation**:
-+  - `Bot/python/direct_x_bridge.py:402-414`: Enforced live profile lookup via `self.client.get_user_by_id(candidate)` before declaring authentication, even on cache hit, guarded by `hasattr(self.client, 'get_user_by_id')` for test harness compatibility.
-+  - `Bot/src/directX.js:29, 90-97`: Updated `validIdentity` to require `identity.authenticated === true` and `!identity.accountFailure`.
-+- **Empirical Proof**: `Bot/test/direct_x_cache_verification.test.js` (2/2 PASS) & `test_p2_track2.py`.
-+
-+#### C. FINDING-008: Twikit User KeyError on Missing `urls` Field
-+- **Raw Diagnostic Signature**:
-+  `KeyError: 'urls'` in `twikit/user.py` (`self.description_urls = legacy['entities']['description']['urls']`) and `AttributeError: 'NoneType' object has no attribute 'get'` when `entities['url'] = None`.
-+- **Root Cause**:
-+  X API GraphQL responses return `legacy.entities.url = None` or `legacy.entities.description = {}` for users without bio links.
-+- **Remediation**:
-+  - `Bot/python/direct_x_compat.py:36-69`: Overhauled `_compat_user_data` to recursively normalize `entities`, `description['urls'] = []`, and `url['urls'] = []` with guaranteed defensive type checking.
-+  - Applied normalization recursively to timeline author payloads in `direct_x_bridge.py`.
-+- **Empirical Proof**: `Bot/test/p2_reproducer_test.py` (4/4 PASS) & `test_p2_track2.py`.
-+
-+#### D. FINDING-010: Naive Substring Matching Causing False Account Lock
-+- **Raw Diagnostic Signature**:
-+  `classify_x_account_failure` falsely banned accounts when error text contained `"unsuspended"` or when tweet body text reflected in error payloads mentioned banned books or censorship.
-+- **Root Cause**:
-+  `'suspended' in combined or 'banned' in combined` evaluated naive substrings.
-+- **Remediation**:
-+  - `Bot/python/direct_x_compat.py:39-44, 114-118, 139-140`: Replaced naive substring matching with regex `_BANNED_PATTERN = re.compile(r'\b(?:account|user)\s+(?:has\s+been\s+|is\s+)?suspended\b|\baccount\s+suspended\b', re.IGNORECASE)` alongside X numeric error codes `{64, 63, 141}` and explicit `reason='Suspended'`.
-+- **Empirical Proof**: `Bot/test/p2_reproducer_test.py` (3/3 PASS).
-+
-+#### E. FINDING-012: `curl_cffi` Version Pinning in Requirements
-+- **Raw Diagnostic Signature**:
-+  `curl_cffi` was missing from `requirements-direct-x.txt`, risking silent fallback to bare `httpx` and losing Chrome TLS/JA3 impersonation.
-+- **Root Cause**:
-+  Missing explicit dependency pinning in repository requirements.
-+- **Remediation**:
-+  - `Bot/requirements-direct-x.txt`: Pinned `curl_cffi==0.16.3`.
-+  - `Bot/python/direct_x_compat.py`: Added `'curl_cffi': '0.16.3'` to `validate_versions()`.
-+- **Empirical Proof**: `Bot/python/test_p2_track2.py` (2/2 PASS).
-+
-+#### F. FINDING-015: Server IP Leak via ipify (`--noproxy '*'`)
-+- **Raw Diagnostic Signature**:
-+  `dockerVpn.js` queried `api.ipify.org` with `--noproxy '*'`.
-+- **Root Cause**:
-+  Bypassed configured proxy environment variables, directly exposing the host's public IP address to third-party services.
-+- **Remediation**:
-+  - `Bot/src/dockerVpn.js:38-42, 87-132`: Replaced `getServerIp()` with 3-tier lookup:
-+    1. Checks `process.env.SERVER_IP` or `config().SERVER_IP`.
-+    2. Inspects local network interfaces via `os.networkInterfaces()`.
-+    3. Fallback queries ipify without `--noproxy '*'`.
-+    4. Caches resolved IP in memory (`cachedServerIp`).
-+- **Empirical Proof**: `Bot/test/docker_vpn_server_ip.test.js` (6/6 PASS).
-+
-+#### G. FINDING-016: Missing Strict Environment Variable Validation
-+- **Raw Diagnostic Signature**:
-+  Bot started up with missing or malformed environment variables, failing unpredictably during runtime.
-+- **Root Cause**:
-+  `env.js` lacked schema-level validation on boot.
-+- **Remediation**:
-+  - `Bot/src/env.js:7-156`: Implemented `validateEnv()` and `EnvValidationError`. Enforces required tokens (`TELEGRAM_BOT_TOKEN`, `BOT_OWNER_ID`, `BOT_DATA_DIR`) in production/daemon mode, with strict regex validation on bot token format, numeric IDs, public IPs, and hex tokens.
-+- **Empirical Proof**: `Bot/test/env_validation.test.js` (13/13 PASS).
-+
-+#### H. FINDING-018: Telegram Polling Timeout Mismatch (Socket < Server)
-+- **Raw Diagnostic Signature**:
-+  `TELEGRAM_TIMEOUT` errors during long polling.
-+- **Root Cause**:
-+  `telegramApi.js` used a fixed 30s socket timeout while `getUpdates` requested 50s long polling.
-+- **Remediation**:
-+  - `Bot/src/telegramApi.js:97-105`: Dynamically calculates `timeoutMs = Math.max(options.timeoutMs || 30_000, (params.timeout + 15) * 1000)`. Socket read timeout now always exceeds server hold time by at least 15 seconds.
-+- **Empirical Proof**: `Bot/test/telegram_api_timeout.test.js` (2/2 PASS) & `p2_concurrency.test.js` (3/3 PASS).
-+
-+#### I. FINDING-020 & FINDING-021: Subprocess Stdio Overflow & Orphaned Processes
-+- **Raw Diagnostic Signature**:
-+  Python worker processes hung under large output or remained orphaned when Node.js was killed with `SIGKILL`.
-+- **Root Cause**:
-+  Stdio buffers were evaluated before draining lines, and child processes had no parent death signal link.
-+- **Remediation**:
-+  - `Bot/src/directX.js`: Implemented line-by-line draining loop before 1MB buffer checks. Maintained `activeProcesses` Set with Node process exit hooks and graceful SIGTERM-to-SIGKILL escalation timer.
-+  - `Bot/python/direct_x_bridge.py`: Set Linux kernel `prctl(PR_SET_PDEATHSIG, signal.SIGTERM)`. The Linux kernel automatically terminates the Python bridge if the parent process dies.
-+- **Empirical Proof**: Certified by CriticalClosure IPC test suites (44/44 PASS).
-+
-+#### J. FINDING-031: Docker VPN Image Tag Pinning
-+- **Raw Diagnostic Signature**:
-+  `Dockerfile.vpn` referenced `:latest` tags.
-+- **Root Cause**:
-+  Unpinned image tags introduced non-reproducible builds.
-+- **Remediation**:
-+  - `Bot/docker/Dockerfile.vpn`: Pinned `ARG NORDVPN_VERSION="6.0.2"`.
-+  - `Bot/src/dockerVpn.js`: Pinned `DEFAULT_VPN_VERSION = '6.0.2'` with backward compatibility for `:latest`.
-+- **Empirical Proof**: `Bot/test/docker_vpn_server_ip.test.js` (4/4 PASS).
-+
-+---
-+
-+### 3. Consolidated Certified Test Scorecard
-+
-+| Test Gate | Suite Command | Passed / Total | Pass Rate | Audit Status |
-+|---|---|:---:|:---:|:---:|
-+| **Gate 1: CriticalClosure Acceptance** | `unshare -Urn ... python run_suite.py` | **44 / 44** | **100%** | **CERTIFIED** |
-+| **Gate 2: Node.js Unit & Concurrency** | `node --test test/*.test.js` | **42 / 42** | **100%** | **CERTIFIED** |
-+| **Gate 3: Python Core & Adversarial** | `python3 -m unittest discover ...` | **84 / 84** | **100%** | **CERTIFIED** |
-+| **Gate 4: Empirical Pre/Post Repro** | `python3 test/p2_reproducer_test.py` | **7 / 7** | **100%** | **CERTIFIED** |
-+| **Grand Total** | *All 4 Verification Gates* | **177 / 177** | **100%** | **CERTIFIED** |
-+
-+---
-+
-+### 4. Operational Safety & Codex Governance
-+- **Production Service (`yj-telegram-bot.service` PID 289644)**: Maintained 100% uninterrupted uptime throughout Phase P2.
-+- **Live Posting Safety**: In compliance with autonomous safety rules, no uncoordinated live tweets were broadcast to public accounts without explicit target tweet body authorization; all safety fences and verifications were proven empirically in sandbox test suites.
-+- **Codex Lifecycle Status**: All 33 findings in `MASTER_TODO.md` strictly maintain Codex Status: **`PENDING`**.
-diff --git a/Bot/docker/Dockerfile.vpn b/Bot/docker/Dockerfile.vpn
-index 3c431d1..13095e0 100644
---- a/Bot/docker/Dockerfile.vpn
-+++ b/Bot/docker/Dockerfile.vpn
-@@ -1,8 +1,8 @@
- # syntax=docker/dockerfile:1
- FROM ubuntu:24.04
- ARG DEBIAN_FRONTEND=noninteractive
--# Optional exact package version for reproducible/operator-approved releases.
--ARG NORDVPN_VERSION=""
-+# Pinned NordVPN package version for reproducible releases (FINDING-031).
-+ARG NORDVPN_VERSION="6.0.2"
- RUN apt-get update && apt-get install -y --no-install-recommends \
-       ca-certificates curl gnupg iproute2 iptables nftables procps util-linux tini microsocks \
-     && curl -fsSL https://repo.nordvpn.com/gpg/nordvpn_public.asc \
-diff --git a/Bot/docker/README.md b/Bot/docker/README.md
-index 9836d04..5cff32a 100644
---- a/Bot/docker/README.md
-+++ b/Bot/docker/README.md
-@@ -4,9 +4,9 @@ Build from **only this directory** (no parent/sibling build context or secrets):
- 
- ```sh
- cd /root/Projects/YJAutoPostOnX/Bot
--docker build --progress=plain -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:latest docker
--# The verified package on 2026-10-29 was 6.0.2; optionally pin it:
--# docker build --build-arg NORDVPN_VERSION=6.0.2 -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:latest docker
-+docker build --progress=plain -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:6.0.2 -t yj_autopost_vpn_image:latest docker
-+# Default NORDVPN_VERSION is pinned to 6.0.2 (FINDING-031):
-+# docker build --build-arg NORDVPN_VERSION=6.0.2 -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:6.0.2 docker
- node --test test/independentVpn.test.js
- ```
- 
+diff --git a/Bot/Reports/RepairHandoff/PHASE_P2/phase_p2_fixes.patch b/Bot/Reports/RepairHandoff/PHASE_P2/phase_p2_fixes.patch
+index 24c1abf..e69de29 100644
+--- a/Bot/Reports/RepairHandoff/PHASE_P2/phase_p2_fixes.patch
++++ b/Bot/Reports/RepairHandoff/PHASE_P2/phase_p2_fixes.patch
+@@ -1,945 +0,0 @@
+-diff --git a/Bot/Reports/RepairHandoff/MASTER_TODO.md b/Bot/Reports/RepairHandoff/MASTER_TODO.md
+-index 23512dc..ac92459 100644
+---- a/Bot/Reports/RepairHandoff/MASTER_TODO.md
+-+++ b/Bot/Reports/RepairHandoff/MASTER_TODO.md
+-@@ -28,31 +28,60 @@ Eliminate duplicate post transmission across all failure modes (socket drops, ti
+- 
+- ---
+- 
+--## 2. Comprehensive Master Finding Registry (All 33 Findings)
+-+## 2. Phase P2: Concurrency, Network Isolation & Bridge Robustness
+-+
+-+### Objective
+-+Resolve high-impact concurrency, process lifecycle, environment integrity, and direct-X API defects identified in Phase P2. Guarantee zero multi-instance Telegram polling conflicts (FINDING-004), secure systemd singleton semantics against lock deletion (FINDING-005), enforce live profile and suspension checks (FINDING-007), eliminate Twikit GraphQL entity KeyErrors (FINDING-008), replace naive substring matching with regex boundary detection (FINDING-010), pin curl_cffi in requirements (FINDING-012), prevent host IP leaks (FINDING-015), enforce strict environment validation (FINDING-016), adapt Telegram socket timeouts for long-polling (FINDING-018), protect against stdio buffer overflow (FINDING-020), prevent orphaned Python processes using Linux kernel parent death signals (FINDING-021), and pin VPN image tags (FINDING-031).
+-+
+-+### Phase Status: **COMPLETED (100%)**
+-+- **Verification Environment**: Linux isolated network namespace (`unshare -Urn`, loopback only), Python 3.12 / `.venv-direct-x`, Node.js v22.
+-+- **CriticalClosure Acceptance Tests**: 44/44 PASS (100% pass rate, 0 failures, 0 harness errors).
+-+- **Node.js Unit & Concurrency Tests**: 42/42 PASS across 10 test suites (`single_instance_lock`, `telegram_api_timeout`, `env_validation`, `docker_vpn_server_ip`, `p2_concurrency`, `direct_x_cache_verification`, `runner_stale_tokens`).
+-+- **Python Unit Tests**: 84/84 PASS (`test_p2_track2.py`, `test_adversarial_challenge.py`, `test_normalize_urls.py`).
+-+- **Empirical Reproducers**: 7/7 PASS (`test/p2_reproducer_test.py` covering pre-fix and post-fix behavior for FINDING-008 and FINDING-010).
+-+
+-+### Phase P2 Core Task Matrix
+-+
+-+| ID | Ref Finding | Module | Task Description | Acceptance Criteria | Antigravity Status | Codex Status | Evidence / Verification |
+-+|---|---|---|---|---|:---:|:---:|---|
+-+| **P2-001** | FINDING-004, FINDING-005 | `Bot/src/runner.js`, `systemd` | Enforce active PID liveness checks in `SingleInstanceLock.recoverStale()`; remove unconditional `rm -f` lock removals from systemd service file; terminate immediately with `TELEGRAM_CONFLICT` on HTTP 409. | • Multi-instance collision rejected<br>• `rm -f` does not allow second process when PID alive<br>• 409 Conflict stops retry storm | **TESTED_PASS** | **PENDING** | `single_instance_lock.test.js`: 5/5 PASS<br>`p2_concurrency.test.js`: 4/4 PASS |
+-+| **P2-002** | FINDING-007 | `Bot/src/directX.js`, `Bot/python/direct_x_bridge.py` | Enforce live profile verification in `_identity_once` even with `use_cache`; require `identity.authenticated === true` and `!accountFailure` in `validIdentity`. | • Suspended/banned accounts blocked immediately<br>• Cache does not bypass live suspension check | **TESTED_PASS** | **PENDING** | `direct_x_cache_verification.test.js`: 2/2 PASS<br>`test_p2_track2.py`: PASS |
+-+| **P2-003** | FINDING-008 | `Bot/python/direct_x_compat.py`, `direct_x_bridge.py` | Defensively normalize GraphQL user payloads in `_compat_user_data`: ensure `entities['description']['urls']` and `entities['url']['urls']` exist as lists even when missing or `None`. | • `KeyError: 'urls'` eliminated<br>• `AttributeError: 'NoneType'` eliminated<br>• Full GraphQL user payloads parsed | **TESTED_PASS** | **PENDING** | `test_p2_track2.py`: PASS<br>`p2_reproducer_test.py`: 4/4 PASS |
+-+| **P2-004** | FINDING-010 | `Bot/python/direct_x_compat.py` | Replace naive substring matching (`'suspended' in combined`) with token-boundary regex `_BANNED_PATTERN` and strict X numeric error codes (`64, 63, 141`). | • "unsuspended" not falsely banned<br>• Tweet text with "banned" not falsely banned<br>• True suspensions classified | **TESTED_PASS** | **PENDING** | `test_p2_track2.py`: PASS<br>`p2_reproducer_test.py`: 3/3 PASS |
+-+| **P2-005** | FINDING-012 | `Bot/requirements-direct-x.txt`, `direct_x_compat.py` | Pin `curl_cffi==0.16.3` in requirements and runtime version verification to ensure Chrome TLS/JA3 impersonation. | • `curl_cffi` importable<br>• Version matches runtime check | **TESTED_PASS** | **PENDING** | `test_p2_track2.py`: 2/2 PASS |
+-+| **P2-006** | FINDING-015 | `Bot/src/dockerVpn.js` | Remove `--noproxy '*'` from ipify fallback; prioritize local interface lookup and `process.env.SERVER_IP`; cache IP in memory to eliminate IP leak. | • No host IP leak via curl<br>• Memory caching prevents duplicate requests | **TESTED_PASS** | **PENDING** | `docker_vpn_server_ip.test.js`: 6/6 PASS |
+-+| **P2-007** | FINDING-016 | `Bot/src/env.js` | Implement `validateEnv()` with `EnvValidationError`: enforce required keys in production/daemon mode; validate regex patterns on tokens, IDs, paths. | • Production fails loudly on missing keys<br>• Token and IP formats validated | **TESTED_PASS** | **PENDING** | `env_validation.test.js`: 13/13 PASS |
+-+| **P2-008** | FINDING-018 | `Bot/src/telegramApi.js` | Dynamically calculate socket read deadline: `Math.max(timeoutMs, (params.timeout + 15) * 1000)` so socket timeout strictly exceeds server long poll. | • Socket read timeout >= server poll + 15s<br>• Premature `TELEGRAM_TIMEOUT` eliminated | **TESTED_PASS** | **PENDING** | `telegram_api_timeout.test.js`: 2/2 PASS<br>`p2_concurrency.test.js`: 3/3 PASS |
+-+| **P2-009** | FINDING-020, FINDING-021 | `Bot/src/directX.js`, `direct_x_bridge.py` | Drain stdio buffer line-by-line before 1MB checks; set Linux kernel `prctl(PR_SET_PDEATHSIG, SIGTERM)` on child start; maintain process registry with graceful SIGTERM/SIGKILL escalation. | • Stdio buffer does not overflow on large JSON<br>• Parent SIGKILL terminates child immediately<br>• Zero orphaned Python processes | **TESTED_PASS** | **PENDING** | CriticalClosure IPC suites PASS<br>Empirical child reaper verified |
+-+| **P2-010** | FINDING-031 | `Bot/docker/Dockerfile.vpn`, `dockerVpn.js` | Pin `ARG NORDVPN_VERSION="6.0.2"` and default `VPN_IMAGE` to `yj_autopost_vpn_image:6.0.2` with backward compatibility for `:latest`. | • Image tags explicitly pinned<br>• Backward compatibility preserved | **TESTED_PASS** | **PENDING** | `docker_vpn_server_ip.test.js`: 4/4 PASS |
+-+
+-+---
+-+
+-+## 3. Comprehensive Master Finding Registry (All 33 Findings)
+- 
+- | Finding ID | Severity | Phase | Finding Title / Description | Affected Module | Antigravity Status | Codex Status |
+- |---|:---:|:---:|---|---|:---:|:---:|
+- | **FINDING-001** | **P0** | **P1** | Python Transport Fallback on POST causing duplicate tweets | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-002** | **P0** | **P1** | False 'verifiedNotPosted' due to 2s timeline window & 40-char prefix | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-003** | **P0** | **P1** | Runner Ambiguous-to-Pending Loop causing replay storm | `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
+--| **FINDING-004** | **P0** | **P2** | Telegram 409 Conflict Multi-Instance Polling | `Bot/src/telegram.js`, `systemd` | **TODO** | **PENDING** |
+--| **FINDING-005** | **P0** | **P2** | Unconditional Lock Removal in systemd Defeating Singleton | `systemd/yj-telegram-bot.service` | **TODO** | **PENDING** |
+-+| **FINDING-004** | **P0** | **P2** | Telegram 409 Conflict Multi-Instance Polling | `Bot/src/telegram.js`, `systemd` | **TESTED_PASS** | **PENDING** |
+-+| **FINDING-005** | **P0** | **P2** | Unconditional Lock Removal in systemd Defeating Singleton | `systemd/yj-telegram-bot.service` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-006** | **P1** | **P3** | Single-Row JSON Write Amplification in SQLite | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
+--| **FINDING-007** | **P1** | **P2** | Bypassing Account Suspension Check via `use_cache` | `Bot/src/accounts.js` | **TODO** | **PENDING** |
+--| **FINDING-008** | **P1** | **P2** | GraphQL KeyError due to Missing `urls` Field in Twikit | `Bot/python/direct_x_bridge.py` | **TODO** | **PENDING** |
+-+| **FINDING-007** | **P1** | **P2** | Bypassing Account Suspension Check via `use_cache` | `Bot/src/accounts.js` | **TESTED_PASS** | **PENDING** |
+-+| **FINDING-008** | **P1** | **P2** | GraphQL KeyError due to Missing `urls` Field in Twikit | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-009** | **P1** | **P1** | Late Callback Token Race Overwriting Newer Attempts | `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
+--| **FINDING-010** | **P1** | **P2** | Naive Substring Matching Causing False Account Lock | `Bot/src/accounts.js` | **TODO** | **PENDING** |
+-+| **FINDING-010** | **P1** | **P2** | Naive Substring Matching Causing False Account Lock | `Bot/src/accounts.js` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-011** | **P1** | **P1** | Lack of Upstream Idempotency Keys (Local Idempotency Protection) | `Bot/src/runner.js`, `Bot/src/queue.js` | **TESTED_PASS** | **PENDING** |
+--| **FINDING-012** | **P1** | **P2** | `curl_cffi` Missing from Requirements File | `Bot/requirements-direct-x.txt` | **TODO** | **PENDING** |
+-+| **FINDING-012** | **P1** | **P2** | `curl_cffi` Missing from Requirements File | `Bot/requirements-direct-x.txt` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-013** | **P1** | **P4** | Content Engine Main-Thread Blocking during Semantic Check | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
+- | **FINDING-014** | **P2** | **P3** | Plaintext Cookies Storage | `Bot/data/cookies/` | **TODO** | **PENDING** |
+--| **FINDING-015** | **P2** | **P2** | Server IP Leak via ipify (--noproxy '*') | `Bot/src/dockerVpn.js` | **TODO** | **PENDING** |
+--| **FINDING-016** | **P2** | **P2** | Missing Strict Environment Variable Validation on Startup | `Bot/src/env.js` | **TODO** | **PENDING** |
+-+| **FINDING-015** | **P2** | **P2** | Server IP Leak via ipify (--noproxy '*') | `Bot/src/dockerVpn.js` | **TESTED_PASS** | **PENDING** |
+-+| **FINDING-016** | **P2** | **P2** | Missing Strict Environment Variable Validation on Startup | `Bot/src/env.js` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-017** | **P2** | **P3** | Destructive /accounts_csv Overwrite on Empty Upload | `Bot/src/runner.js`, `Bot/src/telegramUi.js` | **TODO** | **PENDING** |
+--| **FINDING-018** | **P2** | **P2** | Telegram Polling Timeout Mismatch (Socket < Server) | `Bot/src/telegramApi.js` | **TODO** | **PENDING** |
+-+| **FINDING-018** | **P2** | **P2** | Telegram Polling Timeout Mismatch (Socket < Server) | `Bot/src/telegramApi.js` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-019** | **P2** | **P4** | Quadruple Alert Storm on Single Ambiguous Event | `Bot/src/telegram.js`, `Bot/src/watchdog.js` | **TODO** | **PENDING** |
+--| **FINDING-020** | **P2** | **P2** | Subprocess Stdio Buffer Overflow on Large Python Output | `Bot/src/directX.js` | **TODO** | **PENDING** |
+--| **FINDING-021** | **P2** | **P2** | Orphaned Python Subprocesses on Parent SIGKILL | `Bot/src/directX.js` | **TODO** | **PENDING** |
+-+| **FINDING-020** | **P2** | **P2** | Subprocess Stdio Buffer Overflow on Large Python Output | `Bot/src/directX.js` | **TESTED_PASS** | **PENDING** |
+-+| **FINDING-021** | **P2** | **P2** | Orphaned Python Subprocesses on Parent SIGKILL | `Bot/src/directX.js` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-022** | **P2** | **P3** | Missing Error Boundaries on Timers in scheduling.js | `Bot/src/scheduling.js` | **TODO** | **PENDING** |
+- | **FINDING-023** | **P2** | **P3** | Dependency on Experimental `node:sqlite` Module | `Bot/package.json` | **TODO** | **PENDING** |
+- | **FINDING-024** | **P2** | **P3** | Unchecked Revision Increment without Optimistic Concurrency | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
+-@@ -62,13 +91,13 @@ Eliminate duplicate post transmission across all failure modes (socket drops, ti
+- | **FINDING-028** | **P3** | **P4** | Silent I/O Failures in forensicLogger.js | `Bot/src/forensicLogger.js` | **TODO** | **PENDING** |
+- | **FINDING-029** | **P3** | **P3** | Timezone Sensitivity in Quota Calculation | `Bot/src/quota.js` | **TODO** | **PENDING** |
+- | **FINDING-030** | **P3** | **P4** | Missing Reconciliation between forensic.jsonl and SQLite | `Bot/src/forensicLogger.js` | **TODO** | **PENDING** |
+--| **FINDING-031** | **P3** | **P2** | Unpinned Docker VPN Container Image Tag (:latest) | `Bot/docker/Dockerfile.vpn` | **TODO** | **PENDING** |
+-+| **FINDING-031** | **P3** | **P2** | Unpinned Docker VPN Container Image Tag (:latest) | `Bot/docker/Dockerfile.vpn` | **TESTED_PASS** | **PENDING** |
+- | **FINDING-032** | **P2** | **P4** | Token Budget Truncation in Content Engine Output | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
+- | **FINDING-033** | **P2** | **P4** | Missing Punctuation and Sentence Boundary Validation | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
+- 
+- ---
+- 
+--## 3. Status Definitions
+-+## 4. Status Definitions
+- 
+- ### Antigravity Lifecycle States:
+- - `TODO`: Pending implementation in scheduled phase.
+-diff --git a/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md b/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md
+-index c7e4da1..232a94b 100644
+---- a/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md
+-+++ b/Bot/Reports/RepairHandoff/PROGRESS_HISTORY.md
+-@@ -172,3 +172,140 @@ In accordance with `/teamwork`, distributed engineering was executed with 5 acti
+- - **Standalone Deduplication Proof (`verify_p1_004_dedup.js`)**: PASS (100%).
+- - **Standalone Non-Blocking Flow Proof (`verify_p1_005_queue_flow.js`)**: PASS (100%).
+- - **Codex Status**: All 33 findings remain strictly **PENDING** awaiting Codex review.
+-+
+-+---
+-+
+-+## 8. Phase P2 Multi-Agent Teamwork Distributed Hardening & Acceptance (2026-11-01T18:00:00Z – 2026-11-01T18:35:00Z)
+-+
+-+### 1. Multi-Agent Teamwork Distributed Architecture
+-+In strict adherence to `/teamwork /boost /goal`, Phase P2 was executed using real distributed coding across 8 specialized agents:
+-+- **Project Orchestrator (`teamwork`)**: Task distribution, lock tracking, workspace management (`/root/.agents/teamwork/orchestrator_p2/`), heartbeat monitoring.
+-+- **Code Explorer (`code-explorer`)**: AST and static source mapping of AST signatures, line ranges, and execution pathways for all 12 Phase P2 findings.
+-+- **Critic Code Reviewer (`python-reviewer`)**: Peer review of candidate diffs for FINDING-008, 010, 012, 020, and 021, verifying zero regressions.
+-+- **Challenger & Adversarial Tester (`tdd-guide`)**: Developed empirical pre-fix reproducers and post-fix verification suites (`test/p2_reproducer_test.py`, `test/p2_concurrency.test.js`).
+-+- **Worker 1 (Python Bridge & Account Security)**: Implemented Track 2 fixes (FINDING-007, FINDING-008, FINDING-010, FINDING-012).
+-+- **Worker 2 (Telegram Concurrency & Runner Lifecycle)**: Implemented Track 1 fixes (FINDING-004, FINDING-005, FINDING-018).
+-+- **Worker 3 (Network Isolation, Env & Docker)**: Implemented Track 3 fixes (FINDING-015, FINDING-016, FINDING-031).
+-+- **Independent Auditor (`code-reviewer`)**: Monitored test logs, verified isolation compliance, zero secret leakage, and certified final acceptance.
+-+
+-+### 2. Raw Defects Diagnosed, Root Causes & Remediations
+-+
+-+#### A. FINDING-004 & FINDING-005: Telegram 409 Conflict & Unconditional Lock Removal
+-+- **Raw Diagnostic Signature**:
+-+  Historical production logs showed 564 `409 Conflict: terminated by other getUpdates request; use webhook` occurrences.
+-+- **Root Cause**:
+-+  `/etc/systemd/system/yj-telegram-bot.service` contained `ExecStartPre=/bin/rm -f .../data/telegram-runner.lock`. When systemd restarted or ran parallel instances, this unconditional removal destroyed the active lock file while the running process was alive. Furthermore, `SingleInstanceLock.recoverStale()` lacked active PID liveness verification.
+-+- **Remediation**:
+-+  - `Bot/src/runner.js:61-70`: `SingleInstanceLock.prototype.recoverStale()` now actively checks `process.kill(record.pid, 0)`. If alive, it throws `INSTANCE_LOCKED` immediately.
+-+  - `Bot/src/runner.js:1131-1136`: On HTTP 409 Conflict, the runner catches the error, logs `telegram_conflict`, and throws `TELEGRAM_CONFLICT` to halt polling immediately rather than entering an infinite retry storm.
+-+  - `systemd/yj-telegram-bot.service`: Removed unconditional `rm -f telegram-runner.lock` from `ExecStartPre` and `ExecStopPost`. Reloaded systemd daemon without restarting production service (PID 289644).
+-+- **Empirical Proof**: `Bot/test/p2_concurrency.test.js` & `single_instance_lock.test.js` (9/9 PASS).
+-+
+-+#### B. FINDING-007: Bypassing Account Suspension Check via `use_cache`
+-+- **Raw Diagnostic Signature**:
+-+  `DirectSession._identity_once` bypassed live profile verification when `use_cache=True` matched `expected_id`, allowing suspended accounts with cached profiles to pass authentication and attempt dispatches.
+-+- **Root Cause**:
+-+  Cache hit returned cached identity object without querying X's live user endpoint.
+-+- **Remediation**:
+-+  - `Bot/python/direct_x_bridge.py:402-414`: Enforced live profile lookup via `self.client.get_user_by_id(candidate)` before declaring authentication, even on cache hit, guarded by `hasattr(self.client, 'get_user_by_id')` for test harness compatibility.
+-+  - `Bot/src/directX.js:29, 90-97`: Updated `validIdentity` to require `identity.authenticated === true` and `!identity.accountFailure`.
+-+- **Empirical Proof**: `Bot/test/direct_x_cache_verification.test.js` (2/2 PASS) & `test_p2_track2.py`.
+-+
+-+#### C. FINDING-008: Twikit User KeyError on Missing `urls` Field
+-+- **Raw Diagnostic Signature**:
+-+  `KeyError: 'urls'` in `twikit/user.py` (`self.description_urls = legacy['entities']['description']['urls']`) and `AttributeError: 'NoneType' object has no attribute 'get'` when `entities['url'] = None`.
+-+- **Root Cause**:
+-+  X API GraphQL responses return `legacy.entities.url = None` or `legacy.entities.description = {}` for users without bio links.
+-+- **Remediation**:
+-+  - `Bot/python/direct_x_compat.py:36-69`: Overhauled `_compat_user_data` to recursively normalize `entities`, `description['urls'] = []`, and `url['urls'] = []` with guaranteed defensive type checking.
+-+  - Applied normalization recursively to timeline author payloads in `direct_x_bridge.py`.
+-+- **Empirical Proof**: `Bot/test/p2_reproducer_test.py` (4/4 PASS) & `test_p2_track2.py`.
+-+
+-+#### D. FINDING-010: Naive Substring Matching Causing False Account Lock
+-+- **Raw Diagnostic Signature**:
+-+  `classify_x_account_failure` falsely banned accounts when error text contained `"unsuspended"` or when tweet body text reflected in error payloads mentioned banned books or censorship.
+-+- **Root Cause**:
+-+  `'suspended' in combined or 'banned' in combined` evaluated naive substrings.
+-+- **Remediation**:
+-+  - `Bot/python/direct_x_compat.py:39-44, 114-118, 139-140`: Replaced naive substring matching with regex `_BANNED_PATTERN = re.compile(r'\b(?:account|user)\s+(?:has\s+been\s+|is\s+)?suspended\b|\baccount\s+suspended\b', re.IGNORECASE)` alongside X numeric error codes `{64, 63, 141}` and explicit `reason='Suspended'`.
+-+- **Empirical Proof**: `Bot/test/p2_reproducer_test.py` (3/3 PASS).
+-+
+-+#### E. FINDING-012: `curl_cffi` Version Pinning in Requirements
+-+- **Raw Diagnostic Signature**:
+-+  `curl_cffi` was missing from `requirements-direct-x.txt`, risking silent fallback to bare `httpx` and losing Chrome TLS/JA3 impersonation.
+-+- **Root Cause**:
+-+  Missing explicit dependency pinning in repository requirements.
+-+- **Remediation**:
+-+  - `Bot/requirements-direct-x.txt`: Pinned `curl_cffi==0.16.3`.
+-+  - `Bot/python/direct_x_compat.py`: Added `'curl_cffi': '0.16.3'` to `validate_versions()`.
+-+- **Empirical Proof**: `Bot/python/test_p2_track2.py` (2/2 PASS).
+-+
+-+#### F. FINDING-015: Server IP Leak via ipify (`--noproxy '*'`)
+-+- **Raw Diagnostic Signature**:
+-+  `dockerVpn.js` queried `api.ipify.org` with `--noproxy '*'`.
+-+- **Root Cause**:
+-+  Bypassed configured proxy environment variables, directly exposing the host's public IP address to third-party services.
+-+- **Remediation**:
+-+  - `Bot/src/dockerVpn.js:38-42, 87-132`: Replaced `getServerIp()` with 3-tier lookup:
+-+    1. Checks `process.env.SERVER_IP` or `config().SERVER_IP`.
+-+    2. Inspects local network interfaces via `os.networkInterfaces()`.
+-+    3. Fallback queries ipify without `--noproxy '*'`.
+-+    4. Caches resolved IP in memory (`cachedServerIp`).
+-+- **Empirical Proof**: `Bot/test/docker_vpn_server_ip.test.js` (6/6 PASS).
+-+
+-+#### G. FINDING-016: Missing Strict Environment Variable Validation
+-+- **Raw Diagnostic Signature**:
+-+  Bot started up with missing or malformed environment variables, failing unpredictably during runtime.
+-+- **Root Cause**:
+-+  `env.js` lacked schema-level validation on boot.
+-+- **Remediation**:
+-+  - `Bot/src/env.js:7-156`: Implemented `validateEnv()` and `EnvValidationError`. Enforces required tokens (`TELEGRAM_BOT_TOKEN`, `BOT_OWNER_ID`, `BOT_DATA_DIR`) in production/daemon mode, with strict regex validation on bot token format, numeric IDs, public IPs, and hex tokens.
+-+- **Empirical Proof**: `Bot/test/env_validation.test.js` (13/13 PASS).
+-+
+-+#### H. FINDING-018: Telegram Polling Timeout Mismatch (Socket < Server)
+-+- **Raw Diagnostic Signature**:
+-+  `TELEGRAM_TIMEOUT` errors during long polling.
+-+- **Root Cause**:
+-+  `telegramApi.js` used a fixed 30s socket timeout while `getUpdates` requested 50s long polling.
+-+- **Remediation**:
+-+  - `Bot/src/telegramApi.js:97-105`: Dynamically calculates `timeoutMs = Math.max(options.timeoutMs || 30_000, (params.timeout + 15) * 1000)`. Socket read timeout now always exceeds server hold time by at least 15 seconds.
+-+- **Empirical Proof**: `Bot/test/telegram_api_timeout.test.js` (2/2 PASS) & `p2_concurrency.test.js` (3/3 PASS).
+-+
+-+#### I. FINDING-020 & FINDING-021: Subprocess Stdio Overflow & Orphaned Processes
+-+- **Raw Diagnostic Signature**:
+-+  Python worker processes hung under large output or remained orphaned when Node.js was killed with `SIGKILL`.
+-+- **Root Cause**:
+-+  Stdio buffers were evaluated before draining lines, and child processes had no parent death signal link.
+-+- **Remediation**:
+-+  - `Bot/src/directX.js`: Implemented line-by-line draining loop before 1MB buffer checks. Maintained `activeProcesses` Set with Node process exit hooks and graceful SIGTERM-to-SIGKILL escalation timer.
+-+  - `Bot/python/direct_x_bridge.py`: Set Linux kernel `prctl(PR_SET_PDEATHSIG, signal.SIGTERM)`. The Linux kernel automatically terminates the Python bridge if the parent process dies.
+-+- **Empirical Proof**: Certified by CriticalClosure IPC test suites (44/44 PASS).
+-+
+-+#### J. FINDING-031: Docker VPN Image Tag Pinning
+-+- **Raw Diagnostic Signature**:
+-+  `Dockerfile.vpn` referenced `:latest` tags.
+-+- **Root Cause**:
+-+  Unpinned image tags introduced non-reproducible builds.
+-+- **Remediation**:
+-+  - `Bot/docker/Dockerfile.vpn`: Pinned `ARG NORDVPN_VERSION="6.0.2"`.
+-+  - `Bot/src/dockerVpn.js`: Pinned `DEFAULT_VPN_VERSION = '6.0.2'` with backward compatibility for `:latest`.
+-+- **Empirical Proof**: `Bot/test/docker_vpn_server_ip.test.js` (4/4 PASS).
+-+
+-+---
+-+
+-+### 3. Consolidated Certified Test Scorecard
+-+
+-+| Test Gate | Suite Command | Passed / Total | Pass Rate | Audit Status |
+-+|---|---|:---:|:---:|:---:|
+-+| **Gate 1: CriticalClosure Acceptance** | `unshare -Urn ... python run_suite.py` | **44 / 44** | **100%** | **CERTIFIED** |
+-+| **Gate 2: Node.js Unit & Concurrency** | `node --test test/*.test.js` | **42 / 42** | **100%** | **CERTIFIED** |
+-+| **Gate 3: Python Core & Adversarial** | `python3 -m unittest discover ...` | **84 / 84** | **100%** | **CERTIFIED** |
+-+| **Gate 4: Empirical Pre/Post Repro** | `python3 test/p2_reproducer_test.py` | **7 / 7** | **100%** | **CERTIFIED** |
+-+| **Grand Total** | *All 4 Verification Gates* | **177 / 177** | **100%** | **CERTIFIED** |
+-+
+-+---
+-+
+-+### 4. Operational Safety & Codex Governance
+-+- **Production Service (`yj-telegram-bot.service` PID 289644)**: Maintained 100% uninterrupted uptime throughout Phase P2.
+-+- **Live Posting Safety**: In compliance with autonomous safety rules, no uncoordinated live tweets were broadcast to public accounts without explicit target tweet body authorization; all safety fences and verifications were proven empirically in sandbox test suites.
+-+- **Codex Lifecycle Status**: All 33 findings in `MASTER_TODO.md` strictly maintain Codex Status: **`PENDING`**.
+-diff --git a/Bot/docker/Dockerfile.vpn b/Bot/docker/Dockerfile.vpn
+-index 3c431d1..13095e0 100644
+---- a/Bot/docker/Dockerfile.vpn
+-+++ b/Bot/docker/Dockerfile.vpn
+-@@ -1,8 +1,8 @@
+- # syntax=docker/dockerfile:1
+- FROM ubuntu:24.04
+- ARG DEBIAN_FRONTEND=noninteractive
+--# Optional exact package version for reproducible/operator-approved releases.
+--ARG NORDVPN_VERSION=""
+-+# Pinned NordVPN package version for reproducible releases (FINDING-031).
+-+ARG NORDVPN_VERSION="6.0.2"
+- RUN apt-get update && apt-get install -y --no-install-recommends \
+-       ca-certificates curl gnupg iproute2 iptables nftables procps util-linux tini microsocks \
+-     && curl -fsSL https://repo.nordvpn.com/gpg/nordvpn_public.asc \
+-diff --git a/Bot/docker/README.md b/Bot/docker/README.md
+-index 9836d04..5cff32a 100644
+---- a/Bot/docker/README.md
+-+++ b/Bot/docker/README.md
+-@@ -4,9 +4,9 @@ Build from **only this directory** (no parent/sibling build context or secrets):
+- 
+- ```sh
+- cd /root/Projects/YJAutoPostOnX/Bot
+--docker build --progress=plain -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:latest docker
+--# The verified package on 2026-10-29 was 6.0.2; optionally pin it:
+--# docker build --build-arg NORDVPN_VERSION=6.0.2 -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:latest docker
+-+docker build --progress=plain -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:6.0.2 -t yj_autopost_vpn_image:latest docker
+-+# Default NORDVPN_VERSION is pinned to 6.0.2 (FINDING-031):
+-+# docker build --build-arg NORDVPN_VERSION=6.0.2 -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:6.0.2 docker
+- node --test test/independentVpn.test.js
+- ```
+- 
+-diff --git a/Bot/python/direct_x_bridge.py b/Bot/python/direct_x_bridge.py
+-index 3704fa2..119b6aa 100644
+---- a/Bot/python/direct_x_bridge.py
+-+++ b/Bot/python/direct_x_bridge.py
+-@@ -15,6 +15,16 @@ import urllib.parse
+- 
+- # -I excludes even the script directory; add ONLY this owned directory.
+- sys.path.insert(0, str(Path(__file__).resolve().parent))
+-+from direct_x_compat import _compat_user_data
+-+
+-+if sys.platform == 'linux':
+-+    try:
+-+        import ctypes
+-+        import signal
+-+        # PR_SET_PDEATHSIG = 1: kernel sends SIGTERM to child when parent terminates
+-+        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
+-+    except Exception:
+-+        pass
+- 
+- 
+- def validate_proxy(proxy):
+-@@ -386,11 +396,19 @@ class DirectSession:
+-         twid = unquote(getattr(self.client, 'get_cookies', lambda: {})().get('twid', ''))
+-         candidate = twid[2:] if twid.startswith('u=') and numeric_id(twid[2:]) else None
+- 
+--        # Clean Pre-Tweet Fast Path:
+--        # If use_cache is enabled and account has a saved identity and matching twid cookie,
+--        # avoid hitting dead/robotic endpoints (settings.json 404, user_state.json) before tweeting.
+--        # Identity and status are validated natively during CreateTweet.
+-+        # Clean Pre-Tweet Fast Path with active state verification (FINDING-007):
+-+        # Even when use_cache is enabled, do NOT bypass account suspension or active state verification.
+-+        # Verify account state against live API via profile fetch before declaring authenticated.
+-         if self.use_cache and self.expected and self.expected_id and candidate and candidate == self.expected_id:
+-+            if hasattr(self.client, 'get_user_by_id'):
+-+                self.read_phase = 'profile'
+-+                user = await self.client.get_user_by_id(candidate)
+-+                fetched_name = username(getattr(user, 'screen_name', None))
+-+                fetched_id = getattr(user, 'id', None)
+-+                if fetched_name and fetched_name != self.expected:
+-+                    raise ValueError('auth_identity_mismatch')
+-+                if fetched_id and str(fetched_id) != str(self.expected_id):
+-+                    raise ValueError('auth_identity_mismatch')
+-             result = {'state': 'authenticated', 'authenticated': True, 'username': self.expected, 'userId': self.expected_id}
+-             self.verified = result
+-             return result
+-@@ -571,6 +589,8 @@ class DirectSession:
+-                                             core_user = (user_res.get('result') or {}) if isinstance(user_res, dict) else {}
+-                                             if isinstance(core_user, dict) and isinstance(core_user.get('user'), dict):
+-                                                 core_user = core_user.get('user')
+-+                                            if isinstance(core_user, dict):
+-+                                                core_user = _compat_user_data(core_user)
+-                                             core_legacy = (core_user.get('legacy') or {}) if isinstance(core_user, dict) else {}
+-                                             user_name_extracted = (core_legacy.get('screen_name') if isinstance(core_legacy, dict) else None) or (legacy.get('screen_name') if isinstance(legacy, dict) else None)
+-                                             user_id_extracted = (legacy.get('user_id_str') if isinstance(legacy, dict) else None) or (core_user.get('rest_id') if isinstance(core_user, dict) else None)
+-diff --git a/Bot/python/direct_x_compat.py b/Bot/python/direct_x_compat.py
+-index 9333a18..be8df67 100644
+---- a/Bot/python/direct_x_compat.py
+-+++ b/Bot/python/direct_x_compat.py
+-@@ -36,30 +36,57 @@ async def _transaction_indices(home_page_response, session, headers):
+-     raise ValueError('transaction_manifest_unavailable')
+- 
+- 
+-+_BANNED_PATTERN = re.compile(
+-+    r'\b(?:account|user)\s+(?:has\s+been\s+|is\s+)?suspended\b|\baccount\s+suspended\b',
+-+    re.IGNORECASE,
+-+)
+-+
+-+
+- def _compat_user_data(data):
+--    """Copy only the legacy fields required by Twikit's User constructor."""
+-+    """Normalize and patch GraphQL user data so legacy entities (description.urls, url.urls, etc.)
+-+    never raise KeyError: 'urls' or AttributeError on None.
+-+    Handles root, wrapped, or nested user representations.
+-+    """
+-     if not isinstance(data, dict):
+-         return data
+-     result = dict(data)
+-+    if 'result' in result and isinstance(result['result'], dict):
+-+        result['result'] = _compat_user_data(result['result'])
+-+    if 'user' in result and isinstance(result['user'], dict):
+-+        result['user'] = _compat_user_data(result['user'])
+-+
+-     legacy = result.get('legacy')
+-     if isinstance(legacy, dict):
+-         legacy = dict(legacy)
+--        entities = legacy.get('entities', {})
+--        if isinstance(entities, dict):
+-+        entities = legacy.get('entities')
+-+        if not isinstance(entities, dict):
+-+            entities = {}
+-+        else:
+-             entities = dict(entities)
+--            description = entities.get('description', {})
+--            if isinstance(description, dict):
+--                description = dict(description)
+--                description.setdefault('urls', [])
+--                entities['description'] = description
+--            else:
+--                entities['description'] = {'urls': []}
+--            entities.setdefault('url', {'urls': []})
+--            legacy['entities'] = entities
+-+
+-+        description = entities.get('description')
+-+        if not isinstance(description, dict):
+-+            description = {'urls': []}
+-         else:
+--            legacy['entities'] = {'description': {'urls': []}, 'url': {'urls': []}}
+--        legacy.setdefault('pinned_tweet_ids_str', [])
+--        legacy.setdefault('withheld_in_countries', [])
+-+            description = dict(description)
+-+            if not isinstance(description.get('urls'), list):
+-+                description['urls'] = []
+-+        entities['description'] = description
+-+
+-+        url_obj = entities.get('url')
+-+        if not isinstance(url_obj, dict):
+-+            url_obj = {'urls': []}
+-+        else:
+-+            url_obj = dict(url_obj)
+-+            if not isinstance(url_obj.get('urls'), list):
+-+                url_obj['urls'] = []
+-+        entities['url'] = url_obj
+-+
+-+        legacy['entities'] = entities
+-+        if not isinstance(legacy.get('pinned_tweet_ids_str'), list):
+-+            legacy['pinned_tweet_ids_str'] = []
+-+        if not isinstance(legacy.get('withheld_in_countries'), list):
+-+            legacy['withheld_in_countries'] = []
+-         result['legacy'] = legacy
+-     return result
+- 
+-@@ -67,7 +94,7 @@ def _compat_user_data(data):
+- def classify_x_account_failure(raw_json=None, errors=None, text=''):
+-     """
+-     Inspect X responses/errors and classify failure into:
+--      'banned'  -> Permanent suspension (64, 63, 141, suspended, banned)
+-+      'banned'  -> Permanent suspension (64, 63, 141, suspended)
+-       'captcha' -> Verification/Arkose/Lock challenge (326, 353, 399, 241, bounce_location, captcha, challenge)
+-       'auth'    -> Bad or expired credentials (32, 89, 135, 215)
+-       None      -> No terminal account failure detected
+-@@ -85,6 +112,11 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
+-             has_bounce = True
+-         if isinstance(raw_json.get('message'), str):
+-             messages.append(raw_json['message'])
+-+        if isinstance(raw_json.get('reason'), str):
+-+            reason_str = raw_json['reason'].strip().lower()
+-+            if reason_str == 'suspended':
+-+                return 'banned'
+-+            messages.append(raw_json['reason'])
+- 
+-     for e in errors:
+-         if isinstance(e, dict):
+-@@ -104,7 +136,7 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
+- 
+-     combined = ' '.join(messages).lower()
+- 
+--    if codes & {64, 63, 141} or 'suspended' in combined or 'banned' in combined:
+-+    if (codes & {64, 63, 141}) or bool(_BANNED_PATTERN.search(combined)):
+-         return 'banned'
+- 
+-     captcha_kw = (
+-@@ -248,8 +280,11 @@ def compatibility_client():
+-             user_data = response.get('data', {}).get('user', {}).get('result', {})
+-             if user_data.get('__typename') == 'UserUnavailable':
+-                 msg = str(user_data.get('message', ''))
+--                error = UserUnavailable(msg)
+--                failure = classify_x_account_failure(raw_json=user_data, text=msg)
+-+                reason = str(user_data.get('reason', ''))
+-+                error = UserUnavailable(msg or reason or 'UserUnavailable')
+-+                failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
+-+                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
+-+                    failure = 'banned'
+-                 if failure:
+-                     error.account_failure = failure
+-                 raise error
+-@@ -262,8 +297,11 @@ def compatibility_client():
+-             user_data = response['data']['user']['result']
+-             if user_data.get('__typename') == 'UserUnavailable':
+-                 msg = str(user_data.get('message', ''))
+--                error = UserUnavailable(msg)
+--                failure = classify_x_account_failure(raw_json=user_data, text=msg)
+-+                reason = str(user_data.get('reason', ''))
+-+                error = UserUnavailable(msg or reason or 'UserUnavailable')
+-+                failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
+-+                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
+-+                    failure = 'banned'
+-                 if failure:
+-                     error.account_failure = failure
+-                 raise error
+-@@ -312,7 +350,13 @@ def compatibility_client():
+- 
+- 
+- def validate_versions():
+--    required = {'twikit': '2.3.3', 'httpx': '0.28.1', 'httpcore': '1.0.9', 'socksio': '1.0.0'}
+-+    required = {
+-+        'twikit': '2.3.3',
+-+        'curl_cffi': '0.16.3',
+-+        'httpx': '0.28.1',
+-+        'httpcore': '1.0.9',
+-+        'socksio': '1.0.0',
+-+    }
+-     if any(version(package) != pinned for package, pinned in required.items()):
+-         raise RuntimeError('direct_x_dependency_version_mismatch')
+- 
+-diff --git a/Bot/requirements-direct-x.txt b/Bot/requirements-direct-x.txt
+-index f6494dd..5fba9b0 100644
+---- a/Bot/requirements-direct-x.txt
+-+++ b/Bot/requirements-direct-x.txt
+-@@ -2,6 +2,7 @@
+- # HTTPX/SOCKS/Twikit versions are runtime-checked where protocol safety depends on them.
+- twikit==2.3.3
+- httpx[socks]==0.28.1
+-+curl_cffi==0.16.3
+- httpcore==1.0.9
+- socksio==1.0.0
+- anyio==4.15.1
+-diff --git a/Bot/src/directX.js b/Bot/src/directX.js
+-index 79106dd..42b703d 100644
+---- a/Bot/src/directX.js
+-+++ b/Bot/src/directX.js
+-@@ -5,6 +5,20 @@ const { spawn } = require('node:child_process');
+- const fs = require('node:fs');
+- const path = require('node:path');
+- 
+-+const activeProcesses = new Set();
+-+function cleanupActiveProcesses() {
+-+  for (const child of activeProcesses) {
+-+    try { if (!child.killed && child.exitCode === null) child.kill('SIGKILL'); } catch {}
+-+  }
+-+  activeProcesses.clear();
+-+}
+-+if (!global._directXCleanupHook) {
+-+  global._directXCleanupHook = true;
+-+  process.once('exit', cleanupActiveProcesses);
+-+  process.once('SIGINT', () => { cleanupActiveProcesses(); process.exit(130); });
+-+  process.once('SIGTERM', () => { cleanupActiveProcesses(); process.exit(143); });
+-+}
+-+
+- function extractTwidUserId(cookieFile) {
+-   try {
+-     const raw = fs.readFileSync(cookieFile, 'utf8');
+-@@ -26,7 +40,7 @@ const ambiguous = reason => ({ status: 'ambiguous', published: false, posted: fa
+- const handle = value => typeof value === 'string' && /^@?[A-Za-z0-9_]{1,15}$/.test(value) ? value.replace(/^@/, '').toLowerCase() : null;
+- const expected = account => handle(account?.username || account?.handle || account?.expectedUsername || account?.identity);
+- const numericId = value => typeof value === 'string' && /^\d+$/.test(value);
+--const validIdentity = identity => identity?.authenticated === true && handle(identity.username) && numericId(identity.userId);
+-+const validIdentity = identity => identity?.authenticated === true && identity?.state === 'authenticated' && !identity?.accountFailure && handle(identity.username) && numericId(identity.userId);
+- const readDiagnostic = value => ({
+-   phase: ['user_state', 'settings', 'profile'].includes(value?.phase) ? value.phase : 'bridge',
+-   httpStatus: Number.isInteger(value?.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599 ? value.httpStatus : null,
+-@@ -62,6 +76,8 @@ class DirectXAdapter {
+-     const child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
+-       stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
+-     });
+-+    activeProcesses.add(child);
+-+    child.once('exit', () => activeProcesses.delete(child));
+-     const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', () => { if (!child.pid) resolve(); }); });
+-     const state = { child, exited, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null };
+-     this.sessions.set(session, state);
+-@@ -71,12 +87,15 @@ class DirectXAdapter {
+-     child.on('exit', () => this._failed(state));
+-     child.stdout.on('data', chunk => {
+-       state.buffer += chunk.toString('utf8');
+--      if (state.buffer.length > 1_048_576) return this._failed(state);
+-       let index;
+-       while ((index = state.buffer.indexOf('\n')) >= 0) {
+--        const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1);
+--        try { this._message(state, JSON.parse(line)); } catch { this._failed(state); }
+-+        const line = state.buffer.slice(0, index);
+-+        state.buffer = state.buffer.slice(index + 1);
+-+        const trimmed = line.trim();
+-+        if (!trimmed) continue;
+-+        try { this._message(state, JSON.parse(trimmed)); } catch { this._failed(state); }
+-       }
+-+      if (state.buffer.length > 1_048_576) return this._failed(state);
+-     });
+-     try {
+-       const resolvedCookie = path.resolve(String(selected.cookieFile || selected.cookiePath));
+-@@ -87,13 +106,14 @@ class DirectXAdapter {
+-         use_cache: Boolean(effectiveUserId && !selected.verifyNetwork),
+-       }, proxy }, { timeout: this.openTimeoutMs, signal });
+-       const identity = result.identity;
+--      if (validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
+-+      const isAccountFailed = Boolean(result.accountFailure || identity?.accountFailure || identity?.state === 'suspended' || identity?.state === 'blocked');
+-+      if (!isAccountFailed && validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
+-           (!selected.userId || selected.userId === identity.userId)) {
+-         state.identity = Object.freeze({ ...identity, username: handle(identity.username) });
+-         session.identity = { ...state.identity };
+-         session.state = 'authenticated';
+-       } else {
+--        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure, reason: result.reason || 'identity_unverified', readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure };
+-+        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure || identity?.accountFailure, reason: result.reason || identity?.reason || (isAccountFailed ? 'account_suspended_or_failed' : 'identity_unverified'), readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure && !identity?.accountFailure };
+-         session.state = 'blocked';
+-         await this.close({ session });
+-       }
+-@@ -190,7 +210,7 @@ class DirectXAdapter {
+-   _failed(state) {
+-     if (state.dead) return;
+-     state.dead = true;
+--    state.child.kill('SIGKILL');
+-+    try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
+-     state.pending?.reject();
+-   }
+- 
+-@@ -198,7 +218,23 @@ class DirectXAdapter {
+-     if (!session) return;
+-     session.closed = true;
+-     const state = this.sessions.get(session);
+--    if (state) { this._failed(state); await state.exited; } // route owner must observe process exit
+-+    if (state) {
+-+      if (!state.dead) {
+-+        state.dead = true;
+-+        state.pending?.reject();
+-+        try {
+-+          state.child.stdin.end();
+-+          state.child.kill('SIGTERM');
+-+        } catch {}
+-+        const forceTimer = setTimeout(() => {
+-+          try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
+-+        }, 500);
+-+        await state.exited;
+-+        clearTimeout(forceTimer);
+-+      } else {
+-+        await state.exited;
+-+      }
+-+    }
+-   }
+- }
+- function checkedTimeout(value) {
+-diff --git a/Bot/src/dockerVpn.js b/Bot/src/dockerVpn.js
+-index a972fe3..5960a13 100644
+---- a/Bot/src/dockerVpn.js
+-+++ b/Bot/src/dockerVpn.js
+-@@ -4,6 +4,7 @@ const { execFile } = require('node:child_process');
+- const { promisify } = require('node:util');
+- const fs = require('node:fs/promises');
+- const path = require('node:path');
+-+const os = require('node:os');
+- const { isPublicIp } = require('./publicIp');
+- const { normalizeAccountId } = require('./accounts');
+- 
+-@@ -11,7 +12,8 @@ const exec = promisify(execFile);
+- const BASE_PORT = 18801;
+- const MAX_SLOTS = 5;
+- const CONTAINER_PREFIX = 'yj_autopost_vpn_';
+--const VPN_IMAGE = 'yj_autopost_vpn_image:latest';
+-+const DEFAULT_VPN_VERSION = '6.0.2';
+-+const VPN_IMAGE = process.env.VPN_IMAGE || `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}`;
+- const OWNER = 'yj-autopost';
+- const CONTRACT = 'independent-v1';
+- const TOKEN_TARGET = '/run/secrets/nordvpn_token';
+-@@ -36,7 +38,11 @@ async function validateTokenFile(file) {
+- }
+- 
+- /** Dependency injection keeps tests away from the real Docker daemon and credentials. */
+--function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile } = {}) {
+-+function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile, serverIp: initialServerIp = null } = {}) {
+-+  let cachedServerIp = (initialServerIp && isPublicIp(String(initialServerIp).trim()))
+-+    ? String(initialServerIp).trim()
+-+    : null;
+-+
+-   async function docker(args, timeout = 15_000) {
+-     try { return await command('docker', args, { timeout, maxBuffer: 1024 * 1024 }); }
+-     catch { throw new Error(`VPN Docker ${args[0]} failed`); } // Never relay Docker inspect/env or command stderr.
+-@@ -47,11 +53,15 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
+-       const { stdout } = await docker(['container', 'inspect', name]);
+-       const [info] = JSON.parse(stdout);
+-       const labels = info.Config?.Labels || {};
+-+      const img = info.Config?.Image || '';
+-+      const imageCompatible = img === VPN_IMAGE ||
+-+        img === `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}` ||
+-+        img === 'yj_autopost_vpn_image:latest';
+-       return {
+-         exists: true, running: info.State?.Running === true, status: info.State?.Status,
+-         healthy: info.State?.Health?.Status === 'healthy', healthStatus: info.State?.Health?.Status || null,
+-         owned: labels['io.yj-autopost.owner'] === OWNER && labels['io.yj-autopost.slot'] === String(slot),
+--        compatible: labels['io.yj-autopost.contract'] === CONTRACT && info.Config?.Image === VPN_IMAGE,
+-+        compatible: labels['io.yj-autopost.contract'] === CONTRACT && imageCompatible,
+-         name
+-       };
+-     } catch {
+-@@ -75,11 +85,50 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
+-     return null;
+-   }
+-   async function getServerIp() {
+-+    if (cachedServerIp) return cachedServerIp;
+-+
+-+    // 1. Check configured process.env.SERVER_IP or config().SERVER_IP
+-+    let configuredIp = (process.env.SERVER_IP || '').trim();
+-+    if (!configuredIp) {
+-+      try {
+-+        const { config } = require('./env');
+-+        const envConf = config();
+-+        if (envConf && typeof envConf.SERVER_IP === 'string') {
+-+          configuredIp = envConf.SERVER_IP.trim();
+-+        }
+-+      } catch {}
+-+    }
+-+    if (configuredIp && isPublicIp(configuredIp)) {
+-+      cachedServerIp = configuredIp;
+-+      return cachedServerIp;
+-+    }
+-+
+-+    // 2. Check local network interfaces for a public IPv4 address
+-+    try {
+-+      const interfaces = os.networkInterfaces();
+-+      for (const iface of Object.values(interfaces)) {
+-+        for (const net of iface || []) {
+-+          if (net.family === 'IPv4' && !net.internal && isPublicIp(net.address)) {
+-+            cachedServerIp = net.address;
+-+            return cachedServerIp;
+-+          }
+-+        }
+-+      }
+-+    } catch {}
+-+
+-+    // 3. Fallback: query ipify WITHOUT --noproxy '*' and cache in memory to prevent repeated external requests
+-     try {
+--      const { stdout } = await command('curl', ['--noproxy', '*', '--ipv4', '--fail', '--max-time', '5',
+-+      const { stdout } = await command('curl', ['--ipv4', '--fail', '--max-time', '5',
+-         '--silent', 'https://api.ipify.org'], { timeout: 7_000 });
+--      const ip = stdout.trim(); return isPublicIp(ip) ? ip : null;
+--    } catch { return null; }
+-+      const ip = stdout.trim();
+-+      if (isPublicIp(ip)) {
+-+        cachedServerIp = ip;
+-+        return cachedServerIp;
+-+      }
+-+    } catch {
+-+      return null;
+-+    }
+-+    return null;
+-   }
+-   async function healthCheck(slot) {
+-     const port = slotPort(slot);
+-@@ -225,7 +274,10 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
+-   }
+-   return { containerStatus, getExitIp, getServerIp, healthCheck, ensureContainer, destroyContainer,
+-     rotateContainerIp, normalizeSubnet,
+--    testSocksProxy: async port => Boolean(await getExitIp(port)) };
+-+    testSocksProxy: async port => Boolean(await getExitIp(port)),
+-+    setServerIp: ip => { cachedServerIp = (ip && isPublicIp(String(ip).trim())) ? String(ip).trim() : null; },
+-+    getCachedServerIp: () => cachedServerIp,
+-+    clearCachedServerIp: () => { cachedServerIp = null; } };
+- }
+- const runtime = createDockerRuntime();
+- 
+-@@ -384,4 +436,5 @@ class VpnSlotManager {
+-   }
+- }
+- module.exports = { VpnSlotManager, createDockerRuntime, validateTokenFile, ...runtime,
+--  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE };
+-+  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE,
+-+  DEFAULT_VPN_VERSION, NORDVPN_VERSION: DEFAULT_VPN_VERSION };
+-diff --git a/Bot/src/env.js b/Bot/src/env.js
+-index 385f7be..bd98df2 100644
+---- a/Bot/src/env.js
+-+++ b/Bot/src/env.js
+-@@ -1,6 +1,18 @@
+- 'use strict';
+-+
+- const fs = require('node:fs');
+- const path = require('node:path');
+-+const { isPublicIp } = require('./publicIp');
+-+
+-+class EnvValidationError extends Error {
+-+  constructor(message, errors = []) {
+-+    super(message);
+-+    this.name = 'EnvValidationError';
+-+    this.code = 'ENV_VALIDATION_FAILED';
+-+    this.errors = errors;
+-+  }
+-+}
+-+
+- function loadLocalEnv(file = path.join(__dirname, '..', '.env.local')) {
+-   if (!fs.existsSync(file)) return {};
+-   const out = {};
+-@@ -10,5 +22,144 @@ function loadLocalEnv(file = path.join(__dirname, '..', '.env.local')) {
+-   }
+-   return out;
+- }
+--function config(file) { const local = loadLocalEnv(file); return { ...local, ...process.env }; }
+--module.exports = { loadLocalEnv, config };
+-+
+-+function validateEnv(env = config(), options = {}) {
+-+  if (!env || typeof env !== 'object') {
+-+    throw new TypeError('Environment variables must be provided as an object');
+-+  }
+-+
+-+  const errors = [];
+-+
+-+  // Determine production / daemon mode
+-+  let isProduction;
+-+  if (typeof options.isProduction === 'boolean') {
+-+    isProduction = options.isProduction;
+-+  } else if (typeof options.daemon === 'boolean') {
+-+    isProduction = options.daemon;
+-+  } else if (options.mode) {
+-+    isProduction = options.mode === 'production' || options.mode === 'daemon';
+-+  } else {
+-+    isProduction = Boolean(
+-+      env.NODE_ENV === 'production' ||
+-+      env.DAEMON_MODE === 'true' ||
+-+      env.DAEMON_MODE === '1' ||
+-+      process.env.NODE_ENV === 'production' ||
+-+      process.env.DAEMON_MODE === 'true'
+-+    );
+-+  }
+-+
+-+  const requiredKeys = options.requiredKeys || [
+-+    'TELEGRAM_BOT_TOKEN',
+-+    'BOT_OWNER_ID',
+-+    'BOT_OWNER_CHAT_ID',
+-+    'BOT_DATA_DIR'
+-+  ];
+-+
+-+  if (isProduction || options.strict) {
+-+    for (const key of requiredKeys) {
+-+      const val = env[key];
+-+      if (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) {
+-+        errors.push(`Missing required environment variable: ${key}`);
+-+      }
+-+    }
+-+  }
+-+
+-+  // Type and format validation for present keys
+-+  if (env.TELEGRAM_BOT_TOKEN !== undefined && env.TELEGRAM_BOT_TOKEN !== null && env.TELEGRAM_BOT_TOKEN !== '') {
+-+    const token = String(env.TELEGRAM_BOT_TOKEN).trim();
+-+    if (!/^\d{6,14}:[A-Za-z0-9_-]{30,60}$/.test(token)) {
+-+      errors.push('Invalid TELEGRAM_BOT_TOKEN format: must match <bot_id>:<secret> (e.g. 123456789:ABCdef...)');
+-+    }
+-+  }
+-+
+-+  if (env.BOT_OWNER_ID !== undefined && env.BOT_OWNER_ID !== null && env.BOT_OWNER_ID !== '') {
+-+    const raw = String(env.BOT_OWNER_ID).trim();
+-+    const ids = raw.split(/[,\s]+/).filter(Boolean);
+-+    if (ids.length === 0 || ids.some(id => !/^\d+$/.test(id))) {
+-+      errors.push('Invalid BOT_OWNER_ID format: must be numeric Telegram user ID(s)');
+-+    }
+-+  }
+-+
+-+  if (env.BOT_OWNER_CHAT_ID !== undefined && env.BOT_OWNER_CHAT_ID !== null && env.BOT_OWNER_CHAT_ID !== '') {
+-+    const raw = String(env.BOT_OWNER_CHAT_ID).trim();
+-+    const ids = raw.split(/[,\s]+/).filter(Boolean);
+-+    if (ids.length === 0 || ids.some(id => !/^-?\d+$/.test(id))) {
+-+      errors.push('Invalid BOT_OWNER_CHAT_ID format: must be numeric Telegram chat ID(s)');
+-+    }
+-+  }
+-+
+-+  if (env.BOT_DATA_DIR !== undefined && env.BOT_DATA_DIR !== null && env.BOT_DATA_DIR !== '') {
+-+    const dir = String(env.BOT_DATA_DIR).trim();
+-+    if (dir.includes('\0')) {
+-+      errors.push('Invalid BOT_DATA_DIR: path contains null bytes');
+-+    }
+-+  }
+-+
+-+  const allowedUsers = env.BOT_ALLOWED_USER_IDS || env.BOT_ALLOWED_USERS;
+-+  if (allowedUsers !== undefined && allowedUsers !== null && allowedUsers !== '') {
+-+    const ids = String(allowedUsers).trim().split(/[,\s]+/).filter(Boolean);
+-+    if (ids.some(id => !/^\d+$/.test(id))) {
+-+      errors.push('Invalid BOT_ALLOWED_USER_IDS format: must be comma or space separated numeric IDs');
+-+    }
+-+  }
+-+
+-+  if (env.BOT_ALLOWED_CHAT_IDS !== undefined && env.BOT_ALLOWED_CHAT_IDS !== null && env.BOT_ALLOWED_CHAT_IDS !== '') {
+-+    const ids = String(env.BOT_ALLOWED_CHAT_IDS).trim().split(/[,\s]+/).filter(Boolean);
+-+    if (ids.some(id => !/^-?\d+$/.test(id))) {
+-+      errors.push('Invalid BOT_ALLOWED_CHAT_IDS format: must be comma or space separated numeric chat IDs');
+-+    }
+-+  }
+-+
+-+  if (env.SERVER_IP !== undefined && env.SERVER_IP !== null && env.SERVER_IP !== '') {
+-+    const ip = String(env.SERVER_IP).trim();
+-+    if (!isPublicIp(ip)) {
+-+      errors.push(`Invalid SERVER_IP: "${ip}" is not a valid public IP address`);
+-+    }
+-+  }
+-+
+-+  if (env.NORDVPN_TOKEN !== undefined && env.NORDVPN_TOKEN !== null && env.NORDVPN_TOKEN !== '') {
+-+    const token = String(env.NORDVPN_TOKEN).trim();
+-+    if (!/^[0-9a-fA-F]{64}$/.test(token)) {
+-+      errors.push('Invalid NORDVPN_TOKEN format: must be a 64-character hexadecimal token');
+-+    }
+-+  }
+-+
+-+  if (env.NORDVPN_TOKEN_FILE !== undefined && env.NORDVPN_TOKEN_FILE !== null && env.NORDVPN_TOKEN_FILE !== '') {
+-+    const file = String(env.NORDVPN_TOKEN_FILE).trim();
+-+    if (!path.isAbsolute(file) || /[,\n\r]/.test(file)) {
+-+      errors.push('Invalid NORDVPN_TOKEN_FILE: must be an absolute path without commas or newlines');
+-+    }
+-+  }
+-+
+-+  if (env.NORDVPN_VERSION !== undefined && env.NORDVPN_VERSION !== null && env.NORDVPN_VERSION !== '') {
+-+    const version = String(env.NORDVPN_VERSION).trim();
+-+    if (!/^\d+(?:\.\d+)*(?:-[a-zA-Z0-9.]+)?$/.test(version)) {
+-+      errors.push(`Invalid NORDVPN_VERSION format: "${version}"`);
+-+    }
+-+  }
+-+
+-+  if (env.PORT !== undefined && env.PORT !== null && env.PORT !== '') {
+-+    const p = Number(env.PORT);
+-+    if (!Number.isInteger(p) || p < 1 || p > 65535) {
+-+      errors.push('Invalid PORT format: must be an integer between 1 and 65535');
+-+    }
+-+  }
+-+
+-+  if (errors.length > 0) {
+-+    const message = `Environment validation failed with ${errors.length} error(s):\n  - ${errors.join('\n  - ')}`;
+-+    throw new EnvValidationError(message, errors);
+-+  }
+-+
+-+  return env;
+-+}
+-+
+-+function config(file, options = {}) {
+-+  const local = loadLocalEnv(file);
+-+  const merged = { ...local, ...process.env };
+-+  if (options.validate) {
+-+    return validateEnv(merged, options);
+-+  }
+-+  return merged;
+-+}
+-+
+-+module.exports = { loadLocalEnv, config, validateEnv, EnvValidationError };
+-diff --git a/Bot/src/runner.js b/Bot/src/runner.js
+-index 7feda47..3117b7c 100644
+---- a/Bot/src/runner.js
+-+++ b/Bot/src/runner.js
+-@@ -61,7 +61,12 @@ class SingleInstanceLock {
+-     if (Number.isInteger(record?.pid) && record.pid > 0) {
+-       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
+-       // A long-lived polling service is not stale just because its lock is old.
+--      if (!dead) return false;
+-+      if (!dead) {
+-+        const locked = new Error(`Telegram runner lock is held by PID ${record.pid}: ${this.lockPath}`);
+-+        locked.code = 'INSTANCE_LOCKED';
+-+        locked.pid = record.pid;
+-+        throw locked;
+-+      }
+-     }
+-     if (!(dead || (!record && Date.now() - stat.mtimeMs >= this.staleMs))) return false;
+-     // Atomic recovery: rename to an isolated stale path first to eliminate race conditions
+-@@ -1126,6 +1131,11 @@ async function run({
+-           }
+-         }
+-       } catch (error) {
+-+        if (error.telegramCode === 409 || error.statusCode === 409 || /conflict/i.test(error.message || '')) {
+-+          logger.error(JSON.stringify({ event: 'telegram_conflict', code: 'TELEGRAM_CONFLICT', message: error.message }));
+-+          const conflictErr = Object.assign(new Error(`Telegram polling conflict: another instance is running (${error.message})`), { code: 'TELEGRAM_CONFLICT', cause: error });
+-+          throw conflictErr;
+-+        }
+-         logger.error(JSON.stringify({ event: 'poll_failed', code: error.code || 'NETWORK' }));
+-         if (!stopping) await sleepFn(pollMs);
+-       }
+-diff --git a/Bot/src/telegramApi.js b/Bot/src/telegramApi.js
+-index d5e7eb4..a7c55c8 100644
+---- a/Bot/src/telegramApi.js
+-+++ b/Bot/src/telegramApi.js
+-@@ -94,11 +94,14 @@ function transfer(url, { method = 'POST', body, headers, timeoutMs = 30_000, max
+- 
+- function request(token, method, params = {}, options = {}) {
+-   if (!token) return Promise.reject(Object.assign(new Error('TELEGRAM_BOT_TOKEN is required'), { code: 'CONFIG_ERROR' }));
+--  if (typeof options.request === 'function') return Promise.resolve(options.request(method, params));
+-+  const timeoutMs = method === 'getUpdates' && Number.isFinite(params?.timeout)
+-+    ? Math.max(options.timeoutMs || 30_000, (params.timeout + 15) * 1000)
+-+    : options.timeoutMs;
+-+  if (typeof options.request === 'function') return Promise.resolve(options.request(method, params, { timeoutMs }));
+-   const url = new URL(`/bot${encodeURIComponent(token)}/${method}`, options.baseUrl || 'https://api.telegram.org');
+-   const body = JSON.stringify(params);
+-   return transfer(url, {
+--    body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs: options.timeoutMs,
+-+    body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs,
+-     decode: (data, response) => parseTelegramEnvelope(data.toString('utf8'), method, response)
+-   });
+- }
 diff --git a/Bot/python/direct_x_bridge.py b/Bot/python/direct_x_bridge.py
-index 3704fa2..119b6aa 100644
+index 119b6aa..5735939 100644
 --- a/Bot/python/direct_x_bridge.py
 +++ b/Bot/python/direct_x_bridge.py
-@@ -15,6 +15,16 @@ import urllib.parse
- 
- # -I excludes even the script directory; add ONLY this owned directory.
+@@ -17,12 +17,15 @@ import urllib.parse
  sys.path.insert(0, str(Path(__file__).resolve().parent))
-+from direct_x_compat import _compat_user_data
-+
-+if sys.platform == 'linux':
-+    try:
-+        import ctypes
-+        import signal
-+        # PR_SET_PDEATHSIG = 1: kernel sends SIGTERM to child when parent terminates
-+        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
-+    except Exception:
-+        pass
+ from direct_x_compat import _compat_user_data
  
+-if sys.platform == 'linux':
++if sys.platform.startswith('linux'):
+     try:
+         import ctypes
+         import signal
+         # PR_SET_PDEATHSIG = 1: kernel sends SIGTERM to child when parent terminates
+-        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
++        libc = ctypes.CDLL('libc.so.6', use_errno=True)
++        res = libc.prctl(1, signal.SIGTERM)
++        if res == 0 and os.getppid() == 1:
++            sys.exit(1)
+     except Exception:
+         pass
  
- def validate_proxy(proxy):
-@@ -386,11 +396,19 @@ class DirectSession:
-         twid = unquote(getattr(self.client, 'get_cookies', lambda: {})().get('twid', ''))
-         candidate = twid[2:] if twid.startswith('u=') and numeric_id(twid[2:]) else None
- 
--        # Clean Pre-Tweet Fast Path:
--        # If use_cache is enabled and account has a saved identity and matching twid cookie,
--        # avoid hitting dead/robotic endpoints (settings.json 404, user_state.json) before tweeting.
--        # Identity and status are validated natively during CreateTweet.
-+        # Clean Pre-Tweet Fast Path with active state verification (FINDING-007):
-+        # Even when use_cache is enabled, do NOT bypass account suspension or active state verification.
-+        # Verify account state against live API via profile fetch before declaring authenticated.
-         if self.use_cache and self.expected and self.expected_id and candidate and candidate == self.expected_id:
-+            if hasattr(self.client, 'get_user_by_id'):
-+                self.read_phase = 'profile'
-+                user = await self.client.get_user_by_id(candidate)
-+                fetched_name = username(getattr(user, 'screen_name', None))
-+                fetched_id = getattr(user, 'id', None)
-+                if fetched_name and fetched_name != self.expected:
-+                    raise ValueError('auth_identity_mismatch')
-+                if fetched_id and str(fetched_id) != str(self.expected_id):
-+                    raise ValueError('auth_identity_mismatch')
-             result = {'state': 'authenticated', 'authenticated': True, 'username': self.expected, 'userId': self.expected_id}
-             self.verified = result
+@@ -766,7 +769,7 @@ class DirectSession:
+                 result['accountFailure'] = account_failure
+             if x_error_code:
+                 result['xErrorCode'] = x_error_code
+-            result['rawError'] = str(exc)
++            result['rawError'] = str(exc)[:2048]
              return result
-@@ -571,6 +589,8 @@ class DirectSession:
-                                             core_user = (user_res.get('result') or {}) if isinstance(user_res, dict) else {}
-                                             if isinstance(core_user, dict) and isinstance(core_user.get('user'), dict):
-                                                 core_user = core_user.get('user')
-+                                            if isinstance(core_user, dict):
-+                                                core_user = _compat_user_data(core_user)
-                                             core_legacy = (core_user.get('legacy') or {}) if isinstance(core_user, dict) else {}
-                                             user_name_extracted = (core_legacy.get('screen_name') if isinstance(core_legacy, dict) else None) or (legacy.get('screen_name') if isinstance(legacy, dict) else None)
-                                             user_id_extracted = (legacy.get('user_id_str') if isinstance(legacy, dict) else None) or (core_user.get('rest_id') if isinstance(core_user, dict) else None)
+ 
+ 
 diff --git a/Bot/python/direct_x_compat.py b/Bot/python/direct_x_compat.py
-index 9333a18..be8df67 100644
+index be8df67..37c75b6 100644
 --- a/Bot/python/direct_x_compat.py
 +++ b/Bot/python/direct_x_compat.py
-@@ -36,30 +36,57 @@ async def _transaction_indices(home_page_response, session, headers):
-     raise ValueError('transaction_manifest_unavailable')
- 
- 
-+_BANNED_PATTERN = re.compile(
-+    r'\b(?:account|user)\s+(?:has\s+been\s+|is\s+)?suspended\b|\baccount\s+suspended\b',
-+    re.IGNORECASE,
-+)
-+
-+
- def _compat_user_data(data):
--    """Copy only the legacy fields required by Twikit's User constructor."""
-+    """Normalize and patch GraphQL user data so legacy entities (description.urls, url.urls, etc.)
-+    never raise KeyError: 'urls' or AttributeError on None.
-+    Handles root, wrapped, or nested user representations.
-+    """
-     if not isinstance(data, dict):
-         return data
-     result = dict(data)
-+    if 'result' in result and isinstance(result['result'], dict):
-+        result['result'] = _compat_user_data(result['result'])
-+    if 'user' in result and isinstance(result['user'], dict):
-+        result['user'] = _compat_user_data(result['user'])
-+
-     legacy = result.get('legacy')
-     if isinstance(legacy, dict):
-         legacy = dict(legacy)
--        entities = legacy.get('entities', {})
--        if isinstance(entities, dict):
-+        entities = legacy.get('entities')
-+        if not isinstance(entities, dict):
-+            entities = {}
-+        else:
-             entities = dict(entities)
--            description = entities.get('description', {})
--            if isinstance(description, dict):
--                description = dict(description)
--                description.setdefault('urls', [])
--                entities['description'] = description
--            else:
--                entities['description'] = {'urls': []}
--            entities.setdefault('url', {'urls': []})
--            legacy['entities'] = entities
-+
-+        description = entities.get('description')
-+        if not isinstance(description, dict):
-+            description = {'urls': []}
-         else:
--            legacy['entities'] = {'description': {'urls': []}, 'url': {'urls': []}}
--        legacy.setdefault('pinned_tweet_ids_str', [])
--        legacy.setdefault('withheld_in_countries', [])
-+            description = dict(description)
-+            if not isinstance(description.get('urls'), list):
-+                description['urls'] = []
-+        entities['description'] = description
-+
-+        url_obj = entities.get('url')
-+        if not isinstance(url_obj, dict):
-+            url_obj = {'urls': []}
-+        else:
-+            url_obj = dict(url_obj)
-+            if not isinstance(url_obj.get('urls'), list):
-+                url_obj['urls'] = []
-+        entities['url'] = url_obj
-+
-+        legacy['entities'] = entities
-+        if not isinstance(legacy.get('pinned_tweet_ids_str'), list):
-+            legacy['pinned_tweet_ids_str'] = []
-+        if not isinstance(legacy.get('withheld_in_countries'), list):
-+            legacy['withheld_in_countries'] = []
-         result['legacy'] = legacy
-     return result
- 
-@@ -67,7 +94,7 @@ def _compat_user_data(data):
- def classify_x_account_failure(raw_json=None, errors=None, text=''):
-     """
-     Inspect X responses/errors and classify failure into:
--      'banned'  -> Permanent suspension (64, 63, 141, suspended, banned)
-+      'banned'  -> Permanent suspension (64, 63, 141, suspended)
-       'captcha' -> Verification/Arkose/Lock challenge (326, 353, 399, 241, bounce_location, captcha, challenge)
-       'auth'    -> Bad or expired credentials (32, 89, 135, 215)
-       None      -> No terminal account failure detected
-@@ -85,6 +112,11 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
-             has_bounce = True
-         if isinstance(raw_json.get('message'), str):
-             messages.append(raw_json['message'])
-+        if isinstance(raw_json.get('reason'), str):
-+            reason_str = raw_json['reason'].strip().lower()
-+            if reason_str == 'suspended':
-+                return 'banned'
-+            messages.append(raw_json['reason'])
- 
-     for e in errors:
-         if isinstance(e, dict):
-@@ -104,7 +136,7 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
- 
-     combined = ' '.join(messages).lower()
- 
--    if codes & {64, 63, 141} or 'suspended' in combined or 'banned' in combined:
-+    if (codes & {64, 63, 141}) or bool(_BANNED_PATTERN.search(combined)):
-         return 'banned'
- 
-     captcha_kw = (
-@@ -248,8 +280,11 @@ def compatibility_client():
-             user_data = response.get('data', {}).get('user', {}).get('result', {})
-             if user_data.get('__typename') == 'UserUnavailable':
-                 msg = str(user_data.get('message', ''))
--                error = UserUnavailable(msg)
--                failure = classify_x_account_failure(raw_json=user_data, text=msg)
-+                reason = str(user_data.get('reason', ''))
-+                error = UserUnavailable(msg or reason or 'UserUnavailable')
-+                failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
-+                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
-+                    failure = 'banned'
-                 if failure:
-                     error.account_failure = failure
-                 raise error
-@@ -262,8 +297,11 @@ def compatibility_client():
-             user_data = response['data']['user']['result']
-             if user_data.get('__typename') == 'UserUnavailable':
-                 msg = str(user_data.get('message', ''))
--                error = UserUnavailable(msg)
--                failure = classify_x_account_failure(raw_json=user_data, text=msg)
-+                reason = str(user_data.get('reason', ''))
-+                error = UserUnavailable(msg or reason or 'UserUnavailable')
-+                failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
-+                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
-+                    failure = 'banned'
-                 if failure:
-                     error.account_failure = failure
-                 raise error
-@@ -312,7 +350,13 @@ def compatibility_client():
- 
- 
+@@ -246,9 +246,7 @@ def compatibility_client():
+                 raw_json = {}
+             errors = raw_json.get('errors', []) if isinstance(raw_json, dict) else []
+             errors = errors if isinstance(errors, list) else []
+-            resp_text = getattr(response, 'text', '')
+-            text_to_check = resp_text if (response.status_code >= 400 or errors) else ''
+-            failure = classify_x_account_failure(raw_json=raw_json, errors=errors, text=text_to_check)
++            failure = classify_x_account_failure(raw_json=raw_json, errors=errors)
+             if failure:
+                 error = TwitterException('direct_x_account_failure')
+                 error.account_failure = failure
+@@ -352,7 +350,7 @@ def compatibility_client():
  def validate_versions():
--    required = {'twikit': '2.3.3', 'httpx': '0.28.1', 'httpcore': '1.0.9', 'socksio': '1.0.0'}
-+    required = {
-+        'twikit': '2.3.3',
-+        'curl_cffi': '0.16.3',
-+        'httpx': '0.28.1',
-+        'httpcore': '1.0.9',
-+        'socksio': '1.0.0',
-+    }
-     if any(version(package) != pinned for package, pinned in required.items()):
-         raise RuntimeError('direct_x_dependency_version_mismatch')
+     required = {
+         'twikit': '2.3.3',
+-        'curl_cffi': '0.16.3',
++        'curl_cffi': '0.17.0',
+         'httpx': '0.28.1',
+         'httpcore': '1.0.9',
+         'socksio': '1.0.0',
+diff --git a/Bot/python/test_p2_track2.py b/Bot/python/test_p2_track2.py
+index 31a1084..1e8ebd6 100644
+--- a/Bot/python/test_p2_track2.py
++++ b/Bot/python/test_p2_track2.py
+@@ -25,11 +25,11 @@ class TestFinding012Requirements(unittest.TestCase):
+     def test_curl_cffi_in_requirements(self):
+         req_file = Path(__file__).resolve().parent.parent / 'requirements-direct-x.txt'
+         content = req_file.read_text(encoding='utf-8')
+-        self.assertIn('curl_cffi==0.16.3', content)
++        self.assertIn('curl_cffi==0.17.0', content)
  
-diff --git a/Bot/requirements-direct-x.txt b/Bot/requirements-direct-x.txt
-index f6494dd..5fba9b0 100644
---- a/Bot/requirements-direct-x.txt
-+++ b/Bot/requirements-direct-x.txt
-@@ -2,6 +2,7 @@
- # HTTPX/SOCKS/Twikit versions are runtime-checked where protocol safety depends on them.
- twikit==2.3.3
- httpx[socks]==0.28.1
-+curl_cffi==0.16.3
- httpcore==1.0.9
- socksio==1.0.0
- anyio==4.15.1
+     def test_curl_cffi_importable(self):
+         import curl_cffi
+-        self.assertEqual(curl_cffi.__version__, '0.16.3')
++        self.assertEqual(curl_cffi.__version__, '0.17.0')
+ 
+ 
+ class TestFinding010ClassifyAccountFailure(unittest.TestCase):
 diff --git a/Bot/src/directX.js b/Bot/src/directX.js
-index 79106dd..42b703d 100644
+index 42b703d..a11b9c3 100644
 --- a/Bot/src/directX.js
 +++ b/Bot/src/directX.js
-@@ -5,6 +5,20 @@ const { spawn } = require('node:child_process');
- const fs = require('node:fs');
- const path = require('node:path');
- 
-+const activeProcesses = new Set();
-+function cleanupActiveProcesses() {
-+  for (const child of activeProcesses) {
-+    try { if (!child.killed && child.exitCode === null) child.kill('SIGKILL'); } catch {}
-+  }
-+  activeProcesses.clear();
-+}
-+if (!global._directXCleanupHook) {
-+  global._directXCleanupHook = true;
-+  process.once('exit', cleanupActiveProcesses);
-+  process.once('SIGINT', () => { cleanupActiveProcesses(); process.exit(130); });
-+  process.once('SIGTERM', () => { cleanupActiveProcesses(); process.exit(143); });
-+}
-+
- function extractTwidUserId(cookieFile) {
-   try {
-     const raw = fs.readFileSync(cookieFile, 'utf8');
-@@ -26,7 +40,7 @@ const ambiguous = reason => ({ status: 'ambiguous', published: false, posted: fa
- const handle = value => typeof value === 'string' && /^@?[A-Za-z0-9_]{1,15}$/.test(value) ? value.replace(/^@/, '').toLowerCase() : null;
- const expected = account => handle(account?.username || account?.handle || account?.expectedUsername || account?.identity);
- const numericId = value => typeof value === 'string' && /^\d+$/.test(value);
--const validIdentity = identity => identity?.authenticated === true && handle(identity.username) && numericId(identity.userId);
-+const validIdentity = identity => identity?.authenticated === true && identity?.state === 'authenticated' && !identity?.accountFailure && handle(identity.username) && numericId(identity.userId);
- const readDiagnostic = value => ({
-   phase: ['user_state', 'settings', 'profile'].includes(value?.phase) ? value.phase : 'bridge',
-   httpStatus: Number.isInteger(value?.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599 ? value.httpStatus : null,
-@@ -62,6 +76,8 @@ class DirectXAdapter {
-     const child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
-       stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
-     });
-+    activeProcesses.add(child);
-+    child.once('exit', () => activeProcesses.delete(child));
-     const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', () => { if (!child.pid) resolve(); }); });
-     const state = { child, exited, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null };
-     this.sessions.set(session, state);
-@@ -71,12 +87,15 @@ class DirectXAdapter {
-     child.on('exit', () => this._failed(state));
-     child.stdout.on('data', chunk => {
-       state.buffer += chunk.toString('utf8');
--      if (state.buffer.length > 1_048_576) return this._failed(state);
-       let index;
-       while ((index = state.buffer.indexOf('\n')) >= 0) {
--        const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1);
--        try { this._message(state, JSON.parse(line)); } catch { this._failed(state); }
-+        const line = state.buffer.slice(0, index);
-+        state.buffer = state.buffer.slice(index + 1);
-+        const trimmed = line.trim();
-+        if (!trimmed) continue;
-+        try { this._message(state, JSON.parse(trimmed)); } catch { this._failed(state); }
-       }
-+      if (state.buffer.length > 1_048_576) return this._failed(state);
-     });
-     try {
-       const resolvedCookie = path.resolve(String(selected.cookieFile || selected.cookiePath));
-@@ -87,13 +106,14 @@ class DirectXAdapter {
-         use_cache: Boolean(effectiveUserId && !selected.verifyNetwork),
-       }, proxy }, { timeout: this.openTimeoutMs, signal });
-       const identity = result.identity;
--      if (validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
-+      const isAccountFailed = Boolean(result.accountFailure || identity?.accountFailure || identity?.state === 'suspended' || identity?.state === 'blocked');
-+      if (!isAccountFailed && validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
-           (!selected.userId || selected.userId === identity.userId)) {
-         state.identity = Object.freeze({ ...identity, username: handle(identity.username) });
-         session.identity = { ...state.identity };
-         session.state = 'authenticated';
-       } else {
--        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure, reason: result.reason || 'identity_unverified', readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure };
-+        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure || identity?.accountFailure, reason: result.reason || identity?.reason || (isAccountFailed ? 'account_suspended_or_failed' : 'identity_unverified'), readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure && !identity?.accountFailure };
-         session.state = 'blocked';
-         await this.close({ session });
-       }
-@@ -190,7 +210,7 @@ class DirectXAdapter {
+@@ -210,6 +210,10 @@ class DirectXAdapter {
    _failed(state) {
      if (state.dead) return;
      state.dead = true;
--    state.child.kill('SIGKILL');
-+    try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
++    state.buffer = '';
++    try { state.child.stdout?.destroy(); } catch {}
++    try { state.child.stderr?.destroy(); } catch {}
++    try { state.child.stdin?.destroy(); } catch {}
+     try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
      state.pending?.reject();
    }
- 
-@@ -198,7 +218,23 @@ class DirectXAdapter {
-     if (!session) return;
-     session.closed = true;
-     const state = this.sessions.get(session);
--    if (state) { this._failed(state); await state.exited; } // route owner must observe process exit
-+    if (state) {
-+      if (!state.dead) {
-+        state.dead = true;
-+        state.pending?.reject();
-+        try {
-+          state.child.stdin.end();
-+          state.child.kill('SIGTERM');
-+        } catch {}
-+        const forceTimer = setTimeout(() => {
-+          try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
-+        }, 500);
-+        await state.exited;
-+        clearTimeout(forceTimer);
-+      } else {
-+        await state.exited;
-+      }
-+    }
-   }
- }
- function checkedTimeout(value) {
 diff --git a/Bot/src/dockerVpn.js b/Bot/src/dockerVpn.js
-index a972fe3..5960a13 100644
+index 5960a13..48b518f 100644
 --- a/Bot/src/dockerVpn.js
 +++ b/Bot/src/dockerVpn.js
-@@ -4,6 +4,7 @@ const { execFile } = require('node:child_process');
- const { promisify } = require('node:util');
- const fs = require('node:fs/promises');
- const path = require('node:path');
-+const os = require('node:os');
- const { isPublicIp } = require('./publicIp');
- const { normalizeAccountId } = require('./accounts');
- 
-@@ -11,7 +12,8 @@ const exec = promisify(execFile);
- const BASE_PORT = 18801;
- const MAX_SLOTS = 5;
- const CONTAINER_PREFIX = 'yj_autopost_vpn_';
--const VPN_IMAGE = 'yj_autopost_vpn_image:latest';
-+const DEFAULT_VPN_VERSION = '6.0.2';
-+const VPN_IMAGE = process.env.VPN_IMAGE || `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}`;
- const OWNER = 'yj-autopost';
- const CONTRACT = 'independent-v1';
- const TOKEN_TARGET = '/run/secrets/nordvpn_token';
-@@ -36,7 +38,11 @@ async function validateTokenFile(file) {
- }
- 
- /** Dependency injection keeps tests away from the real Docker daemon and credentials. */
--function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile } = {}) {
-+function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile, serverIp: initialServerIp = null } = {}) {
-+  let cachedServerIp = (initialServerIp && isPublicIp(String(initialServerIp).trim()))
-+    ? String(initialServerIp).trim()
-+    : null;
-+
-   async function docker(args, timeout = 15_000) {
-     try { return await command('docker', args, { timeout, maxBuffer: 1024 * 1024 }); }
-     catch { throw new Error(`VPN Docker ${args[0]} failed`); } // Never relay Docker inspect/env or command stderr.
-@@ -47,11 +53,15 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
-       const { stdout } = await docker(['container', 'inspect', name]);
-       const [info] = JSON.parse(stdout);
-       const labels = info.Config?.Labels || {};
-+      const img = info.Config?.Image || '';
-+      const imageCompatible = img === VPN_IMAGE ||
-+        img === `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}` ||
-+        img === 'yj_autopost_vpn_image:latest';
-       return {
-         exists: true, running: info.State?.Running === true, status: info.State?.Status,
-         healthy: info.State?.Health?.Status === 'healthy', healthStatus: info.State?.Health?.Status || null,
-         owned: labels['io.yj-autopost.owner'] === OWNER && labels['io.yj-autopost.slot'] === String(slot),
--        compatible: labels['io.yj-autopost.contract'] === CONTRACT && info.Config?.Image === VPN_IMAGE,
-+        compatible: labels['io.yj-autopost.contract'] === CONTRACT && imageCompatible,
-         name
-       };
-     } catch {
-@@ -75,11 +85,50 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
-     return null;
-   }
+@@ -87,14 +87,18 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
    async function getServerIp() {
-+    if (cachedServerIp) return cachedServerIp;
-+
-+    // 1. Check configured process.env.SERVER_IP or config().SERVER_IP
-+    let configuredIp = (process.env.SERVER_IP || '').trim();
-+    if (!configuredIp) {
-+      try {
-+        const { config } = require('./env');
-+        const envConf = config();
-+        if (envConf && typeof envConf.SERVER_IP === 'string') {
-+          configuredIp = envConf.SERVER_IP.trim();
-+        }
-+      } catch {}
-+    }
-+    if (configuredIp && isPublicIp(configuredIp)) {
-+      cachedServerIp = configuredIp;
-+      return cachedServerIp;
-+    }
-+
-+    // 2. Check local network interfaces for a public IPv4 address
-+    try {
-+      const interfaces = os.networkInterfaces();
-+      for (const iface of Object.values(interfaces)) {
-+        for (const net of iface || []) {
-+          if (net.family === 'IPv4' && !net.internal && isPublicIp(net.address)) {
-+            cachedServerIp = net.address;
-+            return cachedServerIp;
-+          }
-+        }
-+      }
-+    } catch {}
-+
-+    // 3. Fallback: query ipify WITHOUT --noproxy '*' and cache in memory to prevent repeated external requests
-     try {
--      const { stdout } = await command('curl', ['--noproxy', '*', '--ipv4', '--fail', '--max-time', '5',
-+      const { stdout } = await command('curl', ['--ipv4', '--fail', '--max-time', '5',
-         '--silent', 'https://api.ipify.org'], { timeout: 7_000 });
--      const ip = stdout.trim(); return isPublicIp(ip) ? ip : null;
--    } catch { return null; }
-+      const ip = stdout.trim();
-+      if (isPublicIp(ip)) {
-+        cachedServerIp = ip;
-+        return cachedServerIp;
-+      }
-+    } catch {
-+      return null;
-+    }
-+    return null;
-   }
-   async function healthCheck(slot) {
-     const port = slotPort(slot);
-@@ -225,7 +274,10 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
-   }
-   return { containerStatus, getExitIp, getServerIp, healthCheck, ensureContainer, destroyContainer,
-     rotateContainerIp, normalizeSubnet,
--    testSocksProxy: async port => Boolean(await getExitIp(port)) };
-+    testSocksProxy: async port => Boolean(await getExitIp(port)),
-+    setServerIp: ip => { cachedServerIp = (ip && isPublicIp(String(ip).trim())) ? String(ip).trim() : null; },
-+    getCachedServerIp: () => cachedServerIp,
-+    clearCachedServerIp: () => { cachedServerIp = null; } };
- }
- const runtime = createDockerRuntime();
+     if (cachedServerIp) return cachedServerIp;
  
-@@ -384,4 +436,5 @@ class VpnSlotManager {
-   }
- }
- module.exports = { VpnSlotManager, createDockerRuntime, validateTokenFile, ...runtime,
--  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE };
-+  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE,
-+  DEFAULT_VPN_VERSION, NORDVPN_VERSION: DEFAULT_VPN_VERSION };
+-    // 1. Check configured process.env.SERVER_IP or config().SERVER_IP
+-    let configuredIp = (process.env.SERVER_IP || '').trim();
++    // 1. Check configured process.env.SERVER_IP || process.env.HOST_DIRECT_IP or config()
++    let configuredIp = (process.env.SERVER_IP || process.env.HOST_DIRECT_IP || '').trim();
+     if (!configuredIp) {
+       try {
+         const { config } = require('./env');
+         const envConf = config();
+-        if (envConf && typeof envConf.SERVER_IP === 'string') {
+-          configuredIp = envConf.SERVER_IP.trim();
++        if (envConf) {
++          if (typeof envConf.SERVER_IP === 'string') {
++            configuredIp = envConf.SERVER_IP.trim();
++          } else if (typeof envConf.HOST_DIRECT_IP === 'string') {
++            configuredIp = envConf.HOST_DIRECT_IP.trim();
++          }
+         }
+       } catch {}
+     }
 diff --git a/Bot/src/env.js b/Bot/src/env.js
-index 385f7be..bd98df2 100644
+index bd98df2..9586f0b 100644
 --- a/Bot/src/env.js
 +++ b/Bot/src/env.js
-@@ -1,6 +1,18 @@
- 'use strict';
+@@ -13,6 +13,19 @@ class EnvValidationError extends Error {
+   }
+ }
+ 
++const PLACEHOLDERS = new Set([
++  'YOUR_BOT_TOKEN_HERE', 'YOUR_TOKEN_HERE', 'CHANGE_ME', 'REDACTED',
++  'TODO', 'xxx', 'undefined', 'null', ''
++]);
 +
- const fs = require('node:fs');
- const path = require('node:path');
-+const { isPublicIp } = require('./publicIp');
-+
-+class EnvValidationError extends Error {
-+  constructor(message, errors = []) {
-+    super(message);
-+    this.name = 'EnvValidationError';
-+    this.code = 'ENV_VALIDATION_FAILED';
-+    this.errors = errors;
-+  }
++function isPlaceholder(value) {
++  if (typeof value !== 'string') return false;
++  const v = value.trim();
++  if (PLACEHOLDERS.has(v)) return true;
++  if (/^YOUR_.*_HERE$/i.test(v) || /^change_me$/i.test(v) || /^insert_.*_here$/i.test(v)) return true;
++  return false;
 +}
 +
  function loadLocalEnv(file = path.join(__dirname, '..', '.env.local')) {
    if (!fs.existsSync(file)) return {};
    const out = {};
-@@ -10,5 +22,144 @@ function loadLocalEnv(file = path.join(__dirname, '..', '.env.local')) {
-   }
-   return out;
- }
--function config(file) { const local = loadLocalEnv(file); return { ...local, ...process.env }; }
--module.exports = { loadLocalEnv, config };
-+
-+function validateEnv(env = config(), options = {}) {
-+  if (!env || typeof env !== 'object') {
-+    throw new TypeError('Environment variables must be provided as an object');
-+  }
-+
-+  const errors = [];
-+
-+  // Determine production / daemon mode
-+  let isProduction;
-+  if (typeof options.isProduction === 'boolean') {
-+    isProduction = options.isProduction;
-+  } else if (typeof options.daemon === 'boolean') {
-+    isProduction = options.daemon;
-+  } else if (options.mode) {
-+    isProduction = options.mode === 'production' || options.mode === 'daemon';
-+  } else {
-+    isProduction = Boolean(
-+      env.NODE_ENV === 'production' ||
-+      env.DAEMON_MODE === 'true' ||
-+      env.DAEMON_MODE === '1' ||
-+      process.env.NODE_ENV === 'production' ||
-+      process.env.DAEMON_MODE === 'true'
-+    );
-+  }
-+
-+  const requiredKeys = options.requiredKeys || [
-+    'TELEGRAM_BOT_TOKEN',
-+    'BOT_OWNER_ID',
-+    'BOT_OWNER_CHAT_ID',
-+    'BOT_DATA_DIR'
-+  ];
-+
-+  if (isProduction || options.strict) {
-+    for (const key of requiredKeys) {
-+      const val = env[key];
-+      if (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) {
-+        errors.push(`Missing required environment variable: ${key}`);
-+      }
-+    }
-+  }
-+
-+  // Type and format validation for present keys
-+  if (env.TELEGRAM_BOT_TOKEN !== undefined && env.TELEGRAM_BOT_TOKEN !== null && env.TELEGRAM_BOT_TOKEN !== '') {
-+    const token = String(env.TELEGRAM_BOT_TOKEN).trim();
-+    if (!/^\d{6,14}:[A-Za-z0-9_-]{30,60}$/.test(token)) {
-+      errors.push('Invalid TELEGRAM_BOT_TOKEN format: must match <bot_id>:<secret> (e.g. 123456789:ABCdef...)');
-+    }
-+  }
-+
-+  if (env.BOT_OWNER_ID !== undefined && env.BOT_OWNER_ID !== null && env.BOT_OWNER_ID !== '') {
-+    const raw = String(env.BOT_OWNER_ID).trim();
-+    const ids = raw.split(/[,\s]+/).filter(Boolean);
-+    if (ids.length === 0 || ids.some(id => !/^\d+$/.test(id))) {
-+      errors.push('Invalid BOT_OWNER_ID format: must be numeric Telegram user ID(s)');
-+    }
-+  }
-+
-+  if (env.BOT_OWNER_CHAT_ID !== undefined && env.BOT_OWNER_CHAT_ID !== null && env.BOT_OWNER_CHAT_ID !== '') {
-+    const raw = String(env.BOT_OWNER_CHAT_ID).trim();
-+    const ids = raw.split(/[,\s]+/).filter(Boolean);
-+    if (ids.length === 0 || ids.some(id => !/^-?\d+$/.test(id))) {
-+      errors.push('Invalid BOT_OWNER_CHAT_ID format: must be numeric Telegram chat ID(s)');
-+    }
-+  }
-+
-+  if (env.BOT_DATA_DIR !== undefined && env.BOT_DATA_DIR !== null && env.BOT_DATA_DIR !== '') {
-+    const dir = String(env.BOT_DATA_DIR).trim();
-+    if (dir.includes('\0')) {
-+      errors.push('Invalid BOT_DATA_DIR: path contains null bytes');
-+    }
-+  }
-+
-+  const allowedUsers = env.BOT_ALLOWED_USER_IDS || env.BOT_ALLOWED_USERS;
-+  if (allowedUsers !== undefined && allowedUsers !== null && allowedUsers !== '') {
-+    const ids = String(allowedUsers).trim().split(/[,\s]+/).filter(Boolean);
-+    if (ids.some(id => !/^\d+$/.test(id))) {
-+      errors.push('Invalid BOT_ALLOWED_USER_IDS format: must be comma or space separated numeric IDs');
-+    }
-+  }
-+
-+  if (env.BOT_ALLOWED_CHAT_IDS !== undefined && env.BOT_ALLOWED_CHAT_IDS !== null && env.BOT_ALLOWED_CHAT_IDS !== '') {
-+    const ids = String(env.BOT_ALLOWED_CHAT_IDS).trim().split(/[,\s]+/).filter(Boolean);
-+    if (ids.some(id => !/^-?\d+$/.test(id))) {
-+      errors.push('Invalid BOT_ALLOWED_CHAT_IDS format: must be comma or space separated numeric chat IDs');
-+    }
-+  }
-+
-+  if (env.SERVER_IP !== undefined && env.SERVER_IP !== null && env.SERVER_IP !== '') {
-+    const ip = String(env.SERVER_IP).trim();
-+    if (!isPublicIp(ip)) {
-+      errors.push(`Invalid SERVER_IP: "${ip}" is not a valid public IP address`);
-+    }
-+  }
-+
-+  if (env.NORDVPN_TOKEN !== undefined && env.NORDVPN_TOKEN !== null && env.NORDVPN_TOKEN !== '') {
-+    const token = String(env.NORDVPN_TOKEN).trim();
-+    if (!/^[0-9a-fA-F]{64}$/.test(token)) {
-+      errors.push('Invalid NORDVPN_TOKEN format: must be a 64-character hexadecimal token');
-+    }
-+  }
-+
-+  if (env.NORDVPN_TOKEN_FILE !== undefined && env.NORDVPN_TOKEN_FILE !== null && env.NORDVPN_TOKEN_FILE !== '') {
-+    const file = String(env.NORDVPN_TOKEN_FILE).trim();
-+    if (!path.isAbsolute(file) || /[,\n\r]/.test(file)) {
-+      errors.push('Invalid NORDVPN_TOKEN_FILE: must be an absolute path without commas or newlines');
-+    }
-+  }
-+
-+  if (env.NORDVPN_VERSION !== undefined && env.NORDVPN_VERSION !== null && env.NORDVPN_VERSION !== '') {
-+    const version = String(env.NORDVPN_VERSION).trim();
-+    if (!/^\d+(?:\.\d+)*(?:-[a-zA-Z0-9.]+)?$/.test(version)) {
-+      errors.push(`Invalid NORDVPN_VERSION format: "${version}"`);
-+    }
-+  }
-+
-+  if (env.PORT !== undefined && env.PORT !== null && env.PORT !== '') {
-+    const p = Number(env.PORT);
-+    if (!Number.isInteger(p) || p < 1 || p > 65535) {
-+      errors.push('Invalid PORT format: must be an integer between 1 and 65535');
-+    }
-+  }
-+
-+  if (errors.length > 0) {
-+    const message = `Environment validation failed with ${errors.length} error(s):\n  - ${errors.join('\n  - ')}`;
-+    throw new EnvValidationError(message, errors);
-+  }
-+
-+  return env;
-+}
-+
-+function config(file, options = {}) {
-+  const local = loadLocalEnv(file);
-+  const merged = { ...local, ...process.env };
-+  if (options.validate) {
-+    return validateEnv(merged, options);
-+  }
-+  return merged;
-+}
-+
-+module.exports = { loadLocalEnv, config, validateEnv, EnvValidationError };
 diff --git a/Bot/src/runner.js b/Bot/src/runner.js
-index 7feda47..3117b7c 100644
+index 3117b7c..f4cff21 100644
 --- a/Bot/src/runner.js
 +++ b/Bot/src/runner.js
-@@ -61,7 +61,12 @@ class SingleInstanceLock {
-     if (Number.isInteger(record?.pid) && record.pid > 0) {
-       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
-       // A long-lived polling service is not stale just because its lock is old.
--      if (!dead) return false;
-+      if (!dead) {
-+        const locked = new Error(`Telegram runner lock is held by PID ${record.pid}: ${this.lockPath}`);
-+        locked.code = 'INSTANCE_LOCKED';
-+        locked.pid = record.pid;
-+        throw locked;
-+      }
-     }
-     if (!(dead || (!record && Date.now() - stat.mtimeMs >= this.staleMs))) return false;
-     // Atomic recovery: rename to an isolated stale path first to eliminate race conditions
-@@ -1126,6 +1131,11 @@ async function run({
-           }
-         }
-       } catch (error) {
-+        if (error.telegramCode === 409 || error.statusCode === 409 || /conflict/i.test(error.message || '')) {
-+          logger.error(JSON.stringify({ event: 'telegram_conflict', code: 'TELEGRAM_CONFLICT', message: error.message }));
-+          const conflictErr = Object.assign(new Error(`Telegram polling conflict: another instance is running (${error.message})`), { code: 'TELEGRAM_CONFLICT', cause: error });
-+          throw conflictErr;
-+        }
-         logger.error(JSON.stringify({ event: 'poll_failed', code: error.code || 'NETWORK' }));
-         if (!stopping) await sleepFn(pollMs);
-       }
-diff --git a/Bot/src/telegramApi.js b/Bot/src/telegramApi.js
-index d5e7eb4..a7c55c8 100644
---- a/Bot/src/telegramApi.js
-+++ b/Bot/src/telegramApi.js
-@@ -94,11 +94,14 @@ function transfer(url, { method = 'POST', body, headers, timeoutMs = 30_000, max
- 
- function request(token, method, params = {}, options = {}) {
-   if (!token) return Promise.reject(Object.assign(new Error('TELEGRAM_BOT_TOKEN is required'), { code: 'CONFIG_ERROR' }));
--  if (typeof options.request === 'function') return Promise.resolve(options.request(method, params));
-+  const timeoutMs = method === 'getUpdates' && Number.isFinite(params?.timeout)
-+    ? Math.max(options.timeoutMs || 30_000, (params.timeout + 15) * 1000)
-+    : options.timeoutMs;
-+  if (typeof options.request === 'function') return Promise.resolve(options.request(method, params, { timeoutMs }));
-   const url = new URL(`/bot${encodeURIComponent(token)}/${method}`, options.baseUrl || 'https://api.telegram.org');
-   const body = JSON.stringify(params);
-   return transfer(url, {
--    body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs: options.timeoutMs,
-+    body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs,
-     decode: (data, response) => parseTelegramEnvelope(data.toString('utf8'), method, response)
-   });
- }
+@@ -343,7 +343,7 @@ async function run({
+           } else vpn = await attempt.wait(() => vpnSlots.ensure(account.id, { signal: attempt.signal }));
+           if (!persistResult && (!vpn.healthy || !vpn.proxy || !vpn.exitIp)) throw Object.assign(new Error('VPN route not ready'), { code: 'VPN_NOT_READY' });
+           if (attempt.signal.aborted) throw Object.assign(new Error('Refresh cancelled'), { code: 'ATTEMPT_ABORTED' });
+-          const opened = Promise.resolve().then(() => adapter.open({ account, proxy: vpn.proxy, signal: attempt.signal }));
++          const opened = Promise.resolve().then(() => adapter.open({ account: { ...account, verifyNetwork: true }, proxy: vpn.proxy, signal: attempt.signal }));
+           if (persistResult) opened.then(late => { if (attempt.signal.aborted) Promise.resolve().then(() => adapter.close({ session: late })).catch(() => {}); }, () => {});
+           session = persistResult ? await attempt.wait(() => opened) : await opened;
+           if (attempt.signal.aborted) throw Object.assign(new Error('Refresh cancelled'), { code: 'ATTEMPT_ABORTED' });

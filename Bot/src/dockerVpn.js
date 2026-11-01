@@ -87,14 +87,18 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
   async function getServerIp() {
     if (cachedServerIp) return cachedServerIp;
 
-    // 1. Check configured process.env.SERVER_IP or config().SERVER_IP
-    let configuredIp = (process.env.SERVER_IP || '').trim();
+    // 1. Check configured process.env.SERVER_IP || process.env.HOST_DIRECT_IP or config()
+    let configuredIp = (process.env.SERVER_IP || process.env.HOST_DIRECT_IP || '').trim();
     if (!configuredIp) {
       try {
         const { config } = require('./env');
         const envConf = config();
-        if (envConf && typeof envConf.SERVER_IP === 'string') {
-          configuredIp = envConf.SERVER_IP.trim();
+        if (envConf) {
+          if (typeof envConf.SERVER_IP === 'string') {
+            configuredIp = envConf.SERVER_IP.trim();
+          } else if (typeof envConf.HOST_DIRECT_IP === 'string') {
+            configuredIp = envConf.HOST_DIRECT_IP.trim();
+          }
         }
       } catch {}
     }

@@ -343,7 +343,7 @@ async function run({
           } else vpn = await attempt.wait(() => vpnSlots.ensure(account.id, { signal: attempt.signal }));
           if (!persistResult && (!vpn.healthy || !vpn.proxy || !vpn.exitIp)) throw Object.assign(new Error('VPN route not ready'), { code: 'VPN_NOT_READY' });
           if (attempt.signal.aborted) throw Object.assign(new Error('Refresh cancelled'), { code: 'ATTEMPT_ABORTED' });
-          const opened = Promise.resolve().then(() => adapter.open({ account, proxy: vpn.proxy, signal: attempt.signal }));
+          const opened = Promise.resolve().then(() => adapter.open({ account: { ...account, verifyNetwork: true }, proxy: vpn.proxy, signal: attempt.signal }));
           if (persistResult) opened.then(late => { if (attempt.signal.aborted) Promise.resolve().then(() => adapter.close({ session: late })).catch(() => {}); }, () => {});
           session = persistResult ? await attempt.wait(() => opened) : await opened;
           if (attempt.signal.aborted) throw Object.assign(new Error('Refresh cancelled'), { code: 'ATTEMPT_ABORTED' });

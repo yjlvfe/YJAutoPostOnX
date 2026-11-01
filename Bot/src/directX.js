@@ -210,6 +210,10 @@ class DirectXAdapter {
   _failed(state) {
     if (state.dead) return;
     state.dead = true;
+    state.buffer = '';
+    try { state.child.stdout?.destroy(); } catch {}
+    try { state.child.stderr?.destroy(); } catch {}
+    try { state.child.stdin?.destroy(); } catch {}
     try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
     state.pending?.reject();
   }

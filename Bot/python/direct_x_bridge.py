@@ -17,12 +17,15 @@ import urllib.parse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from direct_x_compat import _compat_user_data
 
-if sys.platform == 'linux':
+if sys.platform.startswith('linux'):
     try:
         import ctypes
         import signal
         # PR_SET_PDEATHSIG = 1: kernel sends SIGTERM to child when parent terminates
-        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
+        libc = ctypes.CDLL('libc.so.6', use_errno=True)
+        res = libc.prctl(1, signal.SIGTERM)
+        if res == 0 and os.getppid() == 1:
+            sys.exit(1)
     except Exception:
         pass
 
@@ -766,7 +769,7 @@ class DirectSession:
                 result['accountFailure'] = account_failure
             if x_error_code:
                 result['xErrorCode'] = x_error_code
-            result['rawError'] = str(exc)
+            result['rawError'] = str(exc)[:2048]
             return result
 
 

@@ -246,9 +246,7 @@ def compatibility_client():
                 raw_json = {}
             errors = raw_json.get('errors', []) if isinstance(raw_json, dict) else []
             errors = errors if isinstance(errors, list) else []
-            resp_text = getattr(response, 'text', '')
-            text_to_check = resp_text if (response.status_code >= 400 or errors) else ''
-            failure = classify_x_account_failure(raw_json=raw_json, errors=errors, text=text_to_check)
+            failure = classify_x_account_failure(raw_json=raw_json, errors=errors)
             if failure:
                 error = TwitterException('direct_x_account_failure')
                 error.account_failure = failure
@@ -352,7 +350,7 @@ def compatibility_client():
 def validate_versions():
     required = {
         'twikit': '2.3.3',
-        'curl_cffi': '0.16.3',
+        'curl_cffi': '0.17.0',
         'httpx': '0.28.1',
         'httpcore': '1.0.9',
         'socksio': '1.0.0',
