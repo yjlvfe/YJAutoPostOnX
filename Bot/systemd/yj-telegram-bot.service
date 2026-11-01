@@ -15,6 +15,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=yj-telegram-bot
 Environment=NODE_ENV=production
+Environment=DIRECT_X_PYTHON=/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30

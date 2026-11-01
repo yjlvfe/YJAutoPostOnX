@@ -56,6 +56,11 @@ function createAccountRefresh(ui, { retryMs = 2000 } = {}) {
       } catch (error) {
         if (controller.signal.aborted) return;
         failures++;
+        if (failures >= 3) {
+          job.pending.delete(id);
+          render();
+          return;
+        }
         await delay(Math.max(error.retryAfterMs || 0, Math.min(30000, retryMs * 2 ** Math.min(failures - 1, 4))), undefined, { signal: controller.signal }).catch(() => {});
       }
     }

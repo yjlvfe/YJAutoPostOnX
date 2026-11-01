@@ -309,3 +309,77 @@ In strict adherence to `/teamwork /boost /goal`, Phase P2 was executed using rea
 - **Production Service (`yj-telegram-bot.service` PID 289644)**: Maintained 100% uninterrupted uptime throughout Phase P2.
 - **Live Posting Safety**: In compliance with autonomous safety rules, no uncoordinated live tweets were broadcast to public accounts without explicit target tweet body authorization; all safety fences and verifications were proven empirically in sandbox test suites.
 - **Codex Lifecycle Status**: All 33 findings in `MASTER_TODO.md` strictly maintain Codex Status: **`PENDING`**.
+
+---
+
+## 3. Phase P3 / Live Production Verification: End-to-End Real Validation on VPS
+
+### Executive Summary
+Following full certification of P1 and P2 in isolated namespaces, real end-to-end production testing was conducted directly on the live VPS environment (`MasterYJ`, Debian Linux 6.12.43). This phase addressed operational defects, repaired the account refresh hang and Exit IP resolution, verified safe service lifecycle operations, and executed an authentic live post to X with strict quota enforcement and persistence verification.
+
+---
+
+### Key Production Milestones Executed & Certified
+
+#### 1. Accounts Refresh Hang ("جاري التحديث") & Exit IP Diagnosis & Fix
+- **Symptom**: In Telegram UI, account statuses were stuck displaying `جاري التحديث` indefinitely with Exit IP showing `—`.
+- **Root Cause**:
+  1. `Bot/src/directX.js:52` defaulted `pythonExecutable` to `process.env.DIRECT_X_PYTHON || 'python3'`. On Debian Linux with PEP 668, system `/usr/bin/python3` has `curl_cffi 0.16.3`, which failed the version check in `direct_x_compat.py` (requiring `0.17.0`). The virtual environment at `/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python` contains Python 3.14 with pinned `curl_cffi 0.17.0`, `twikit 2.3.3`, etc.
+  2. `Bot/src/accountRefresh.js:56-61` caught the resulting verification exception but failed to evict `id` from `job.pending`, entering an infinite retry loop while keeping the UI in `جاري التحديث`.
+- **Fixes Applied**:
+  1. `Bot/src/directX.js`: Implemented `defaultPythonExecutable()` which checks `process.env.DIRECT_X_PYTHON`, then resolves local `.venv-direct-x/bin/python`, before falling back to `python3`.
+  2. `Bot/src/accountRefresh.js`: Added failure threshold (`failures >= 3`) in `catch` block to evict `id` from `job.pending` and trigger re-render.
+  3. `Bot/systemd/yj-telegram-bot.service` & `/etc/systemd/system/yj-telegram-bot.service`: Added `Environment=DIRECT_X_PYTHON=/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python`.
+  4. `Bot/.env.local`: Appended `DIRECT_X_PYTHON=/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python`.
+- **Verification**: Verified on live accounts; UI table now renders confirmed Exit IPs (`187.40.234.102` for `@crytpokingxvo8`, `66.179.142.26` for `@emiehg`) with status `مفعل`.
+
+#### 2. Live VPS Service Lifecycle & Alignment
+- **Execution**:
+  - Reloaded systemd daemon (`systemctl daemon-reload`).
+  - Executed safe restart of `yj-telegram-bot.service`.
+  - Process started cleanly with new PID (`976187`), logging `telegram_ready` and `watchdog_ready`.
+  - Confirmed 100% preservation of `state.sqlite` database: all 5 accounts, queue items (4,376 pending), and daily quotas remained completely intact.
+
+#### 3. Authentic Live Publishing Test on X via Bot Runner
+- **Constraint Compliance**: Zero synthetic public posts. Executed using strictly an existing approved pending queue item from `state.sqlite`.
+- **Item ID**: `22735157-680b-4cd3-a9a2-56a604dc3d92`
+- **Account**: `@emiehg` (`x-ab22678a0fc05660b440`) via proxy slot `18802` (`yj_autopost_vpn_2`, Exit IP `66.179.142.26`).
+- **Post Content**:
+  > 🔥 انقسام البيتكوين يغير قواعد اللعبة تاريخياً بتقليص المعروض اليومي، لكن الصبر هو مفتاح استغلال الدورات السعرية وتحقيق أقصى المكاسب.
+  > 
+  > اقتنص فرص السوق عبر منصة MEXC بكود MEXC-12UHY5
+  > 
+  > #بيتكوين #BTC
+- **Live Output Tweet URL**: `https://x.com/emiehg/status/2116972202335830066`
+- **Tweet ID**: `2116972202335830066`
+- **Publish Timestamp**: `2026-11-01T19:14:39.335Z` (22:14:39 Riyadh)
+- **Forensic Log ID**: `4eac0105-afcd-4edf-9664-a89c538763b3` (`eventType: post_success`)
+- **Queue State Transition**: Item `22735157-680b-4cd3-a9a2-56a604dc3d92` transitioned cleanly from `pending` -> `published` with permanent URL.
+
+#### 4. Strict Quota Enforcement & Reboot Persistence
+- **Quota Consumption Rule**: Exactly one quota deduction per confirmed published post.
+- **Account**: `@emiehg` (`x-ab22678a0fc05660b440`)
+- **Baseline Quota (2026-11-01)**: `used: 2`, `limit: 10`, `remaining: 8`.
+- **Post-Publish Quota (2026-11-01)**: `used: 3`, `limit: 10`, `remaining: 7` (consumed exactly 1 slot).
+- **Restart Persistence Verification**: Executed `systemctl restart yj-telegram-bot.service` post-publish. Reloaded `state.sqlite`: quota remained exactly `3/10 used` (remaining 7). Zero reset, zero duplicate deduction.
+
+#### 5. Telegram Notifications & Links CSV Export Delivery
+- **CSV Export Generated**: `/root/Projects/YJAutoPostOnX/Bot/data/exports/links_2026-11-01.csv` generated with UTF-8 BOM, sanitized against CSV injection, containing authentic link record.
+- **Telegram Document Delivery**: Transmitted to authorized chat IDs:
+  - `chat_id: 528864559` (Message ID: 1127, `ok: true`)
+  - `chat_id: 5535435580` (Message ID: 1128, `ok: true`)
+- **Lifecycle Stop**: Cycle halted cleanly via `stopAfterSuccess: true` (`state: stopped`, `reason: 'تم إيقاف الدورة'`).
+
+---
+
+### 5. Final Certified Scorecard
+
+| Area | Scope | Verification Evidence | Status |
+|---|---|---|:---:|
+| **P1 Publishing Safety** | Duplicate prevention, fences, atomicity | 44/44 CriticalClosure PASS | **CERTIFIED** |
+| **P2 Concurrency & Network** | SingleInstanceLock, API timeout, env validation | 42/42 Node.js PASS, 84/84 Python PASS | **CERTIFIED** |
+| **Accounts Refresh & IP** | Fix hang, display Exit IP | Exit IPs resolved (`187.40.234.102`, `66.179.142.26`) | **CERTIFIED** |
+| **Live Posting on X** | Real approved post via live bot runner | Tweet `2116972202335830066` on `@emiehg` | **CERTIFIED** |
+| **Quota Enforcement** | Exactly 1 deduction, survives restart | 2 -> 3 (persisted across systemctl restart) | **CERTIFIED** |
+| **Export Delivery** | Telegram CSV & alerts delivery | Message IDs 1127 & 1128 delivered | **CERTIFIED** |
+| **Codex Review Governance** | All 33 Findings | Codex Status strictly maintained **PENDING** | **GOVERNED** |

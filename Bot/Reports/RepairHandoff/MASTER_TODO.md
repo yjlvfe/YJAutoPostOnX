@@ -57,6 +57,27 @@ Resolve high-impact concurrency, process lifecycle, environment integrity, and d
 
 ---
 
+## 2.5. Live Production Verification (VPS Host)
+
+### Objective
+Verify that all P1 and P2 repairs operate seamlessly on the live VPS production host (`MasterYJ`), resolve operational UI refresh hangs, align the systemd service, verify strict quota consumption and persistence, and execute an authentic live post to X with end-to-end evidence delivery.
+
+### Status: **COMPLETED (100%)**
+- **Accounts Refresh & Exit IP**: Root cause identified (system python PEP 668 version mismatch and unhandled loop). Repaired in `directX.js`, `accountRefresh.js`, `env.js`, and systemd service. Exit IPs cleanly resolved (`187.40.234.102` for `@crytpokingxvo8`, `66.179.142.26` for `@emiehg`).
+- **Live VPS Service Alignment**: Service restarted cleanly (`PID 976187`); preserved SQLite database, all 5 accounts, queue items (4,376 pending), and quotas.
+- **Authentic Live X Post**: Approved item `22735157-680b-4cd3-a9a2-56a604dc3d92` published live to X on account `@emiehg` via VPN container `yj_autopost_vpn_2` (`66.179.142.26`).
+  - **Live URL**: `https://x.com/emiehg/status/2116972202335830066`
+  - **Tweet ID**: `2116972202335830066`
+  - **Timestamp**: `2026-11-01T19:14:39.335Z` (22:14:39 Riyadh)
+  - **Forensic Log ID**: `4eac0105-afcd-4edf-9664-a89c538763b3` (`post_success`)
+- **Strict Quota Enforcement**: Daily quota for `@emiehg` incremented by exactly 1 (from 2/10 -> 3/10, 7 remaining).
+- **Restart Quota Persistence**: Re-tested by restarting `yj-telegram-bot.service` post-publish; quota remained strictly 3/10 used (7 remaining). Zero reset, zero duplicate deduction.
+- **Telegram Deliveries**: Links CSV (`links_2026-11-01.csv`) and cycle notifications delivered successfully to Telegram chat `528864559` (message 1127) and `5535435580` (message 1128).
+
+---
+
+---
+
 ## 3. Comprehensive Master Finding Registry (All 33 Findings)
 
 | Finding ID | Severity | Phase | Finding Title / Description | Affected Module | Antigravity Status | Codex Status |

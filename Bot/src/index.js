@@ -37,4 +37,8 @@ function createBot({ dataDir = process.env.BOT_DATA_DIR || path.join(process.cwd
 
 module.exports = { createBot, SqliteStore, TelegramTransport, BUTTONS, formatStatus, AuthorizationGate, parseCsv, Queue, CycleState, hash, ...scheduling, projectStatus, ForensicLogger, normalizeSubnet, SEVEN_DAYS_MS, ...require('./accounts'), ...require('./settings') };
 
-if (require.main === module) require('./runner').run().catch(error => { console.error(error.message); process.exitCode = 1; });
+if (require.main === module) {
+  const { assertValidEnv, config } = require('./env');
+  assertValidEnv(config(), { isProduction: process.env.NODE_ENV === 'production' });
+  require('./runner').run().catch(error => { console.error(error.message); process.exitCode = 1; });
+}

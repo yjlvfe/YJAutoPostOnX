@@ -185,4 +185,9 @@ function config(file, options = {}) {
   return merged;
 }
 
-module.exports = { loadLocalEnv, config, validateEnv, EnvValidationError };
+function assertValidEnv(env = config(), options = {}) {
+  const isProd = options.isProduction ?? (process.env.NODE_ENV === 'production' || options.strict || false);
+  return validateEnv(env, { ...options, isProduction: isProd });
+}
+
+module.exports = { loadLocalEnv, config, validateEnv, assertValidEnv, EnvValidationError, isPlaceholder, PLACEHOLDERS };

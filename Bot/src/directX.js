@@ -48,8 +48,16 @@ const readDiagnostic = value => ({
 });
 
 
+function defaultPythonExecutable() {
+  if (process.env.DIRECT_X_PYTHON) return process.env.DIRECT_X_PYTHON;
+  const venvPython = path.resolve(__dirname, '../.venv-direct-x/bin/python');
+  if (fs.existsSync(venvPython)) return venvPython;
+  return 'python3';
+}
+
+
 class DirectXAdapter {
-  constructor({ pythonExecutable = process.env.DIRECT_X_PYTHON || 'python3', allowPublish = false,
+  constructor({ pythonExecutable = defaultPythonExecutable(), allowPublish = false,
     openTimeoutMs = 30_000, publishTimeoutMs = 45_000, onDispatch } = {}) {
     this.pythonExecutable = pythonExecutable;
     this.allowPublish = allowPublish === true;
