@@ -17,12 +17,16 @@ jobs:
   baseline-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: Appimage
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: Appimage/package-lock.json
       - run: npm ci
       - name: Run baseline tests
         id: tests
@@ -35,18 +39,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-baseline-failure-log
-          path: baseline-tests.log
+          path: Appimage/baseline-tests.log
           if-no-files-found: error
 
   workflow-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: Appimage
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: Appimage/package-lock.json
       - run: npm ci
       - name: Run durable workflow tests
         id: tests
@@ -59,18 +67,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-workflow-failure-log
-          path: workflow-tests.log
+          path: Appimage/workflow-tests.log
           if-no-files-found: error
 
   electron-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Appimage
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: Appimage/package-lock.json
       - run: npm ci
       - name: Run Electron integration tests
         id: tests
@@ -83,19 +95,23 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-electron-failure-log
-          path: electron-tests.log
+          path: Appimage/electron-tests.log
           if-no-files-found: error
 
   package-appimage:
     needs: [baseline-tests, workflow-tests, electron-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: Appimage
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: Appimage/package-lock.json
       - run: npm ci
       - name: Build Linux AppImage
         id: build
@@ -108,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-build-failure-log
-          path: appimage-build.log
+          path: Appimage/appimage-build.log
           if-no-files-found: error
       - name: Boot AppImage in isolated HOME
         id: boot
@@ -138,7 +154,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-appimage-boot-failure-log
-          path: appimage-boot.log
+          path: Appimage/appimage-boot.log
           if-no-files-found: warn
       - name: Capture production dependency audit
         shell: bash
@@ -149,7 +165,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-production-audit
-          path: audit-prod.json
+          path: Appimage/audit-prod.json
           if-no-files-found: error
       - name: Enforce production dependency audit
         shell: bash
@@ -167,5 +183,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: YJAutoPostOnX-5.20.0-AppImage
-          path: dist/*.AppImage
+          path: Appimage/dist/*.AppImage
           if-no-files-found: error

@@ -6,21 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Least privilege: this workflow only ever reads the repo and uploads its own
-# build artifacts, so it needs nothing more than read access to contents.
 permissions:
   contents: read
 
-# A push of three commits in a row should not run this three times; the
-# newest supersedes the older ones in flight.
 concurrency:
   group: verify-xposter-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # Never run against a real X.com session, a real browser profile, or a
-  # paid AI provider from CI. list-models.test.js (npm run test:live) reads
-  # this and skips when it is absent — it must stay absent here.
   IYH_KEY: ""
 
 jobs:
@@ -28,6 +21,9 @@ jobs:
     name: npm ci / test / test:electron / audit / build / package smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: Appimage
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -36,6 +32,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: Appimage/package-lock.json
 
       - name: Install system dependencies (Xvfb + AppImage FUSE fallback)
         run: |
@@ -43,9 +41,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb libfuse2
 
       - name: Run the shared verification gate
-        # Everything CI checks lives in this one script, so local runs and CI
-        # runs cannot silently drift from each other. No `|| true` anywhere
-        # in it — a failing step here fails the workflow.
         run: bash scripts/verify-release.sh
 
       - name: Upload built AppImage
@@ -53,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xposter-appimage
-          path: dist/*.AppImage
+          path: Appimage/dist/*.AppImage
           if-no-files-found: ignore
           retention-days: 14
 
@@ -63,8 +58,8 @@ jobs:
         with:
           name: xposter-failure-logs
           path: |
-            dist/builder-*.yml
-            dist/builder-effective-config.yaml
+            Appimage/dist/builder-*.yml
+            Appimage/dist/builder-effective-config.yaml
             /tmp/xposter-verify-home-*/boot.log
           if-no-files-found: ignore
           retention-days: 14
