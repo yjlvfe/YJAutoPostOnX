@@ -2,7 +2,16 @@
 // Browserless, process-isolated X adapter. See python/README.md for the durable
 // dispatch contract. Neither credentials nor remote exception bodies are logged.
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
+
+function extractTwidUserId(cookieFile) {
+  try {
+    const raw = fs.readFileSync(cookieFile, 'utf8');
+    const m = raw.match(/["']?twid["']?\s*[:=]\s*["']?(?:u%3D|u=)(\d+)["']?/);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
 
 function validateProxy(proxy) {
   if (typeof proxy !== 'string' || !/^socks5h:\/\/(127\.0\.0\.1|localhost):1880[1-5]$/.test(proxy)) {
@@ -18,10 +27,16 @@ const handle = value => typeof value === 'string' && /^@?[A-Za-z0-9_]{1,15}$/.te
 const expected = account => handle(account?.username || account?.handle || account?.expectedUsername || account?.identity);
 const numericId = value => typeof value === 'string' && /^\d+$/.test(value);
 const validIdentity = identity => identity?.authenticated === true && handle(identity.username) && numericId(identity.userId);
+const readDiagnostic = value => ({
+  phase: ['user_state', 'settings', 'profile'].includes(value?.phase) ? value.phase : 'bridge',
+  httpStatus: Number.isInteger(value?.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599 ? value.httpStatus : null,
+  ...(Number.isFinite(value?.retryAfterSeconds) && value.retryAfterSeconds >= 0 ? { retryAfterSeconds: Math.min(900, Math.max(60, value.retryAfterSeconds)) } : {})
+});
+
 
 class DirectXAdapter {
   constructor({ pythonExecutable = process.env.DIRECT_X_PYTHON || 'python3', allowPublish = false,
-    openTimeoutMs = 30_000, publishTimeoutMs = 30_000, onDispatch } = {}) {
+    openTimeoutMs = 30_000, publishTimeoutMs = 45_000, onDispatch } = {}) {
     this.pythonExecutable = pythonExecutable;
     this.allowPublish = allowPublish === true;
     this.openTimeoutMs = checkedTimeout(openTimeoutMs);
@@ -47,7 +62,8 @@ class DirectXAdapter {
     const child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
       stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
     });
-    const state = { child, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null };
+    const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', () => { if (!child.pid) resolve(); }); });
+    const state = { child, exited, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null };
     this.sessions.set(session, state);
     child.stderr.on('data', () => {}); // Never forward Python traces / HTTP bodies.
     child.stdin.on('error', () => this._failed(state));
@@ -63,9 +79,12 @@ class DirectXAdapter {
       }
     });
     try {
+      const resolvedCookie = path.resolve(String(selected.cookieFile || selected.cookiePath));
+      const effectiveUserId = selected.userId || extractTwidUserId(resolvedCookie);
       const result = await this._command(state, { op: 'open', account: {
-        id: String(selected.id), username: expected(selected), userId: selected.userId || null,
-        cookieFile: path.resolve(String(selected.cookieFile || selected.cookiePath)),
+        id: String(selected.id), username: expected(selected), userId: effectiveUserId,
+        cookieFile: resolvedCookie,
+        use_cache: Boolean(effectiveUserId && !selected.verifyNetwork),
       }, proxy }, { timeout: this.openTimeoutMs, signal });
       const identity = result.identity;
       if (validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
@@ -74,14 +93,14 @@ class DirectXAdapter {
         session.identity = { ...state.identity };
         session.state = 'authenticated';
       } else {
-        session.identity = { state: 'identity_unverified', authenticated: false, reason: result.reason || 'identity_unverified' };
+        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure, reason: result.reason || 'identity_unverified', readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure };
         session.state = 'blocked';
         await this.close({ session });
       }
       return session;
     } catch {
       await this.close({ session });
-      throw Object.assign(new Error('Direct X session could not be verified'), { code: 'DIRECT_X_AUTH_OR_PROXY_FAILED' });
+      throw Object.assign(new Error('Direct X session could not be verified'), { code: signal?.aborted ? 'DIRECT_X_STOPPED' : 'DIRECT_X_IDENTITY_READ_UNAVAILABLE' });
     }
   }
 
@@ -103,17 +122,31 @@ class DirectXAdapter {
         timeout: this.publishTimeoutMs, signal, callback, accountId: session.accountId,
       });
       if (result.status !== 'published') {
-        if (state.used || result.ambiguous) return ambiguous(result.reason || 'publish_unverified');
-        return unsent(result.reason || 'auth_pre_dispatch_failed');
+        if (result.verifiedNotPosted === true || result.verified_not_posted === true) {
+          return {
+            status: 'not_ready',
+            published: false,
+            posted: false,
+            ambiguous: false,
+            blocked: false,
+            retryable: true,
+            verifiedNotPosted: true,
+            reason: result.reason || 'publish_not_posted_on_timeline'
+          };
+        }
+        if (state.used || result.ambiguous) return { ...ambiguous(result.reason || 'publish_unverified'), accountFailure: result.accountFailure };
+        return { ...unsent(result.reason || 'auth_pre_dispatch_failed'), accountFailure: result.accountFailure, readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure };
       }
       if (!state.used || !numericId(result.tweetId) || result.userId !== state.identity.userId || handle(result.username) !== state.identity.username) {
         return ambiguous('publish_author_or_id_unverified');
       }
       return { status: 'published', published: true, posted: true, tweetId: result.tweetId,
         username: state.identity.username, userId: state.identity.userId,
-        url: `https://x.com/${state.identity.username}/status/${result.tweetId}` };
+        url: result.tweetUrl || `https://x.com/${state.identity.username}/status/${result.tweetId}`,
+        recoveredFromTimeline: result.recoveredFromTimeline === true || result.recovered_from_timeline === true,
+        ok: true };
     } catch {
-      return state.used ? ambiguous('publish_confirmation_missing') : unsent(signal?.aborted ? 'stopped' : 'auth_pre_dispatch_timeout_or_error');
+      return state.used ? ambiguous('publish_confirmation_missing') : signal?.aborted ? unsent('stopped') : { ...unsent('identity_read_unavailable'), retryable: true };
     } finally { state.busy = false; }
   }
 
@@ -165,7 +198,7 @@ class DirectXAdapter {
     if (!session) return;
     session.closed = true;
     const state = this.sessions.get(session);
-    if (state) this._failed(state); // bounded, no network shutdown dependency
+    if (state) { this._failed(state); await state.exited; } // route owner must observe process exit
   }
 }
 function checkedTimeout(value) {
