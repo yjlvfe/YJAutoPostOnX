@@ -1,0 +1,2085 @@
+{
+  "created_at": "2026-11-01T12:35:38.810089+00:00",
+  "isolation": "private network namespace loopback-only",
+  "tests": [
+    {
+      "test_id": "A_SUCCESS",
+      "suite": "A",
+      "source_files": [
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "AST-extracted OnlySocksTransport.handle_async_request → real curl_cffi/httpx → loopback server",
+      "source_hash": {
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "ok",
+        "curl_failure_before_send": false
+      },
+      "expected": "HTTP POST server count=1",
+      "actual": {
+        "transport": {
+          "outcome": "response",
+          "status": 200,
+          "body": "{\"id\":\"101\"}"
+        },
+        "worker_exit": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/A_SUCCESS",
+      "limitations": "Source-derived AST: constructor and destination guard adapted to loopback; no Runner. When curl failure injected it precedes send."
+    },
+    {
+      "test_id": "A_CONNECT_REFUSED",
+      "suite": "A",
+      "source_files": [
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "AST-extracted OnlySocksTransport.handle_async_request → real curl_cffi/httpx → loopback server",
+      "source_hash": {
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "unreachable",
+        "curl_failure_before_send": false
+      },
+      "expected": "HTTP POST server count=0",
+      "actual": {
+        "transport": {
+          "outcome": "exception",
+          "type": "ConnectError",
+          "message": "All connection attempts failed"
+        },
+        "worker_exit": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/A_CONNECT_REFUSED",
+      "limitations": "Source-derived AST: constructor and destination guard adapted to loopback; no Runner. When curl failure injected it precedes send."
+    },
+    {
+      "test_id": "A_CURL_FAILOVER",
+      "suite": "A",
+      "source_files": [
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "AST-extracted OnlySocksTransport.handle_async_request → real curl_cffi/httpx → loopback server",
+      "source_hash": {
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "ok",
+        "curl_failure_before_send": true
+      },
+      "expected": "HTTP POST server count=1",
+      "actual": {
+        "transport": {
+          "outcome": "response",
+          "status": 200,
+          "body": "{\"id\":\"101\"}"
+        },
+        "worker_exit": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/A_CURL_FAILOVER",
+      "limitations": "Source-derived AST: constructor and destination guard adapted to loopback; no Runner. When curl failure injected it precedes send."
+    },
+    {
+      "test_id": "A_ACCEPT_DROP",
+      "suite": "A",
+      "source_files": [
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "AST-extracted OnlySocksTransport.handle_async_request → real curl_cffi/httpx → loopback server",
+      "source_hash": {
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "curl_failure_before_send": false
+      },
+      "expected": "HTTP POST server count=1",
+      "actual": {
+        "transport": {
+          "outcome": "exception",
+          "type": "ConnectionError",
+          "message": "Failed to perform, curl: (52) Empty reply from server. See https://curl.se/libcurl/c/libcurl-errors.html first for more details."
+        },
+        "worker_exit": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/A_ACCEPT_DROP",
+      "limitations": "Source-derived AST: constructor and destination guard adapted to loopback; no Runner. When curl failure injected it precedes send."
+    },
+    {
+      "test_id": "A_DELAY",
+      "suite": "A",
+      "source_files": [
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "AST-extracted OnlySocksTransport.handle_async_request → real curl_cffi/httpx → loopback server",
+      "source_hash": {
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "delay",
+        "curl_failure_before_send": false
+      },
+      "expected": "HTTP POST server count=1",
+      "actual": {
+        "transport": {
+          "outcome": "exception",
+          "type": "Timeout",
+          "message": "Failed to perform, curl: (28) Operation timed out after 300 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html firs"
+        },
+        "worker_exit": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/A_DELAY",
+      "limitations": "Source-derived AST: constructor and destination guard adapted to loopback; no Runner. When curl failure injected it precedes send."
+    },
+    {
+      "test_id": "A_INCOMPLETE",
+      "suite": "A",
+      "source_files": [
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "AST-extracted OnlySocksTransport.handle_async_request → real curl_cffi/httpx → loopback server",
+      "source_hash": {
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "incomplete",
+        "curl_failure_before_send": false
+      },
+      "expected": "HTTP POST server count=1",
+      "actual": {
+        "transport": {
+          "outcome": "response",
+          "status": 200,
+          "body": "{\"id\":"
+        },
+        "worker_exit": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/A_INCOMPLETE",
+      "limitations": "Source-derived AST: constructor and destination guard adapted to loopback; no Runner. When curl failure injected it precedes send."
+    },
+    {
+      "test_id": "B_SUCCESS",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "ok",
+        "timeline": "empty",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/B_SUCCESS",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "B_LOST_EMPTY",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "empty",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/B_LOST_EMPTY",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "B_RUNNER_REPLAY_ONLY",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "empty",
+        "no_transport_replay": true
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/B_RUNNER_REPLAY_ONLY",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated. curl raises before send; one HTTP POST per Runner attempt, isolating Runner replay."
+    },
+    {
+      "test_id": "E_MALFORMED",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "malformed",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_MALFORMED",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_PAGE2",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "page2",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/E_PAGE2",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_PAGE2_EMPTY",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "page2_empty",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_PAGE2_EMPTY",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_PAGE2_CORRECTED",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "page2",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/E_PAGE2_CORRECTED",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_PREFIX",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "prefix",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_PREFIX",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_PREFIX_DATED",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "prefix",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_PREFIX_DATED",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_NODATE",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "nodate",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_NODATE",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_WRONG_AUTHOR",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "wrong_author",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_WRONG_AUTHOR",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_LATE_VISIBLE",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "late_visible",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_LATE_VISIBLE",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_URL_DIFF",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "url_diff",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": null,
+        "quota": {},
+        "cycle": "stopped",
+        "reason": "publish_confirmation_missing"
+      },
+      "evidence_path": "EVIDENCE/E_URL_DIFF",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_URL_MATCH",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "url_match",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/E_URL_MATCH",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "E_URL_SHORTENED",
+      "suite": "B/E",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "src/telegramUi.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real run/launchCycle → DirectXAdapter → spawned Python real bridge.main/DirectSession.publish → extracted adapted OnlySocksTransport → localhost; mocked X SDK, identity fixture, Telegram, VPN",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "mode": "drop",
+        "timeline": "url_shortened",
+        "no_transport_replay": false
+      },
+      "expected": "one server POST, success persisted or uncertain result fenced ambiguous",
+      "actual": {
+        "worker_exit": 0,
+        "timed_out": false,
+        "final_marker": {
+          "event": "log",
+          "value": "{\"event\":\"telegram_stopped\"}"
+        },
+        "start_seen": true,
+        "finish_seen": true
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "pending"
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/E_URL_SHORTENED",
+      "limitations": "Not live X/Twikit: synthetic SDK create_tweet/timeline and cached identity; transport AST constructor+destination adapted. Delays accelerated."
+    },
+    {
+      "test_id": "C_BEFORE_POST",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "claimed"
+      },
+      "expected": "after real restart published, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "pending",
+            "phase": null,
+            "quota": {},
+            "cycle": "running",
+            "runId": "9e7786d615bb2bbb6fb1b82a",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 0,
+        "orphans_before_cleanup": []
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/C_BEFORE_POST",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "C_ACCEPTED",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "post"
+      },
+      "expected": "after real restart ambiguous, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "ambiguous",
+            "phase": "dispatching",
+            "quota": {},
+            "cycle": "running",
+            "runId": "e8cbb839b3b261a1097ed66e",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 1,
+        "orphans_before_cleanup": [
+          "3395506       1 3395464 /root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python -B /root/Projects/YJAutoPostOnX/TEST_RUNNER/bridge_worker.py /root/YJAutoPostOnX_ReportArchive/raw_sources/Bot_Reports/FinalEvidence/CriticalClosure-20261101-073430/EVIDENCE/C_ACCEPTED/config.json"
+        ]
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/C_ACCEPTED",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "C_RESPONSE",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "response"
+      },
+      "expected": "after real restart ambiguous, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "ambiguous",
+            "phase": "dispatching",
+            "quota": {},
+            "cycle": "running",
+            "runId": "091d5ee7df2c892d470ac113",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 1,
+        "orphans_before_cleanup": []
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/C_RESPONSE",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "C_PERSISTED",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "persisted"
+      },
+      "expected": "after real restart published, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "published",
+            "phase": null,
+            "quota": {
+              "2026-11-01": {
+                "acct": 1
+              }
+            },
+            "cycle": "running",
+            "runId": "ab19ed814effd52d86becae8",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 1,
+        "orphans_before_cleanup": []
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/C_PERSISTED",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "R_BEFORE_POST",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "claimed"
+      },
+      "expected": "after real restart published, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "pending",
+            "phase": null,
+            "quota": {},
+            "cycle": "running",
+            "runId": "26be53060d05e3e93376328b",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 0,
+        "orphans_before_cleanup": []
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/R_BEFORE_POST",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "R_ACCEPTED",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "post"
+      },
+      "expected": "after real restart ambiguous, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "ambiguous",
+            "phase": "dispatching",
+            "quota": {},
+            "cycle": "running",
+            "runId": "d48f4b645cb87d77d585e08b",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 1,
+        "orphans_before_cleanup": [
+          "3395793       1 3395748 /root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python -B /root/Projects/YJAutoPostOnX/TEST_RUNNER/bridge_worker.py /root/YJAutoPostOnX_ReportArchive/raw_sources/Bot_Reports/FinalEvidence/CriticalClosure-20261101-073430/EVIDENCE/R_ACCEPTED/config.json"
+        ]
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/R_ACCEPTED",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "R_RESPONSE",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "response"
+      },
+      "expected": "after real restart ambiguous, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "ambiguous",
+            "phase": "dispatching",
+            "quota": {},
+            "cycle": "running",
+            "runId": "12f9fbf3aea84b607cacfc18",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 1,
+        "orphans_before_cleanup": []
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "ambiguous",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/R_RESPONSE",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "R_PERSISTED",
+      "suite": "C",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/telegramUi.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "real Runner/adapter/bridge until breakpoint, SIGKILL Node test worker, reap group; restart actual Runner with actual TelegramUi.restore and auto-resume on synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/telegramUi.js": "47166a19c48e1cdbc1b237f0a89371d8f8228d8fd23e98eb4f33ccc27323a06b",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "breakpoint": "persisted"
+      },
+      "expected": "after real restart published, total server POST 1",
+      "actual": {
+        "reached": true,
+        "kill_exit": -9,
+        "restart_exit": 0,
+        "restart_ready": {
+          "event": "READY",
+          "state": {
+            "itemState": "published",
+            "phase": null,
+            "quota": {
+              "2026-11-01": {
+                "acct": 1
+              }
+            },
+            "cycle": "running",
+            "runId": "8ea4e594a8cfde74a68782a2",
+            "reason": null
+          }
+        },
+        "posts_before_restart": 1,
+        "orphans_before_cleanup": []
+      },
+      "assertion_result": "PASS",
+      "post_count": 1,
+      "state_before": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "published",
+        "phase": null,
+        "quota": {
+          "2026-11-01": {
+            "acct": 1
+          }
+        },
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/R_PERSISTED",
+      "limitations": "Post-crash orphan is deliberately killed before restart to avoid a live synthetic child. response hook pauses adapter return after real response. Claim hook pauses before open. Resume uses actual Runner lifecycle."
+    },
+    {
+      "test_id": "Q_RACE",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/sqliteStore.js",
+        "src/quota.js"
+      ],
+      "actual_execution_path": "verbatim extracted claimCycleItem + actual SqliteStore; separate Node processes with synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/quota.js": "b9b3fafc840f5ba6a73bf7029c20d8e3e5a21c23b7c95e634895b92e625712f9"
+      },
+      "input": {
+        "kind": "race"
+      },
+      "expected": "single claim; busy waits; killed transaction rolls back without quota loss",
+      "actual": {
+        "workers": [
+          {
+            "claimed": true,
+            "reason": null
+          },
+          {
+            "claimed": false,
+            "reason": "item_unavailable"
+          },
+          {
+            "claimed": false,
+            "reason": "item_unavailable"
+          },
+          {
+            "claimed": false,
+            "reason": "item_unavailable"
+          },
+          {
+            "claimed": false,
+            "reason": "item_unavailable"
+          }
+        ],
+        "wins": 1,
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "pending",
+        "phase": null,
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_RACE",
+      "limitations": "claimCycleItem extracted verbatim in VM; crash point is transaction mutator, not claimCycleItem instruction-level; no Runner dispatch."
+    },
+    {
+      "test_id": "Q_BUSY",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/sqliteStore.js",
+        "src/quota.js"
+      ],
+      "actual_execution_path": "verbatim extracted claimCycleItem + actual SqliteStore; separate Node processes with synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/quota.js": "b9b3fafc840f5ba6a73bf7029c20d8e3e5a21c23b7c95e634895b92e625712f9"
+      },
+      "input": {
+        "kind": "busy"
+      },
+      "expected": "single claim; busy waits; killed transaction rolls back without quota loss",
+      "actual": {
+        "blocked_during_lock": true,
+        "worker": {
+          "claimed": true,
+          "reason": null
+        },
+        "exit_code": 0
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "pending",
+        "phase": null,
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_BUSY",
+      "limitations": "claimCycleItem extracted verbatim in VM; crash point is transaction mutator, not claimCycleItem instruction-level; no Runner dispatch."
+    },
+    {
+      "test_id": "Q_STALE",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/sqliteStore.js",
+        "src/quota.js"
+      ],
+      "actual_execution_path": "verbatim extracted claimCycleItem + actual SqliteStore; separate Node processes with synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/quota.js": "b9b3fafc840f5ba6a73bf7029c20d8e3e5a21c23b7c95e634895b92e625712f9"
+      },
+      "input": {
+        "kind": "stale"
+      },
+      "expected": "single claim; busy waits; killed transaction rolls back without quota loss",
+      "actual": {
+        "first": true,
+        "recovered": true,
+        "second": true,
+        "distinctTokens": true,
+        "phase": "claimed"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "pending",
+        "phase": null,
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_STALE",
+      "limitations": "claimCycleItem extracted verbatim in VM; crash point is transaction mutator, not claimCycleItem instruction-level; no Runner dispatch."
+    },
+    {
+      "test_id": "Q_CRASH_TX",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/sqliteStore.js",
+        "src/quota.js"
+      ],
+      "actual_execution_path": "verbatim extracted claimCycleItem + actual SqliteStore; separate Node processes with synthetic SQLite",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "src/quota.js": "b9b3fafc840f5ba6a73bf7029c20d8e3e5a21c23b7c95e634895b92e625712f9"
+      },
+      "input": {
+        "kind": "crash"
+      },
+      "expected": "single claim; busy waits; killed transaction rolls back without quota loss",
+      "actual": {
+        "uncommitted_point_reached": true,
+        "killed": -9,
+        "claim": {
+          "claimed": true,
+          "reason": null
+        }
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "pending",
+        "phase": null,
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_CRASH_TX",
+      "limitations": "claimCycleItem extracted verbatim in VM; crash point is transaction mutator, not claimCycleItem instruction-level; no Runner dispatch."
+    },
+    {
+      "test_id": "IPC_OK",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "real DirectXAdapter → synthetic spawned Python JSON-lines protocol child",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "success"
+      },
+      "expected": "acknowledged success published, missing/late/signal ambiguous and child reaped",
+      "actual": {
+        "result": {
+          "status": "published",
+          "published": true,
+          "posted": true,
+          "tweetId": "101",
+          "username": "example",
+          "userId": "123",
+          "url": "https://x.com/example/status/101",
+          "recoveredFromTimeline": false,
+          "ok": true
+        },
+        "callbackCount": 1,
+        "childPid": 3396290,
+        "signalSent": null,
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_OK",
+      "limitations": "Protocol peer is synthetic; real DirectXAdapter only. No Runner or real X."
+    },
+    {
+      "test_id": "IPC_INCOMPLETE",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "real DirectXAdapter → synthetic spawned Python JSON-lines protocol child",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "incomplete"
+      },
+      "expected": "acknowledged success published, missing/late/signal ambiguous and child reaped",
+      "actual": {
+        "result": {
+          "status": "ambiguous",
+          "published": false,
+          "posted": false,
+          "ambiguous": true,
+          "reason": "publish_confirmation_missing"
+        },
+        "callbackCount": 1,
+        "childPid": 3396299,
+        "signalSent": null,
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_INCOMPLETE",
+      "limitations": "Protocol peer is synthetic; real DirectXAdapter only. No Runner or real X."
+    },
+    {
+      "test_id": "IPC_TIMEOUT",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "real DirectXAdapter → synthetic spawned Python JSON-lines protocol child",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "timeout"
+      },
+      "expected": "acknowledged success published, missing/late/signal ambiguous and child reaped",
+      "actual": {
+        "result": {
+          "status": "ambiguous",
+          "published": false,
+          "posted": false,
+          "ambiguous": true,
+          "reason": "publish_confirmation_missing"
+        },
+        "callbackCount": 1,
+        "childPid": 3396388,
+        "signalSent": null,
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_TIMEOUT",
+      "limitations": "Protocol peer is synthetic; real DirectXAdapter only. No Runner or real X."
+    },
+    {
+      "test_id": "IPC_SIGTERM",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "real DirectXAdapter → synthetic spawned Python JSON-lines protocol child",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "signal",
+        "signal": "SIGTERM"
+      },
+      "expected": "acknowledged success published, missing/late/signal ambiguous and child reaped",
+      "actual": {
+        "result": {
+          "status": "ambiguous",
+          "published": false,
+          "posted": false,
+          "ambiguous": true,
+          "reason": "publish_confirmation_missing"
+        },
+        "callbackCount": 1,
+        "childPid": 3396420,
+        "signalSent": "SIGTERM",
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGTERM"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_SIGTERM",
+      "limitations": "Protocol peer is synthetic; real DirectXAdapter only. No Runner or real X."
+    },
+    {
+      "test_id": "IPC_SIGKILL",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "real DirectXAdapter → synthetic spawned Python JSON-lines protocol child",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "signal",
+        "signal": "SIGKILL"
+      },
+      "expected": "acknowledged success published, missing/late/signal ambiguous and child reaped",
+      "actual": {
+        "result": {
+          "status": "ambiguous",
+          "published": false,
+          "posted": false,
+          "ambiguous": true,
+          "reason": "publish_confirmation_missing"
+        },
+        "callbackCount": 1,
+        "childPid": 3396448,
+        "signalSent": "SIGKILL",
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_SIGKILL",
+      "limitations": "Protocol peer is synthetic; real DirectXAdapter only. No Runner or real X."
+    },
+    {
+      "test_id": "IPC_LATE_CALLBACK",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "real DirectXAdapter → synthetic spawned Python JSON-lines protocol child",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "late",
+        "delayCallback": true
+      },
+      "expected": "acknowledged success published, missing/late/signal ambiguous and child reaped",
+      "actual": {
+        "result": {
+          "status": "ambiguous",
+          "published": false,
+          "posted": false,
+          "ambiguous": true,
+          "reason": "publish_confirmation_missing"
+        },
+        "callbackCount": 1,
+        "childPid": 3396467,
+        "signalSent": null,
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_LATE_CALLBACK",
+      "limitations": "Protocol peer is synthetic; real DirectXAdapter only. No Runner or real X."
+    },
+    {
+      "test_id": "IPC_LATE_RESULT",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "actual DirectXAdapter with real spawned synthetic JSON-lines protocol peer",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "late_response"
+      },
+      "expected": "timeout kills peer; delayed event cannot yield acknowledged dispatch or late published result",
+      "actual": {
+        "result": {
+          "status": "ambiguous",
+          "published": false,
+          "posted": false,
+          "ambiguous": true,
+          "reason": "publish_confirmation_missing"
+        },
+        "callbackCount": 1,
+        "childPid": 3396476,
+        "signalSent": null,
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_LATE_RESULT",
+      "limitations": "No HTTP or Runner. For late_ready, callback never ran so pre-dispatch retryable result is expected; this only tests DirectXAdapter child lifetime."
+    },
+    {
+      "test_id": "IPC_LATE_READY",
+      "suite": "D",
+      "source_files": [
+        "src/directX.js"
+      ],
+      "actual_execution_path": "actual DirectXAdapter with real spawned synthetic JSON-lines protocol peer",
+      "source_hash": {
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6"
+      },
+      "input": {
+        "mode": "late_ready"
+      },
+      "expected": "timeout kills peer; delayed event cannot yield acknowledged dispatch or late published result",
+      "actual": {
+        "result": {
+          "status": "not_ready",
+          "published": false,
+          "posted": false,
+          "ambiguous": false,
+          "blocked": true,
+          "reason": "identity_read_unavailable",
+          "retryable": true
+        },
+        "callbackCount": 0,
+        "childPid": 3396506,
+        "signalSent": null,
+        "childAliveAfterClose": false,
+        "exitCode": null,
+        "signalCode": "SIGKILL"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": null,
+      "state_after": null,
+      "evidence_path": "EVIDENCE/IPC_LATE_READY",
+      "limitations": "No HTTP or Runner. For late_ready, callback never ran so pre-dispatch retryable result is expected; this only tests DirectXAdapter child lifetime."
+    },
+    {
+      "test_id": "Q_LATE_CALLBACK",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js",
+        "python/direct_x_bridge.py"
+      ],
+      "actual_execution_path": "actual Runner closure onDispatch and DirectXAdapter; delayed callback released after synthetic SQLite token replacement",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164",
+        "python/direct_x_bridge.py": "60bc7fcb00e9c1f6fffde270bf787f275066e2075adaa8cb285710f8db15f0a3"
+      },
+      "input": {
+        "scenario": "stale token late callback"
+      },
+      "expected": "no old POST and newer processing token/state must remain unchanged",
+      "actual": {
+        "reached": true,
+        "exit_code": 0,
+        "new_token_after": "synthetic-new-token"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_LATE_CALLBACK",
+      "limitations": "Competing owner token is injected directly into test SQLite; no second actual process claims it. Exercise real old Runner callback, not complete restart race."
+    },
+    {
+      "test_id": "Q_STALE_SUCCESS_PATH",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js"
+      ],
+      "actual_execution_path": "Runner attempt token fencing across stale result/exception path",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164"
+      },
+      "input": {
+        "scenario": "result"
+      },
+      "expected": "newer attempt token, processing state and publishingAt must remain intact",
+      "actual": {
+        "reached": true,
+        "exit_code": 0,
+        "token_after": "newer-token",
+        "publishingAt": "2026-11-01T15:00:00.000Z"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "dispatching",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_STALE_SUCCESS_PATH",
+      "limitations": ""
+    },
+    {
+      "test_id": "Q_STALE_EXCEPTION_PATH",
+      "suite": "C-QUEUE",
+      "source_files": [
+        "src/runner.js",
+        "src/directX.js",
+        "src/sqliteStore.js"
+      ],
+      "actual_execution_path": "Runner attempt token fencing across stale result/exception path",
+      "source_hash": {
+        "src/runner.js": "fe2ff9238f7be8d58848d3a29ea98d8c89ff7e63a015b87015668b31179dd997",
+        "src/directX.js": "d156116db202fcdcd958f27088efe9a7596dd49904ab7b2c0f4be90140a581a6",
+        "src/sqliteStore.js": "26f3cdd8235b926d6ba388bc43ac4d5a7a80995501d75d9ef398a805932c8164"
+      },
+      "input": {
+        "scenario": "exception"
+      },
+      "expected": "newer attempt token, processing state and publishingAt must remain intact",
+      "actual": {
+        "reached": true,
+        "exit_code": 0,
+        "token_after": "newer-token",
+        "publishingAt": "2026-11-01T15:00:00.000Z"
+      },
+      "assertion_result": "PASS",
+      "post_count": 0,
+      "state_before": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "running",
+        "reason": null
+      },
+      "state_after": {
+        "itemState": "processing",
+        "phase": "claimed",
+        "quota": {},
+        "cycle": "stopped",
+        "reason": null
+      },
+      "evidence_path": "EVIDENCE/Q_STALE_EXCEPTION_PATH",
+      "limitations": ""
+    }
+  ],
+  "counts": {
+    "PASS": 44,
+    "FAIL": 0,
+    "HARNESS_ERROR": 0,
+    "NOT_TESTED": 0
+  }
+}
