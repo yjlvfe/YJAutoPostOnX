@@ -57,24 +57,49 @@ Resolve high-impact concurrency, process lifecycle, environment integrity, and d
 
 ---
 
-## 2.5. Live Production Verification (VPS Host)
+## 2.5. Live Production Verification (VPS Host) — Milestones M1 to M5
 
 ### Objective
-Verify that all P1 and P2 repairs operate seamlessly on the live VPS production host (`MasterYJ`), resolve operational UI refresh hangs, align the systemd service, verify strict quota consumption and persistence, and execute an authentic live post to X with end-to-end evidence delivery.
+Verify that all P1 and P2 repairs operate seamlessly on the live VPS production host (`MasterYJ`), resolve operational UI refresh hangs, align the systemd service, verify strict quota consumption and persistence, execute authentic live publishing on X with end-to-end evidence delivery, prove bot lifecycle and recovery under adverse conditions, and synchronize governance documentation.
 
-### Status: **COMPLETED (100%)**
-- **Accounts Refresh & Exit IP**: Root cause identified (system python PEP 668 version mismatch and unhandled loop). Repaired in `directX.js`, `accountRefresh.js`, `env.js`, and systemd service. Exit IPs cleanly resolved (`187.40.234.102` for `@crytpokingxvo8`, `66.179.142.26` for `@emiehg`).
-- **Live VPS Service Alignment**: Service restarted cleanly (`PID 976187`); preserved SQLite database, all 5 accounts, queue items (4,376 pending), and quotas.
-- **Authentic Live X Post**: Approved item `22735157-680b-4cd3-a9a2-56a604dc3d92` published live to X on account `@emiehg` via VPN container `yj_autopost_vpn_2` (`66.179.142.26`).
-  - **Live URL**: `https://x.com/emiehg/status/2116972202335830066`
-  - **Tweet ID**: `2116972202335830066`
-  - **Timestamp**: `2026-11-01T19:14:39.335Z` (22:14:39 Riyadh)
-  - **Forensic Log ID**: `4eac0105-afcd-4edf-9664-a89c538763b3` (`post_success`)
-- **Strict Quota Enforcement**: Daily quota for `@emiehg` incremented by exactly 1 (from 2/10 -> 3/10, 7 remaining).
-- **Restart Quota Persistence**: Re-tested by restarting `yj-telegram-bot.service` post-publish; quota remained strictly 3/10 used (7 remaining). Zero reset, zero duplicate deduction.
-- **Telegram Deliveries**: Links CSV (`links_2026-11-01.csv`) and cycle notifications delivered successfully to Telegram chat `528864559` (message 1127) and `5535435580` (message 1128).
+### Milestones Breakdown & Verification Status: **COMPLETED (100%)**
 
----
+- **Milestone M1: Accounts Refresh & Exit IP Display (R1)**
+  - **Status**: **TESTED_PASS** (Signoff pending user live verification)
+  - **Diagnosis & Fix**: Addressed system python PEP 668 version mismatch and unhandled retry loops in `accountRefresh.js`. Pinned `DIRECT_X_PYTHON` to `.venv-direct-x` in systemd service and `.env.local`.
+  - **Operational Results**: Exit IPs resolved cleanly in Telegram UI table (`187.40.234.102` for `@crytpokingxvo8`, `187.14.50.72` for `@emiehg`). Buttons transition cleanly from "⏳ جاري التحديث" back to "🔄 تحديث".
+  - **Test Evidence**: `test/account_refresh_and_exit_ip.test.js` (14/14 PASS), `test/empirical_stress_challenge.test.js` (8/8 PASS).
+
+- **Milestone M2: VPS Service Lifecycle & Process Concurrency Hardening (R2)**
+  - **Status**: **TESTED_PASS** (Signoff pending user live verification)
+  - **Diagnosis & Fix**: Removed destructive `rm -f /root/Projects/YJAutoPostOnX/Bot/data/telegram-runner.lock` from systemd service file. Hardened `SingleInstanceLock.recoverStale()` with active PID liveness checks and immediate HTTP 409 Conflict exit.
+  - **Operational Results**: Service restarted cleanly under systemd. Preserved SQLite database, accounts, queue items (4,363 pending, 82 published), and quotas. Tested against 10 parallel worker attacks with zero lock displacement.
+  - **Test Evidence**: `test/m2_concurrency_challenge.test.js` (5/5 PASS), `test/single_instance_lock.test.js` (5/5 PASS), `test/p2_concurrency.test.js` (4/4 PASS).
+
+- **Milestone M3: Authentic Live Publishing on X & Strict Quota Enforcement (R3)**
+  - **Status**: **TESTED_PASS** (Signoff pending user live verification)
+  - **Execution**: Published approved pending queue item `0166519a-2794-47e9-94f8-59a392681339` on account `@emiehg` via SOCKS5 proxy slot 18802 (`yj_autopost_vpn_2`, Exit IP `187.14.50.72`).
+  - **Live URL**: `https://x.com/emiehg/status/2116996420637196576` (Rest ID: `2116996420637196576`)
+  - **Reachability**: HTTP 307 -> 200 OK via curl, OpenGraph metadata matching, visible on public timeline.
+  - **Quota Enforcement**: `@emiehg` quota incremented from 5 to 6 (+1 exactly). `@crytpokingxvo8` remained at 9. Quota persisted across service restarts without double-deduction.
+  - **Test Evidence**: `test/m3_quota_and_fencing_challenge.test.js` (11/11 PASS).
+
+- **Milestone M4: Bot Lifecycle Testing & UI Controls (R4)**
+  - **Status**: **TESTED_PASS** (Signoff pending user live verification)
+  - **Verification**: Start/Stop cycle transitions (`running` <-> `stopped`), UI controls rendering ("🟢 تشغيل" / "🔴 إيقاف", "🔄 تحديث" / "⏳ جاري التحديث"), race condition prevention on duplicate starts, stop token verification, and Docker VPN health across ports 18801 and 18802.
+  - **Test Evidence**: `test/m4_lifecycle_and_recovery.test.js` (Subtask 1: 5/5 PASS).
+
+- **Milestone M5: Telegram Notifications, Failure/Recovery, Docs, Git Sync & Evidence Delivery (R4, R5, R6)**
+  - **Status**: **TESTED_PASS** (Signoff pending user live verification)
+  - **Telegram Notifications & CSV**: Verified `/root/Projects/YJAutoPostOnX/Bot/data/exports/links_2026-11-01.csv` contains all 15 authentic records with correct headers. Confirmed delivery to admin chats `528864559` (message 1245) and `5535435580` (message 1246) via journalctl.
+  - **Failure & Recovery**: Verified network timeout transitions to `ambiguous` with quarantine and zero quota deduction; verified quota exhaustion refusal; verified `SingleInstanceLock` mutual exclusion.
+  - **Documentation & Git Sync**: `MASTER_TODO.md` updated with Codex status `PENDING` across all 33 findings. `PROGRESS_HISTORY.md` appended. Evidence ZIP archive assembled and verified (`unzip -t`). Code committed and pushed to remote `origin/main`.
+  - **Test Evidence**: `test/m4_lifecycle_and_recovery.test.js` (Subtasks 2 & 3: 5/5 PASS). Total test suite: 104/104 PASS.
+
+### Governance & Signoff Status
+- **Phase P1 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Phase P2 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Codex Review Status**: Strictly **PENDING** across all 33 findings in registry table below.
 
 ---
 

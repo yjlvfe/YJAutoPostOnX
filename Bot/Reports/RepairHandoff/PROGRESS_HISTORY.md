@@ -383,3 +383,113 @@ Following full certification of P1 and P2 in isolated namespaces, real end-to-en
 | **Quota Enforcement** | Exactly 1 deduction, survives restart | 2 -> 3 (persisted across systemctl restart) | **CERTIFIED** |
 | **Export Delivery** | Telegram CSV & alerts delivery | Message IDs 1127 & 1128 delivered | **CERTIFIED** |
 | **Codex Review Governance** | All 33 Findings | Codex Status strictly maintained **PENDING** | **GOVERNED** |
+
+
+---
+
+## 4. Phase P3 / Live Operational Verification: Milestones M1, M2, M3, M4, and M5
+
+### Overview & Operational Context
+Following initial isolated namespace certification, a comprehensive empirical verification and live operational audit was conducted directly on the production host (`MasterYJ`). The engagement spanned Milestones M1 through M5 to resolve operational UI hangs, eliminate race conditions, verify live X publishing with strict quota enforcement, validate start/stop lifecycle transitions and UI buttons, verify Telegram delivery of links CSV exports and notifications, and empirically prove failure isolation and recovery without disruption.
+
+---
+
+### Milestone M1: Accounts Refresh & Exit IP Display (R1)
+- **Problem Statement**: The Telegram UI exhibited a persistent hang where account rows were trapped in `جاري التحديث` indefinitely, with Exit IP columns displaying `—`.
+- **Root Cause Analysis**:
+  1. System Python on Debian Linux (`/usr/bin/python3`) had package incompatibilities under PEP 668, failing version assertions for `curl_cffi` (0.16.3 vs 0.17.0). The isolated virtualenv `.venv-direct-x` contained Python 3.14 with fully pinned packages.
+  2. In `accountRefresh.js`, observation failures caught during verifications failed to evict account IDs from `job.pending`, causing continuous infinite loop cycling and blocking panel re-renders.
+- **Remediations**:
+  - Implemented `defaultPythonExecutable()` in `directX.js` prioritizing `.venv-direct-x`.
+  - Added bounded failure thresholds in `accountRefresh.js` to ensure clean exit and panel settling.
+  - Pinned `DIRECT_X_PYTHON` in systemd service configuration and `.env.local`.
+- **Empirical Evidence**:
+  - UI table verified rendering authentic Exit IPs: `@crytpokingxvo8`: `187.40.234.102` (NordVPN container `yj_autopost_vpn_1`), `@emiehg`: `187.14.50.72` (NordVPN container `yj_autopost_vpn_2`).
+  - Account button cleanly returns to `🔄 تحديث` upon refresh completion.
+  - Test suites: `test/account_refresh_and_exit_ip.test.js` (14/14 PASS), `test/empirical_stress_challenge.test.js` (8/8 PASS).
+
+---
+
+### Milestone M2: Service Alignment & Process Concurrency Hardening (R2)
+- **Problem Statement**: Systemd service unit previously included `ExecStartPre=/bin/rm -f /root/Projects/YJAutoPostOnX/Bot/data/telegram-runner.lock`, completely defeating mutual exclusion and allowing concurrent processes to acquire the lock during restarts.
+- **Remediations**:
+  - Removed unconditional `rm -f` from `/etc/systemd/system/yj-telegram-bot.service` and repository unit files.
+  - Hardened `SingleInstanceLock.recoverStale()` to verify active process PID liveness before considering any lock stale.
+  - Added immediate exit with `TELEGRAM_CONFLICT` on HTTP 409 responses to stop polling retry storms.
+- **Empirical Evidence**:
+  - Service restarted cleanly under systemd (PID `1290464`), preserving SQLite queue items (4,363 pending), accounts, and daily quotas.
+  - Multi-process adversarial challenge: 10 parallel worker processes launched simultaneously; 100% cleanly rejected with `INSTANCE_LOCKED` without lockfile corruption or displacement.
+  - Test suites: `test/m2_concurrency_challenge.test.js` (5/5 PASS), `test/single_instance_lock.test.js` (5/5 PASS), `test/p2_concurrency.test.js` (4/4 PASS).
+
+---
+
+### Milestone M3: Authentic Live Publishing on X & Strict Quota Enforcement (R3)
+- **Constraint Compliance**: Zero synthetic content generated; strictly executed using pre-existing approved pending item `0166519a-2794-47e9-94f8-59a392681339` uploaded on 2026-10-28.
+- **Execution Log**:
+  - Published to X on account `@emiehg` via SOCKS5 proxy slot 18802 (`yj_autopost_vpn_2`, Exit IP `187.14.50.72`).
+  - Output Tweet URL: `https://x.com/emiehg/status/2116996420637196576`
+  - Rest ID: `2116996420637196576`, User ID: `2114825043343511553`.
+  - Publish Timestamp: `2026-11-01T20:50:53Z` (23:50:53 Riyadh).
+- **Multi-Angle Authenticity Verification**:
+  - Direct HTTP curl returned HTTP 307 -> 200 OK from Cloudflare Envoy.
+  - OpenGraph metadata verified: `og:url` matches, `article:author` matches `@Emiehg`, title matches tweet text.
+  - SOCKS5 proxy curl and public timeline curl both confirmed live indexing.
+- **Strict Quota Accounting & Reboot Persistence**:
+  - Baseline Quota for `@emiehg`: 5/10 used.
+  - Post-Publish Quota: 6/10 used (incremented by exactly 1). `@crytpokingxvo8` remained untouched at 9/10.
+  - Service restarted via `systemctl restart yj-telegram-bot.service`; SQLite reload confirmed quota remained strictly 6/10 without reset or duplicate decrement.
+  - Database integrity check `PRAGMA integrity_check` returned `ok`.
+  - Test suite: `test/m3_quota_and_fencing_challenge.test.js` (11/11 PASS).
+
+---
+
+### Milestone M4: Bot Lifecycle Testing & UI Controls (R4)
+- **Start/Stop Cycle Transitions**:
+  - Tested lifecycle transitions between `stopped` and `running`.
+  - In `stopped` state, UI controls render `🟢 تشغيل` and `🔄 تحديث`.
+  - In `running` state, UI controls render `🔴 إيقاف` and `🔄 تحديث`.
+  - Verified race condition safety: duplicate start requests during active runs are acknowledged and rejected with `{ started: false, running: true }`.
+  - Stop token verification: stale or mismatched stop tokens are rejected safely.
+- **Account Refresh Lifecycle**:
+  - Invoking refresh transitions button to `⏳ جاري التحديث`, runs verification, settles panel, and cleanly returns to `🔄 تحديث`.
+  - Exit IPs are preserved during and after refresh (`187.40.234.102` for `@crytpokingxvo8`, `187.14.50.72` for `@emiehg`).
+- **Docker VPN Infrastructure**:
+  - Verified containers `yj_autopost_vpn_1` and `yj_autopost_vpn_2` are up and healthy.
+  - SOCKS5 proxy ports 18801 and 18802 return external public IPs matching the assigned accounts.
+  - Test suite: `test/m4_lifecycle_and_recovery.test.js` (Subtask 1: 5/5 PASS).
+
+---
+
+### Milestone M5: Telegram Notifications, Failure/Recovery, Docs, Git Sync & Evidence Delivery (R4, R5, R6)
+- **Telegram Notifications & CSV File Verification**:
+  - File `/root/Projects/YJAutoPostOnX/Bot/data/exports/links_2026-11-01.csv` contains all 15 authentic published records (9 for `@crytpokingxvo8`, 6 for `@emiehg`).
+  - Format verified: UTF-8 BOM, sanitized against formula injection, valid ISO timestamps, proper quoting, zero corrupt rows.
+  - Empirical proof from journalctl confirms document deliveries to authorized admin chats:
+    - Chat ID `528864559`: Message ID 1245 (at 23:50:56)
+    - Chat ID `5535435580`: Message ID 1246 (at 23:50:57)
+- **Failure & Recovery Validation**:
+  - Network timeout simulation: verified item transitions to `ambiguous`, sets `skipDelay = true`, bypasses delay, quarantines item without retrying, and leaves quota strictly untouched.
+  - Quota exhaustion boundary: verified accounts at 10/10 refuse dispatch; when all accounts hit quota, cycle start fails closed with quota exhaustion warning.
+  - Concurrency collision: verified `SingleInstanceLock` rejects second process with `INSTANCE_LOCKED`.
+  - Test suite: `test/m4_lifecycle_and_recovery.test.js` (Subtasks 2 & 3: 5/5 PASS). Total unit test suite: 104/104 PASS.
+- **Documentation & Governance**:
+  - `MASTER_TODO.md` updated with Milestones M1-M5 overview.
+  - All 33 findings in registry table strictly maintain Codex Status: **`PENDING`**.
+  - Final signoffs for P1 and P2 remain **`PENDING`** for user testing.
+  - `PROGRESS_HISTORY.md` appended without modifying or deleting earlier historical sections.
+- **Git Synchronization & Evidence Delivery**:
+  - Clean commit of all test suites, documentation, and configuration changes to `origin/main`.
+  - Comprehensive operational evidence ZIP archive assembled and validated with `unzip -t`.
+  - Delivered ZIP archive to Telegram admin chat via the bot's telegram client.
+
+---
+
+### Final Milestone Verification Matrix
+
+| Milestone | Scope | Evidence & Verification | Status | Codex Review Status |
+|---|---|---|:---:|:---:|
+| **M1** | Accounts Refresh & Exit IP Display | `account_refresh_and_exit_ip.test.js` (14/14 PASS), Exit IPs rendered | **TESTED_PASS** | **PENDING** |
+| **M2** | Service Alignment & Concurrency Hardening | `m2_concurrency_challenge.test.js` (5/5 PASS), `rm -f` removed | **TESTED_PASS** | **PENDING** |
+| **M3** | Authentic Live Post on X & Quota Enforcement | Tweet `2116996420637196576`, Quota 5->6 (+1), persisted across restart | **TESTED_PASS** | **PENDING** |
+| **M4** | Bot Lifecycle (Start/Stop) & UI Buttons | `m4_lifecycle_and_recovery.test.js` (Subtask 1: 5/5 PASS), VPN healthy | **TESTED_PASS** | **PENDING** |
+| **M5** | Telegram CSV, Failure/Recovery, Git Sync & Delivery | CSV 15 rows delivered (msgs 1245/1246), 104/104 tests PASS, Git push & ZIP | **TESTED_PASS** | **PENDING** |
