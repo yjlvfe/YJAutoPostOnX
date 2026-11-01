@@ -64,7 +64,7 @@ run_step "npm run audit" npm run audit
 
 # A real gate: must exit non-zero on High/Critical, and this line must not
 # have `|| true` appended, ever.
-run_step "npm audit --omit=dev (production dependency gate)" npm audit --omit=dev
+run_step "npm audit --omit=dev (production dependency gate)" npm audit --omit=dev --audit-level=high
 
 run_step "npm run build:linux" npm run build:linux
 
