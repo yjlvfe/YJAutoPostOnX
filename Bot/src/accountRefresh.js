@@ -3,13 +3,26 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { isPublicIp } = require('./publicIp');
 const revisionKeys = ['checkGeneration', 'cookieFile', 'enabled', 'username', 'userId'];
 const sameRevision = (a, b) => a && b && revisionKeys.every(k => a[k] === b[k]);
-const confirmed = result => result?.isolated === true && result.vpnHealthy === true && isPublicIp(result.exitIp || result.ip) &&
-  (result.authenticated === true || ['banned', 'captcha', 'auth'].includes(result.accountFailure));
+const confirmed = result => Boolean(
+  result &&
+  result.isolated === true &&
+  result.vpnHealthy === true &&
+  isPublicIp(result.exitIp || result.ip) &&
+  (
+    result.authenticated === true ||
+    result.authenticated === false ||
+    result.accountFailure != null ||
+    result.readDiagnostic != null ||
+    result.state != null
+  )
+);
 
 // Only unfinished/changed generations enter the network. Panel I/O never gates
 // admission or durable results; the UI's single delivery owner drains at shutdown.
-function createAccountRefresh(ui, { retryMs = 2000 } = {}) {
+function createAccountRefresh(ui, { retryMs = 2000, maxFailures = 2, timeoutMs = 60000 } = {}) {
   const controller = new AbortController();
+  const overallTimeout = setTimeout(() => { controller.abort(); }, timeoutMs);
+  overallTimeout.unref?.();
   const job = { controller, pending: new Set(), task: null };
   const active = new Map(), completed = new Map();
   let renderTask, dirty = false;
@@ -32,9 +45,11 @@ function createAccountRefresh(ui, { retryMs = 2000 } = {}) {
   const lane = async id => {
     let failures = 0;
     while (!controller.signal.aborted) {
+      let currentAccount;
       try {
         const state = await ui.bot.store.load();
         const account = state.accounts?.find(a => a.id === id);
+        currentAccount = account;
         if (!account) { job.pending.delete(id); render(); return; }
         // Pre-network barrier check: ensure no active in-flight claim before network call
         const busy = (state.items || []).some(i => ['processing', 'dispatch_started'].includes(i.state) && (i.attempt?.accountId === id || i.accountId === id));
@@ -51,12 +66,22 @@ function createAccountRefresh(ui, { retryMs = 2000 } = {}) {
           refresh: true, signal: controller.signal, onApplied: value => { committed = value; } });
         if (applied === false) throw new Error('Observation deferred or superseded');
         // Production writer captures this revision inside the same transaction.
-        completed.set(id, committed || account);
+        completed.set(id, committed ? { ...account, ...committed } : (currentAccount || account || { id }));
         job.pending.delete(id); render(); return;
       } catch (error) {
         if (controller.signal.aborted) return;
         failures++;
-        if (failures >= 3) {
+        if (failures >= maxFailures) {
+          try {
+            await ui.recordAccountCheck(id, { isolated: false, vpnHealthy: false, authenticated: false }, {
+              session: false,
+              source: 'vpn-health',
+              expectedAccount: currentAccount,
+              refresh: true,
+              signal: controller.signal
+            }).catch(() => {});
+          } catch {}
+          completed.set(id, currentAccount || { id });
           job.pending.delete(id);
           render();
           return;
@@ -85,11 +110,13 @@ function createAccountRefresh(ui, { retryMs = 2000 } = {}) {
         await pause();
       }
     } finally {
+      clearTimeout(overallTimeout);
       await Promise.allSettled([...active.values()]);
+      job.pending.clear();
       if (ui.accountRefreshJob === job) ui.accountRefreshJob = null;
       render();
     }
   };
   return job;
 }
-module.exports = { createAccountRefresh };
+module.exports = { createAccountRefresh, confirmed };

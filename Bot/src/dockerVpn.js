@@ -18,6 +18,11 @@ const OWNER = 'yj-autopost';
 const CONTRACT = 'independent-v1';
 const TOKEN_TARGET = '/run/secrets/nordvpn_token';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const EXIT_IP_SERVICES = Object.freeze([
+  'https://api.ipify.org',
+  'https://icanhazip.com',
+  'https://ifconfig.me/ip'
+]);
 
 function slotPort(slot) {
   if (!Number.isInteger(slot) || slot < 0 || slot >= MAX_SLOTS) throw new Error('VPN slot out of range 0-4');
@@ -72,14 +77,16 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     }
   }
   async function getExitIp(port) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const { stdout } = await command('curl', ['--noproxy', '', '--socks5-hostname', `127.0.0.1:${port}`,
-          '--ipv4', '--fail', '--max-time', '10', '--silent', 'https://api.ipify.org'], { timeout: 12_000 });
-        const ip = stdout.trim();
-        if (isPublicIp(ip)) return ip;
-      } catch {
-        if (attempt === 0) await wait(500);
+    for (const serviceUrl of EXIT_IP_SERVICES) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const { stdout } = await command('curl', ['--noproxy', '', '--socks5-hostname', `127.0.0.1:${port}`,
+            '--ipv4', '--fail', '--max-time', '10', '--silent', serviceUrl], { timeout: 12_000 });
+          const ip = stdout.trim();
+          if (isPublicIp(ip)) return ip;
+        } catch {
+          if (attempt === 0) await wait(500);
+        }
       }
     }
     return null;
@@ -441,4 +448,4 @@ class VpnSlotManager {
 }
 module.exports = { VpnSlotManager, createDockerRuntime, validateTokenFile, ...runtime,
   slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE,
-  DEFAULT_VPN_VERSION, NORDVPN_VERSION: DEFAULT_VPN_VERSION };
+  DEFAULT_VPN_VERSION, NORDVPN_VERSION: DEFAULT_VPN_VERSION, EXIT_IP_SERVICES };

@@ -50,7 +50,7 @@ function formatAccountTable(state, { now = new Date(), refreshingIds, all = fals
     const checks = state.telegramUi?.accountChecks?.[account.id] || {};
     const capacity = accountCapacity(state, account, now);
     const ip = [account.exitIp, checks.vpn?.ip].find(value => isPublicIp(value)) || '—';
-    return [String(i + 1), account.username ? '@' + clean(account.username) : 'غير متحقق', `${Number.isFinite(capacity.used) ? capacity.used : '?'} / ${capacity.limit === Infinity ? '∞' : capacity.limit}`.replace(/ /g, ''), refreshingIds?.has(account.id) ? '—' : ip, refreshingIds?.has(account.id) ? 'جاري التحديث' : accountStatus(account)];
+    return [String(i + 1), account.username ? '@' + clean(account.username) : 'غير متحقق', `${Number.isFinite(capacity.used) ? capacity.used : '?'} / ${capacity.limit === Infinity ? '∞' : capacity.limit}`.replace(/ /g, ''), ip, refreshingIds?.has(account.id) ? 'جاري التحديث' : accountStatus(account)];
   });
   return [richTable(['#', 'الحساب (@)', 'الكوتا', 'Exit IP', 'الحالة'], rows, 'إدارة الحسابات المفعلة'), ...(!rows.length ? ['\nلا توجد حسابات مضافة.'] : [])].join('\n');
 }
