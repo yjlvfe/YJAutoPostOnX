@@ -72,23 +72,33 @@ class TelegramFlows {
   async user(id) { return (await this.bot.store.load()).telegramUi?.users?.[id.key] || {}; }
   async set(id, patch) { await this.bot.store.update(s => { s.telegramUi ||= {}; s.telegramUi.users ||= {}; s.telegramUi.users[id.key] ||= { chatId: id.chat, userId: id.user }; Object.assign(s.telegramUi.users[id.key], patch); return s; }); }
   async say(id, text, page = 'waiting', extra = {}) { return this.bot.transport.sendMessage(id.chat, text, { reply_markup: this.bot.transport.keyboard(page), ...extra }); }
-  async cleanup(id) { const u = await this.user(id); if (u.draft?.cookieFile) await fs.unlink(u.draft.cookieFile).catch(() => {}); await this.set(id, { draft: null, flowToken: null, prompt: null, confirmMessage: null, confirmAt: null }); }
+  async cleanup(id) {
+    const u = await this.user(id); const draft = u.draft;
+    // Never remove credentials or resources of an adopted account.
+    const adopted = draft?.id && (await this.bot.accounts.list()).some(a => a.id === draft.id);
+    if (draft?.cookieFile && !adopted) await fs.unlink(draft.cookieFile).catch(() => {});
+    await this.set(id, { draft: null, flowToken: null, prompt: null, confirmMessage: null, confirmAt: null });
+    if (draft?.id && !adopted) await this.isolatedVerifier?.releaseDraft?.(draft.id);
+  }
   async accounts(id) {
     const accounts = await this.bot.accounts.list();
     await this.cleanup(id);
     await this.ui.page(id, 'accounts');
-    await this.set(id, { accountId: null, page: 'accounts', prompt: null, selectionIds: accounts.map(a => a.id), selectionMessage: null });
-    const state = await this.bot.store.load();
-    const tableHtml = formatAccountTable({ ...state, accounts }, { now: this.ui.clock() });
+    await this.set(id, { accountId: null, page: 'accounts', prompt: null, selectionIds: [], selectionMessage: null });
+    // Bind selection metadata to the committed snapshot and render immediately without blocking on network checks.
+    const state = await this.bot.store.update(s => {
+      s.telegramUi.users[id.key].selectionIds = (s.accounts || []).map(a => a.id);
+      return s;
+    });
+    const tableHtml = formatAccountTable(state, { now: this.ui.clock() });
 
-    const labels = accounts.map((a, i) => a.username ? `@${clean(a.username)}` : String(i + 1));
-    const rows = Array.from({ length: Math.ceil(labels.length / 3) }, (_, i) => labels.slice(i * 3, i * 3 + 3));
-    rows.push(['إضافة حساب'], ['رجوع']);
+    const rows = [['إضافة', 'تفعيل / إلغاء تفعيل', 'الحسابات'], ['رجوع']];
     return this.say(id, tableHtml, 'accounts', { rich_message: { html: tableHtml }, reply_markup: this.bot.transport.keyboard('accounts', rows) });
   }
 
   async cookies(id) {
-    if ((await this.bot.accounts.list()).length >= 5) return this.say(id, 'الحد الأقصى خمسة حسابات. احذف حساباً أولاً.', 'accounts');
+    const max = this.bot.accounts?.maxAccounts ?? 1000;
+    if ((await this.bot.accounts.list()).length >= max) return this.say(id, `الحد الأقصى ${max} حسابات. احذف حساباً أولاً.`, 'accounts');
     await this.cleanup(id); await this.ui.page(id, 'cookies', 'cookies');
     return this.say(id, 'أرسل ملف Cookies الخاص بحساب X بصيغة TXT أو JSON');
   }
@@ -132,7 +142,7 @@ class TelegramFlows {
     let result;
     try { result = await this.isolatedVerifier.verify({ ...draft, username: expectedUsername }, { discoverIdentity: !expectedUsername }); }
     catch (error) { console.error(JSON.stringify({ event: 'isolated_verification_failed', code: error.code || error.name || 'UNKNOWN' })); await this.set(id, { prompt: 'username', draft: { ...draft, verificationPending: true } }); return this.say(id, 'تم قبول الكوكيز بنجاح. أرسل اسم المستخدم (Username) لهذا الحساب:'); }
-    await this.ui.recordAccountCheck(draft.id, result, { session: true });
+    // Drafts are not durable accounts: do not create checks before confirmation.
     if (result?.isolated !== true || result?.vpnHealthy !== true) return this.say(id, 'لم يثبت عزل VPN؛ أُوقفت الإضافة لحماية الجلسة.');
     if (result.state === 'identity_unverified') {
       if (result.authenticated) {
@@ -144,7 +154,7 @@ class TelegramFlows {
       return this.say(id, 'تعذر استخراج اسم المستخدم. أدخل اسم مستخدم X للتحقق من مطابقته للجلسة.');
     }
     if (!result.authenticated || !/^[A-Za-z0-9_]{1,15}$/.test(result.username || '') || (expectedUsername && expectedUsername.toLowerCase() !== result.username.toLowerCase())) return this.say(id, 'جلسة X غير صالحة أو لا تطابق اسم المستخدم. أعد إرسال Cookies أو اضغط رجوع.');
-    return this.confirm(id, 'cookieConfirm', `تم التحقق من الجلسة: @${result.username}\nتأكيد إضافة الحساب؟`, { ...draft, username: result.username, label: result.username, verifiedAt: new Date().toISOString(), vpnResource: result.resourceId || null });
+    return this.confirm(id, 'cookieConfirm', `تم التحقق من الجلسة: @${result.username}\nتأكيد إضافة الحساب؟`, { ...draft, username: result.username, label: result.username, ...(typeof result.userId === 'string' && /^\d+$/.test(result.userId) ? { userId: result.userId } : {}), ...(require('./publicIp').isPublicIp(result.exitIp || result.ip) ? { exitIp: result.exitIp || result.ip } : {}), verifiedAt: new Date().toISOString(), vpnResource: result.resourceId || null });
   }
   async account(id) {
     const u = await this.user(id);
@@ -168,7 +178,7 @@ class TelegramFlows {
     if (text === 'تأكيد' && u.prompt?.endsWith('Confirm') && !confirmed) return this.say(id, 'استخدم زر التأكيد الخاص بهذه العملية أو اضغط رجوع.');
     if (text === 'تأكيد' && u.prompt?.endsWith('Confirm') && (!u.confirmAt || Date.now() - u.confirmAt > 15 * 60 * 1000)) { await this.cleanup(id); return this.say(id, 'انتهت صلاحية التأكيد. ابدأ العملية مجدداً.', 'main'); }
     if (text === 'رجوع' || text === 'إلغاء') { await this.cleanup(id); return ['posts', 'main'].includes(u.page) ? this.ui.menu(null, { message: { from: { id: id.user }, chat: { id: id.chat } } }) : this.accounts(id); }
-    if (u.page === 'accounts' && text === 'إضافة حساب') return this.cookies(id);
+    if (u.page === 'accounts' && (text === 'إضافة' || text === 'إضافة حساب')) return this.cookies(id);
     if (u.page === 'accounts') {
       const accounts = await this.bot.accounts.list();
       const account = /^\d+$/.test(text) ? accounts.find(a => a.id === u.selectionIds?.[Number(text) - 1]) : accounts.find(a => a.username?.toLowerCase() === text.replace(/^@/, '').toLowerCase());
@@ -196,8 +206,11 @@ class TelegramFlows {
       return this.accounts(id);
     }
     if (u.prompt === 'username') {
-      const username = text.replace(/^@/, ''); if (!/^[A-Za-z0-9_]{1,15}$/.test(username)) return this.say(id, 'أدخل اسم مستخدم صحيحاً دون رابط، مثل example_user.');
-      if (u.draft?.verificationPending) return this.confirm(id, 'cookieConfirm', `تأكيد إضافة @${username}؟ فحص الجلسة المباشر مؤجل، ولن يبدأ النشر دون VPN سليم.`, { ...u.draft, username, label: username, verifiedAt: null });
+      let username = text.trim().replace(/^@/, '');
+      if (/^https:\/\//i.test(username)) {
+        try { const url = new URL(username); username = !url.username && !url.password && !url.port && ['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'].includes(url.hostname) && /^\/[A-Za-z0-9_]{1,15}\/?$/.test(url.pathname) ? url.pathname.replace(/^\/|\/$/g, '') : ''; } catch { username = ''; }
+      }
+      if (!/^[A-Za-z0-9_]{1,15}$/.test(username)) return this.say(id, 'أدخل اسم مستخدم صحيحاً أو رابط حساب X.');
       return this.verifyDraft(id, username);
     }
     if (u.prompt === 'rename') {
@@ -213,13 +226,20 @@ class TelegramFlows {
     if (u.page === 'account') {
       const account = (await this.bot.accounts.list()).find(a => a.id === u.accountId); if (!account) return this.accounts(id);
       if (text === 'تعطيل' || (text === 'تفعيل أو تعطيل' && account.enabled)) return this.confirm(id, 'disableConfirm', `تعطيل ${account.label}؟`, { id: account.id });
-      if (text === 'تفعيل' || text === 'تفعيل أو تعطيل') { await this.bot.accounts.update(account.id, { enabled: true }); return this.account(id); }
+      if (text === 'تفعيل' || text === 'تفعيل أو تعطيل') {
+        const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
+        if (isBanned) {
+          return this.say(id, 'هذا الحساب محظور، لا يمكن تفعيله.', 'account');
+        }
+        await this.bot.accounts.update(account.id, { enabled: true, status: 'مفعل' });
+        return this.account(id);
+      }
       if (text === 'تعديل الاسم') { await this.ui.page(id, 'account', 'rename'); return this.say(id, 'اكتب الاسم الذي سيظهر في قائمة الحسابات.'); }
       if (text === 'حذف الحساب') return this.confirm(id, 'deleteConfirm', `حذف ${account.label} من قائمة الحسابات؟ ستبقى السجلات التاريخية محفوظة.`, { id: account.id });
       if (text === 'فحص جلسة X' || text === 'فحص VPN وIP') {
         if (!this.isolatedVerifier) return this.say(id, 'تعذر الفحص: بيئة VPN المعزولة للحساب غير مهيأة؛ لم يُستخدم اتصال المضيف.', 'account');
-        try { const r = text === 'فحص جلسة X' ? await this.isolatedVerifier.verify(account) : await this.isolatedVerifier.health(account); await this.ui.recordAccountCheck(account.id, r, { session: text === 'فحص جلسة X' }); return this.say(id, r?.isolated && r?.vpnHealthy ? (text === 'فحص جلسة X' ? r.authenticated ? 'جلسة X صالحة.' : 'جلسة X غير صالحة.' : `VPN سليم. IP: ${require('node:net').isIP(r.exitIp || r.ip || '') ? (r.exitIp || r.ip) : 'غير متاح'}`) : 'فشل التحقق من الشبكة المعزولة.', 'account'); }
-        catch { await this.ui.recordAccountCheck(account.id, {}, { session: text === 'فحص جلسة X' }); return this.say(id, 'تعذر الفحص. حاول لاحقاً.', 'account'); }
+        try { const r = text === 'فحص جلسة X' ? await this.isolatedVerifier.verify(account) : await this.isolatedVerifier.health(account); await this.ui.recordAccountCheck(account.id, r, { session: text === 'فحص جلسة X', expectedAccount: account }); return this.say(id, r?.isolated && r?.vpnHealthy ? (text === 'فحص جلسة X' ? r.authenticated ? 'جلسة X صالحة.' : 'جلسة X غير صالحة.' : `VPN سليم. IP: ${require('./publicIp').isPublicIp(r.exitIp || r.ip) ? (r.exitIp || r.ip) : 'غير متاح'}`) : 'فشل التحقق من الشبكة المعزولة.', 'account'); }
+        catch { await this.ui.recordAccountCheck(account.id, {}, { session: text === 'فحص جلسة X', expectedAccount: account }); return this.say(id, 'تعذر الفحص. حاول لاحقاً.', 'account'); }
       }
     }
     if (u.prompt === 'cookies' && text === 'إعادة المحاولة' && u.draft) return this.verifyDraft(id);

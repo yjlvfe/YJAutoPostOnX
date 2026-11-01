@@ -7,7 +7,8 @@ const { randomUUID } = require('node:crypto');
 const { parseCsv } = require('./csv');
 const { parseCookies, detectFormat } = require('./cookieFormat');
 
-const MAX_ACCOUNTS = 5;
+const MAX_ACCOUNTS = 1000;
+const MAX_ACTIVE_ACCOUNTS = 5;
 const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MAX_COOKIE_BYTES = 10 * 1024 * 1024;
 
@@ -25,9 +26,29 @@ function accountRecord(input = {}) {
     label: String(input.label ?? id).trim().slice(0, 100) || id,
     username: input.username || input.handle ? String(input.username ?? input.handle).replace(/^@/, '').trim().slice(0, 30) || null : null,
     ...(input.userId != null ? { userId: input.userId } : {}),
-    enabled: input.enabled !== false,
+    ...(() => {
+      const rawStatus = String(input.status || '').trim();
+      let normStatus = rawStatus;
+      if (['محظور', 'suspended', 'banned'].includes(rawStatus.toLowerCase()) || rawStatus === 'محظور') {
+        normStatus = 'محظور';
+      } else if (['كابتشا', 'captcha', 'challenge', 'verification_required'].includes(rawStatus.toLowerCase()) || rawStatus === 'كابتشا') {
+        normStatus = 'كابتشا';
+      } else if (['غير مفعل', 'خامل', 'disabled', 'inactive'].includes(rawStatus.toLowerCase()) || rawStatus === 'غير مفعل') {
+        normStatus = 'غير مفعل';
+      } else if (input.enabled === false && !['كابتشا', 'محظور'].includes(normStatus)) {
+        normStatus = 'غير مفعل';
+      } else if (input.enabled !== false && !['كابتشا', 'محظور'].includes(normStatus)) {
+        normStatus = 'مفعل';
+      }
+      return {
+        enabled: input.enabled !== false && !['محظور', 'كابتشا', 'غير مفعل'].includes(normStatus),
+        status: normStatus
+      };
+    })(),
+    ...(require('./publicIp').isPublicIp(input.exitIp) ? { exitIp: input.exitIp } : {}),
     cookieFile: input.cookieFile ? String(input.cookieFile) : null,
     ...(input.verifiedAt ? { verifiedAt: String(input.verifiedAt) } : {}),
+    ...(input.checkGeneration ? { checkGeneration: String(input.checkGeneration) } : {}),
     ...(input.vpnResource ? { vpnResource: String(input.vpnResource) } : {}),
     quota: input.quota == null || input.quota === '' ? null : positiveInteger(input.quota, 'quota'),
     delayMs: input.delayMs == null || input.delayMs === '' ? null : nonNegativeInteger(input.delayMs, 'delayMs')
@@ -47,10 +68,11 @@ function nonNegativeInteger(value, name) {
 }
 
 class AccountManager {
-  constructor(store, { maxAccounts = MAX_ACCOUNTS, beforeMutation, onChange } = {}) {
+  constructor(store, { maxAccounts = MAX_ACCOUNTS, maxActiveAccounts = MAX_ACTIVE_ACCOUNTS, beforeMutation, onChange } = {}) {
     if (!store) throw new TypeError('AccountManager requires a store');
     this.store = store;
     this.maxAccounts = maxAccounts;
+    this.maxActiveAccounts = maxActiveAccounts;
     this.beforeMutation = typeof beforeMutation === 'function' ? beforeMutation : null;
     this.onChange = typeof onChange === 'function' ? onChange : null;
     this.pending = Promise.resolve();
@@ -87,6 +109,13 @@ class AccountManager {
       if (confirmation && state.accounts.some(a => a.username?.toLowerCase() === record.username?.toLowerCase())) throw new Error('Account already exists');
       if (state.accounts.some(item => item.id === record.id)) throw new Error('Account already exists');
       if (state.accounts.length >= this.maxAccounts) throw new Error(`At most ${this.maxAccounts} accounts are supported`);
+      const activeCount = state.accounts.filter(a => a.enabled !== false && !['محظور', 'كابتشا'].includes(a.status)).length;
+      if (activeCount >= this.maxActiveAccounts) {
+        record.enabled = false;
+        record.status = 'غير مفعل';
+      }
+      record.checkGeneration = randomUUID();
+      if (state.telegramUi?.accountChecks) delete state.telegramUi.accountChecks[record.id];
       state.accounts.push(record);
       if (confirmation) Object.assign(confirmation, { draft: null, prompt: null, flowToken: null });
       return state;
@@ -98,8 +127,13 @@ class AccountManager {
     return this._mutate('update', state => {
       const current = (state.accounts || []).find(item => item.id === accountId);
       if (!current) throw new Error('Account not found');
-      const next = accountRecord({ ...current, ...patch, id: accountId });
-      Object.assign(current, next);
+      const input = { ...current, ...patch, ...(Object.hasOwn(patch, 'enabled') ? { status: patch.enabled === false ? 'غير مفعل' : 'مفعل' } : {}), id: accountId };
+      const identityChanged = ['username', 'cookieFile'].some(key => Object.hasOwn(patch, key) && patch[key] !== current[key]);
+      if (identityChanged) for (const key of ['userId', 'verifiedAt']) if (!Object.hasOwn(patch, key)) delete input[key];
+      const next = accountRecord(input);
+      next.checkGeneration = randomUUID();
+      if (state.telegramUi?.accountChecks) delete state.telegramUi.accountChecks[accountId];
+      state.accounts[state.accounts.indexOf(current)] = next;
       return state;
     }).then(state => structuredClone(state.accounts.find(item => item.id === accountId)));
   }
@@ -115,6 +149,7 @@ class AccountManager {
         return keep;
       });
       if (!removed) throw new Error('Account not found');
+      if (state.telegramUi?.accountChecks) delete state.telegramUi.accountChecks[accountId];
       return state;
     });
     return removed;
@@ -127,7 +162,11 @@ class AccountManager {
     }
     const normalized = records.map(accountRecord);
     if (new Set(normalized.map(item => item.id)).size !== normalized.length) throw new Error('Duplicate account id');
-    return this._mutate('replace', state => { state.accounts = normalized; return state; })
+    return this._mutate('replace', state => {
+      state.accounts = normalized.map(account => ({ ...account, checkGeneration: randomUUID() }));
+      if (state.telegramUi) state.telegramUi.accountChecks = {};
+      return state;
+    })
       .then(state => structuredClone(state.accounts));
   }
 

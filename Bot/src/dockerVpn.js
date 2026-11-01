@@ -4,7 +4,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { isIP } = require('node:net');
+const { isPublicIp } = require('./publicIp');
 const { normalizeAccountId } = require('./accounts');
 
 const exec = promisify(execFile);
@@ -62,17 +62,23 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     }
   }
   async function getExitIp(port) {
-    try {
-      const { stdout } = await command('curl', ['--noproxy', '', '--socks5-hostname', `127.0.0.1:${port}`,
-        '--ipv4', '--fail', '--max-time', '10', '--silent', 'https://api.ipify.org'], { timeout: 12_000 });
-      const ip = stdout.trim(); return isIP(ip) === 4 ? ip : null;
-    } catch { return null; }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { stdout } = await command('curl', ['--noproxy', '', '--socks5-hostname', `127.0.0.1:${port}`,
+          '--ipv4', '--fail', '--max-time', '10', '--silent', 'https://api.ipify.org'], { timeout: 12_000 });
+        const ip = stdout.trim();
+        if (isPublicIp(ip)) return ip;
+      } catch {
+        if (attempt === 0) await wait(500);
+      }
+    }
+    return null;
   }
   async function getServerIp() {
     try {
       const { stdout } = await command('curl', ['--noproxy', '*', '--ipv4', '--fail', '--max-time', '5',
         '--silent', 'https://api.ipify.org'], { timeout: 7_000 });
-      const ip = stdout.trim(); return isIP(ip) === 4 ? ip : null;
+      const ip = stdout.trim(); return isPublicIp(ip) ? ip : null;
     } catch { return null; }
   }
   async function healthCheck(slot) {
@@ -135,7 +141,90 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     await docker(['rm', '-f', status.name]); // No -v: identity/session volumes intentionally survive.
     return { removed: true, name: status.name };
   }
+  function normalizeSubnet(ip) {
+    if (!ip || typeof ip !== 'string') return null;
+    const parts = ip.split('/')[0].trim().split('.');
+    return parts.length >= 3 ? `${parts[0]}.${parts[1]}.${parts[2]}` : null;
+  }
+  async function rotateContainerIp(slot, {
+    blacklistedSubnets = [],
+    activeSubnets = [],
+    preferredCities = ['New_York', 'Los_Angeles', 'Chicago', 'Dallas', 'Miami', 'Atlanta', 'Seattle', 'Denver', 'Phoenix', 'Ashburn'],
+    maxAttempts = 4,
+    previousIp = null,
+    logger = () => {}
+  } = {}) {
+    const name = containerName(slot);
+    const port = slotPort(slot);
+    const status = await containerStatus(slot);
+    if (!status.exists || !status.running) {
+      return { success: false, reason: 'container_not_running', name, slot, port };
+    }
+    const blacklisted = new Set(blacklistedSubnets.map(normalizeSubnet).filter(Boolean));
+    const active = new Set(activeSubnets.map(normalizeSubnet).filter(Boolean));
+    let lastError = null;
+    let newExitIp = null;
+    let newSubnet = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const city = preferredCities[attempt % preferredCities.length];
+      logger(`Rotating IP for slot ${slot} (${name}) to ${city} (attempt ${attempt + 1}/${maxAttempts})...`);
+      try {
+        await docker(['exec', name, 'nordvpn', 'connect', city], 25_000);
+        await wait(2000);
+        newExitIp = await getExitIp(port);
+        if (!newExitIp) {
+          lastError = 'proxy_unreachable_after_connect';
+          continue;
+        }
+        newSubnet = normalizeSubnet(newExitIp);
+        if (previousIp && newExitIp === previousIp) {
+          lastError = 'ip_unchanged';
+          continue;
+        }
+        if (blacklisted.has(newSubnet)) {
+          lastError = `subnet_blacklisted:${newSubnet}`;
+          continue;
+        }
+        if (active.has(newSubnet)) {
+          lastError = `subnet_clustered:${newSubnet}`;
+          continue;
+        }
+        try {
+          const { stdout: serverOut } = await docker(['exec', name, 'nordvpn', 'status']);
+          const match = serverOut.match(/Hostname:\s*([a-z0-9.-]+\.nordvpn\.com)/i);
+          if (match && match[1]) {
+            await docker(['exec', name, 'sh', '-c', `printf '%s\\n' "${match[1]}" > /var/lib/nordvpn/yj-server`]);
+          }
+        } catch {}
+
+        return {
+          success: true,
+          slot,
+          name,
+          port,
+          exitIp: newExitIp,
+          subnet: `${newSubnet}.0/24`,
+          city,
+          attempt: attempt + 1
+        };
+      } catch (err) {
+        lastError = err.message || 'docker_exec_failed';
+        await wait(1000);
+      }
+    }
+    return {
+      success: false,
+      reason: lastError || 'rotation_exhausted',
+      slot,
+      name,
+      port,
+      exitIp: newExitIp,
+      subnet: newSubnet ? `${newSubnet}.0/24` : null
+    };
+  }
   return { containerStatus, getExitIp, getServerIp, healthCheck, ensureContainer, destroyContainer,
+    rotateContainerIp, normalizeSubnet,
     testSocksProxy: async port => Boolean(await getExitIp(port)) };
 }
 const runtime = createDockerRuntime();
@@ -144,9 +233,40 @@ const runtime = createDockerRuntime();
 class VpnSlotManager {
   constructor({ store, logger = () => {}, runtime: suppliedRuntime = runtime } = {}) {
     if (!store) throw new Error('VpnSlotManager requires a store');
-    this.store = store; this.logger = logger; this.runtime = suppliedRuntime; this.pending = Promise.resolve();
+    this.store = store; this.logger = logger; this.runtime = suppliedRuntime; this.pending = Promise.resolve(); this.readers = new Set();
   }
-  _exclusive(fn) { const work = this.pending.then(fn); this.pending = work.catch(() => {}); return work; }
+  _exclusive(fn) { const work = this.pending.then(async () => { await Promise.all([...this.readers]); return fn(); }); this.pending = work.catch(() => {}); return work; }
+  async acquireReadRoute(accountId, { signal } = {}) {
+    const id = normalizeAccountId(accountId);
+    const wait = async work => {
+      signal?.throwIfAborted();
+      let abort;
+      const cancelled = new Promise((_, reject) => { abort = () => reject(signal.reason); signal?.addEventListener('abort', abort, { once: true }); });
+      try { return await Promise.race([work, cancelled]); }
+      finally { signal?.removeEventListener('abort', abort); }
+    };
+    let release, slot;
+    const admitted = this.pending.then(async () => {
+      signal?.throwIfAborted();
+      const slots = await this._slots(), entries = Object.entries(slots);
+      signal?.throwIfAborted();
+      if (entries.some(([, value]) => !Number.isInteger(value) || value < 0 || value >= MAX_SLOTS) || new Set(entries.map(([, value]) => value)).size !== entries.length) {
+        throw Object.assign(new Error('Unsafe VPN mappings'), { code: 'VPN_MAPPING_CONFLICT' });
+      }
+      slot = Object.hasOwn(slots, id) ? slots[id] : null;
+      if (slot == null) throw Object.assign(new Error('VPN route absent'), { code: 'VPN_NOT_READY' });
+      let resolve; const held = new Promise(r => { resolve = r; });
+      this.readers.add(held);
+      release = () => { this.readers.delete(held); resolve(); };
+    });
+    this.pending = admitted.catch(() => {});
+    try {
+      await wait(admitted);
+      const health = await wait(Promise.resolve().then(() => { signal?.throwIfAborted(); return this.runtime.healthCheck(slot, { signal }); }));
+      if (!health.healthy) throw Object.assign(new Error('VPN route not ready'), { code: 'VPN_NOT_READY' });
+      return { ...health, slot, proxy: `socks5h://127.0.0.1:${slotPort(slot)}`, release };
+    } catch (error) { release?.(); throw error; }
+  }
   async _slots() { return (await this.store.load()).vpnSlots || {}; }
   async _allocate(accountId) {
     const id = normalizeAccountId(accountId);
@@ -222,6 +342,45 @@ class VpnSlotManager {
   async health(accountId) {
     const slot = await this.getSlot(accountId);
     return slot == null ? { healthy: false, reason: 'no_slot_allocated' } : this.runtime.healthCheck(slot);
+  }
+  async _rotate(slot, { previousIp, ...options } = {}) {
+    slotPort(slot);
+    const state = await this.store.load();
+    const blacklistedSubnets = (state.burnedSubnets || []).map(e => typeof e === 'string' ? e : e.subnet);
+    const activeSubnets = [];
+    for (let s = 0; s < MAX_SLOTS; s++) {
+      if (s !== slot) {
+        try {
+          const ip = await this.runtime.getExitIp(slotPort(s));
+          if (ip) activeSubnets.push(ip);
+        } catch {}
+      }
+    }
+    const currentIp = previousIp || (await this.runtime.getExitIp(slotPort(slot)));
+    const result = await this.runtime.rotateContainerIp(slot, {
+      blacklistedSubnets,
+      activeSubnets,
+      previousIp: currentIp,
+      logger: this.logger,
+      ...options
+    });
+    return result;
+  }
+  async rotateSlot(slot, options = {}) {
+    return this._exclusive(() => this._rotate(slot, options));
+  }
+  async rotateAccount(accountId, options = {}) {
+    return this._exclusive(async () => {
+      const slot = await this.getSlot(accountId);
+      if (slot == null) return { success: false, reason: 'no_slot_allocated' };
+      return this._rotate(slot, options);
+    });
+  }
+  async rotate(accountIdOrSlot, options = {}) {
+    if (Number.isInteger(accountIdOrSlot)) {
+      return this.rotateSlot(accountIdOrSlot, options);
+    }
+    return this.rotateAccount(accountIdOrSlot, options);
   }
 }
 module.exports = { VpnSlotManager, createDockerRuntime, validateTokenFile, ...runtime,

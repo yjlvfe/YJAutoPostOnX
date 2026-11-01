@@ -22,7 +22,13 @@ function csv(rows) {
 function isPublished(item) {
   return item.state === 'published' && item.id != null && item.url && item.publishedAt && Number.isFinite(new Date(item.publishedAt).getTime());
 }
-function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = console }) {
+function dailyRows(state, day) {
+  const seen = new Set();
+  return (state.items || []).filter(x => isPublished(x) && dayOf(x.publishedAt) === day)
+    .sort((a, b) => new Date(a.publishedAt) - new Date(b.publishedAt) || String(a.id).localeCompare(String(b.id)))
+    .filter(row => { if (seen.has(row.url)) return false; seen.add(row.url); return true; });
+}
+function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = console, clock = () => new Date() }) {
   // Persisted recipients are obligations, never authorization. Revoked recipients
   // stay on disk but cannot be contacted by this instance.
   const destinations = [...new Set([...(chatIds || []), chatId].filter(id => id !== undefined && id !== null).map(String))];
@@ -30,7 +36,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
   const serialize = fn => { const next = chain.then(fn); chain = next.catch(() => {}); return next; };
 
   async function writeDay(day, state) {
-    const rows = (state.items || []).filter(x => isPublished(x) && dayOf(x.publishedAt) === day);
+    const rows = dailyRows(state, day);
     const filename = `links_${day}.csv`; const content = csv(rows);
     const dir = path.join(dataDir, 'exports'); await fs.mkdir(dir, { recursive: true, mode: 0o700 });
     const temp = path.join(dir, `.${filename}.${randomUUID()}.tmp`);
@@ -82,10 +88,39 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
     });
   }
 
-  async function deliver(outboxId) {
+  // A terminal obligation belongs to a session-stop event, not to individual
+  // new rows. Even a failed session owes today's previously confirmed history.
+  async function enqueueTerminal(run) {
+    if (!run?.runId) return;
+    await store.update(state => {
+      const pending = state.telegramUi?.pendingReport;
+      const day = dayOf(run.endedAt || (pending?.runId === run.runId && pending.endedAt) || clock());
+      state.linkOutbox ||= [];
+      state.linkTerminalEvents ||= [];
+      // Do not publish a terminal report if its terminal-state commit failed.
+      if (['running', 'stopping'].includes(state.cycle?.state) && state.cycle.runId === run.runId) return state;
+      if (state.telegramUi?.pendingReport?.runId === run.runId) delete state.telegramUi.pendingReport;
+      for (const destination of destinations) {
+        if (state.linkTerminalEvents.some(event => event.runId === run.runId && event.chatId === destination)) continue;
+        const rows = dailyRows({ items: [
+          ...(state.items || []),
+          ...state.linkOutbox.filter(entry => entry.kind === 'document' && entry.day === day).flatMap(entry => entry.rows || [])
+        ] }, day);
+        state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day });
+        if (!rows.length) continue;
+        state.linkOutbox.push({ outboxId: randomUUID(), runId: run.runId, terminalId: run.runId, day,
+          kind: 'document', chatId: destination, itemIds: rows.map(row => row.id), rows: structuredClone(rows),
+          status: 'pending', attempts: 0, createdAt: new Date(clock()).toISOString() });
+      }
+      return state;
+    });
+  }
+
+  async function deliver(outboxId, { idleOnly = false } = {}) {
     let entry;
     const deliveryId = randomUUID();
     await store.update(state => {
+      if (idleOnly && ['running', 'stopping'].includes(state.cycle?.state)) return state;
       const current = (state.linkOutbox || []).find(record => record.outboxId === outboxId);
       if (!current || !destinations.includes(String(current.chatId)) || !['pending', 'retry'].includes(current.status)) return state;
       current.status = 'sending'; current.deliveryId = deliveryId; current.attempts += 1;
@@ -93,6 +128,12 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       state.linkDeliveries ||= [];
       state.linkDeliveries.push({ deliveryId, outboxId, runId: current.runId, day: current.day, kind: current.kind,
         chatId: current.chatId, itemIds: current.itemIds, attempted: true, ok: false, attemptedAt: current.attemptedAt });
+      // Freeze the complete durable daily total in this attempt, not just
+      // the triggering run's new rows. Delivery coverage remains per new item.
+      if (current.kind === 'document') current.rows = dailyRows({ items: [
+        ...(state.items || []),
+        ...(state.linkOutbox || []).filter(record => record.day === current.day && record.kind === 'document').flatMap(record => record.rows || [])
+      ] }, current.day);
       entry = structuredClone(current);
       return state;
     });
@@ -142,19 +183,39 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
     }
     return summary;
   }
-  async function drain() {
-    const state = await store.load();
-    const pending = (state.linkOutbox || []).filter(entry => destinations.includes(String(entry.chatId)) && ['pending', 'retry'].includes(entry.status));
-    // Do not start ANY network request if regenerating daily files fails.
-    for (const day of new Set(pending.filter(entry => entry.kind === 'document').map(entry => entry.day))) await writeDay(day, state);
-    const results = await Promise.allSettled(pending.map(entry => deliver(entry.outboxId)));
-    const failure = results.find(result => result.status === 'rejected');
-    if (failure) throw failure.reason;
-    return summarize(await store.load());
+  async function drain(options) {
+    const lease = randomUUID(); let acquired = !options?.idleOnly;
+    if (options?.idleOnly) await store.update(state => {
+      if (['running', 'stopping'].includes(state.cycle?.state) || state.linkExportLease) return state;
+      state.linkExportLease = lease; acquired = true; return state;
+    });
+    if (!acquired) return summarize(await store.load());
+    try {
+      const state = await store.load();
+      const pending = (state.linkOutbox || []).filter(entry => destinations.includes(String(entry.chatId)) && ['pending', 'retry'].includes(entry.status));
+      // Admission stays fenced across asynchronous file preparation and transport.
+      for (const day of new Set(pending.filter(entry => entry.kind === 'document').map(entry => entry.day))) await writeDay(day, state);
+      const results = await Promise.allSettled(pending.map(entry => deliver(entry.outboxId, options)));
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure) throw failure.reason;
+      return summarize(await store.load());
+    } finally {
+      if (options?.idleOnly) await store.update(state => { if (state.linkExportLease === lease) delete state.linkExportLease; return state; });
+    }
   }
   return {
     write: item => serialize(async () => writeDay(dayOf(item.publishedAt), await store.load())),
-    send: (run, { emptyMessage = true } = {}) => serialize(async () => { await enqueue(run, { emptyMessage }); return drain(); }),
+    send: (run, { emptyMessage = true, terminal = false } = {}) => serialize(async () => {
+      if (terminal) await enqueueTerminal(run); else await enqueue(run, { emptyMessage });
+      return drain(terminal ? { idleOnly: true } : undefined);
+    }),
+    // Retry already-created terminal obligations without discovering live rows.
+    flush: () => serialize(async () => {
+      const state = await store.load();
+      if (['running', 'stopping'].includes(state.cycle?.state)) return summarize(state);
+      if (state.telegramUi?.pendingReport) await enqueueTerminal(state.telegramUi.pendingReport);
+      return drain({ idleOnly: true });
+    }),
     reconcile: ({ deliver: shouldDeliver = true } = {}) => serialize(async () => {
       const state = await enqueue();
       return shouldDeliver ? drain() : summarize(state);

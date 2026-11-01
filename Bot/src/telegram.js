@@ -6,14 +6,18 @@ const BUTTONS = Object.freeze({ work: 'بدء العمل', posts: 'إضافة م
 // All reply navigation is themed; labels remain unchanged for exact routing.
 const MENU_BUTTON_STYLES = Object.freeze({
   [BUTTONS.work]: 'success', [BUTTONS.posts]: 'success',
-  'إضافة حساب': 'success', 'تفعيل': 'success', 'تفعيل الجدولة': 'success',
-  'تعطيل': 'danger', 'حذف الحساب': 'danger', 'تعطيل الجدولة': 'danger'
+  'إضافة حساب': 'success', 'إضافة': 'success', 'تفعيل': 'success', 'تفعيل الجدولة': 'success',
+  'الحسابات': 'primary', 'تفعيل / إلغاء تفعيل': 'primary',
+  'تعطيل': 'danger', 'حذف الحساب': 'danger', 'تعطيل الجدولة': 'danger', 'إلغاء تفعيل كل الحسابات': 'danger'
 });
 const ACTIONS = Object.freeze({
   [BUTTONS.work]: 'work', [BUTTONS.posts]: 'posts', [BUTTONS.settings]: 'settings',
   '/start': 'menu', '/menu': 'menu', '/status': 'work', '/report': 'report',
   'القائمة الرئيسية': 'menu', 'رجوع': 'back', 'العودة': 'back', 'رجوع للقائمة': 'back', 'إلغاء': 'back',
   'إدارة الحسابات': 'accounts', '/accounts': 'accounts',
+  'الحسابات': 'accountsBrowse', '/accounts_list': 'accountsBrowse',
+  'تفعيل / إلغاء تفعيل': 'accountToggleMenu', 'تفعيل أو تعطيل': 'accountToggleMenu',
+  '/account_toggle_menu': 'accountToggleMenu',
   'الجدولة': 'scheduleMenu', 'التأخير': 'delayMenu', 'الحصص': 'quotaMenu',
   '/account_add': 'accountAdd', '/account_remove': 'accountRemove',
   '/account_username': 'accountUsername', '/account_toggle': 'accountToggle',
@@ -25,9 +29,9 @@ const ACTIONS = Object.freeze({
 });
 const PAGES = Object.freeze({
   main: [[BUTTONS.work, BUTTONS.posts, BUTTONS.settings]],
-  settings: [['إدارة الحسابات', 'الجدولة', 'التأخير'], ['الحصص', 'رجوع']],
+  settings: [['التأخير', 'الجدولة', 'الحصص'], ['إدارة الحسابات'], ['رجوع']],
   input: [['رجوع']],
-  accounts: [['إضافة حساب', 'رجوع']],
+  accounts: [['إضافة', 'تفعيل / إلغاء تفعيل', 'الحسابات'], ['رجوع']],
   account: [['تفعيل', 'تعطيل', 'تعديل الاسم'], ['فحص جلسة X', 'فحص VPN وIP', 'حذف الحساب'], ['رجوع']],
   waiting: [['رجوع']], confirm: [['رجوع']],
   schedule: [['تفعيل الجدولة', 'تعطيل الجدولة', 'تحديد الموعد'], ['رجوع']],
@@ -55,7 +59,28 @@ function actionFromUpdate(update = {}) {
   const callback = update.callback_query;
   if (callback) {
     const parsed = parseCallbackData(callback.data);
-    return { action: parsed.namespace === 'cycle' && ['start', 'stop', 'refresh'].includes(parsed.action) ? 'cycleControl' : parsed.namespace === 'acc' ? 'accountControl' : parsed.namespace === 'nav' ? 'navControl' : parsed.namespace === 'flow' ? 'flowControl' : 'unknownCallback', source: 'callback', callback, parsed };
+    return {
+      action: parsed.namespace === 'cycle' && ['start', 'stop', 'refresh'].includes(parsed.action)
+        ? 'cycleControl'
+        : parsed.namespace === 'acctoggle'
+        ? 'accountToggle'
+        : parsed.namespace === 'accmanage'
+        ? 'accountManage'
+        : parsed.namespace === 'delay'
+        ? 'delayControl'
+        : parsed.namespace === 'schedule_btn'
+        ? 'scheduleControl'
+        : parsed.namespace === 'acc'
+        ? 'accountControl'
+        : parsed.namespace === 'nav'
+        ? 'navControl'
+        : parsed.namespace === 'flow'
+        ? 'flowControl'
+        : 'unknownCallback',
+      source: 'callback',
+      callback,
+      parsed
+    };
   }
   const message = update.message || null;
   const text = String(message?.text || message?.caption || '').trim();
@@ -65,16 +90,17 @@ function actionFromUpdate(update = {}) {
 }
 
 class TelegramTransport {
-  constructor({ send, sendMessage, sendRichMessage, editMessageText, answerCallback, answerCallbackQuery, inlineStyles = true } = {}) {
+  constructor({ send, sendMessage, sendRichMessage, editMessageText, deleteMessage, answerCallback, answerCallbackQuery, inlineStyles = true } = {}) {
     this.send = send || sendMessage || (async () => { throw new Error('Telegram transport is not configured'); });
     this.sendRich = sendRichMessage || (async () => { throw new Error('Telegram rich transport is not configured'); });
     this._editMessageText = editMessageText || (async () => { throw new Error('Telegram edit transport is not configured'); });
+    this._deleteMessage = deleteMessage || (async () => undefined);
     this.answerCallback = answerCallback || answerCallbackQuery || (async () => undefined);
     this.inlineStyles = inlineStyles !== false;
   }
   async sendMessage(chatId, text, extra = {}) {
     if (extra.rich_message) return this.sendRich({ chat_id: chatId, ...extra });
-    if (typeof text === 'string' && text.includes('<table')) {
+    if (typeof text === 'string' && /^<table(?:\s|>)/.test(text)) {
       const { parse_mode, ...rest } = extra;
       return this.sendRich({ chat_id: chatId, rich_message: { html: text }, ...rest });
     }
@@ -82,11 +108,14 @@ class TelegramTransport {
   }
   async editMessageText(chatId, messageId, text, extra = {}) {
     if (extra.rich_message) return this._editMessageText({ chat_id: chatId, message_id: messageId, ...extra });
-    if (typeof text === 'string' && text.includes('<table')) {
+    if (typeof text === 'string' && /^<table(?:\s|>)/.test(text)) {
       const { parse_mode, ...rest } = extra;
       return this._editMessageText({ chat_id: chatId, message_id: messageId, rich_message: { html: text }, ...rest });
     }
     return this._editMessageText({ chat_id: chatId, message_id: messageId, text, ...extra });
+  }
+  async deleteMessage(chatId, messageId) {
+    return this._deleteMessage({ chat_id: chatId, message_id: messageId }).catch(() => {});
   }
   keyboard(page = 'main', customRows) {
     const rows = customRows || PAGES[page] || PAGES.main;
@@ -130,10 +159,12 @@ class TelegramTransport {
     // Cancellation must not depend on the lifetime of Telegram's callback ID.
     // Authorization above and the handler's panel token/message checks remain.
     if (callbackId && priorityStop) Promise.resolve().then(() => request.acknowledge()).catch(() => {});
-    else if (callbackId && !startControl) await request.acknowledge();
+    else if (callbackId && !startControl && request.action !== 'accountToggle' && request.action !== 'accountManage' && request.action !== 'delayControl' && request.action !== 'scheduleControl') await request.acknowledge();
     const handler = actions[request.action];
     if (typeof handler !== 'function') return { handled: false, action: request.action, request };
-    return { handled: true, action: request.action, result: await handler(request, update) };
+    const result = await handler(request, update);
+    if (callbackId && !acknowledgement) await request.acknowledge();
+    return { handled: true, action: request.action, result };
   }
 }
 

@@ -1,0 +1,29 @@
+[Unit]
+Description=YJ AutoPost Telegram bot runtime (per-user checkout)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# This unit is intentionally user-scoped: it can run the current checkout under
+# the owning user without creating a system user or touching /root permissions.
+Environment=BOT_APP_DIR=%h/Projects/YJAutoPostOnX/Bot
+Environment=BOT_DATA_DIR=%h/Projects/YJAutoPostOnX/Bot/data
+EnvironmentFile=-%h/Projects/YJAutoPostOnX/Bot/.env.local
+WorkingDirectory=%h/Projects/YJAutoPostOnX/Bot
+ExecStart=%h/Projects/YJAutoPostOnX/Bot/systemd/telegram-bot-launcher.sh
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=%h/Projects/YJAutoPostOnX/Bot/data
+UMask=0077
+
+# This user unit is installed and enabled for the owning user's boot target.
+# Do not start or restart it as part of static verification; use a bounded,
+# separately named smoke unit only when an operator explicitly approves one.
+
+[Install]
+WantedBy=default.target

@@ -8,14 +8,14 @@ const clean = value => String(value ?? '').replace(/[\r\n\t\u0000-\u001f\u007f\u
 
 function richTable(headers, rows, caption = '') {
   const parts = ['<table bordered compact>'];
-  if (caption) parts.push(`<caption>${escapeHtml(caption)}</caption>`);
+  if (caption) parts.push(`<caption>${escapeHtml(clean(caption))}</caption>`);
   if (headers && headers.length) {
-    parts.push('<tr>' + headers.map(h => `<th align="center">${escapeHtml(h)}</th>`).join('') + '</tr>');
+    parts.push('<tr>' + headers.map(h => `<th align="center">${escapeHtml(clean(h))}</th>`).join('') + '</tr>');
   }
   for (const row of rows) {
     parts.push('<tr>' + row.map((cell, idx) => {
       const align = (headers.length === 2 && idx === 1) ? 'right' : 'center';
-      return `<td align="${align}">${escapeHtml(cell)}</td>`;
+      return `<td align="${align}">${escapeHtml(clean(cell))}</td>`;
     }).join('') + '</tr>');
   }
   parts.push('</table>');

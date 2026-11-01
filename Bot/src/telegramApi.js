@@ -179,6 +179,7 @@ function createTelegramApi(token, options = {}) {
       return call('sendMessage', params);
     },
     editMessageText: params => call('editMessageText', params),
+    deleteMessage: params => call('deleteMessage', params),
     answerCallbackQuery: params => call('answerCallbackQuery', params),
     getFile: params => call('getFile', params),
     downloadFile: async (filePath, { maxBytes = 2 * 1024 * 1024 } = {}) => {

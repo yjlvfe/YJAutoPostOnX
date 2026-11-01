@@ -1,0 +1,13 @@
+{
+  "name": "yj-auto-post-x-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated offline foundation for the YJ Auto Post X Telegram bot",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
