@@ -5,6 +5,20 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const activeProcesses = new Set();
+function cleanupActiveProcesses() {
+  for (const child of activeProcesses) {
+    try { if (!child.killed && child.exitCode === null) child.kill('SIGKILL'); } catch {}
+  }
+  activeProcesses.clear();
+}
+if (!global._directXCleanupHook) {
+  global._directXCleanupHook = true;
+  process.once('exit', cleanupActiveProcesses);
+  process.once('SIGINT', () => { cleanupActiveProcesses(); process.exit(130); });
+  process.once('SIGTERM', () => { cleanupActiveProcesses(); process.exit(143); });
+}
+
 function extractTwidUserId(cookieFile) {
   try {
     const raw = fs.readFileSync(cookieFile, 'utf8');
@@ -26,7 +40,7 @@ const ambiguous = reason => ({ status: 'ambiguous', published: false, posted: fa
 const handle = value => typeof value === 'string' && /^@?[A-Za-z0-9_]{1,15}$/.test(value) ? value.replace(/^@/, '').toLowerCase() : null;
 const expected = account => handle(account?.username || account?.handle || account?.expectedUsername || account?.identity);
 const numericId = value => typeof value === 'string' && /^\d+$/.test(value);
-const validIdentity = identity => identity?.authenticated === true && handle(identity.username) && numericId(identity.userId);
+const validIdentity = identity => identity?.authenticated === true && identity?.state === 'authenticated' && !identity?.accountFailure && handle(identity.username) && numericId(identity.userId);
 const readDiagnostic = value => ({
   phase: ['user_state', 'settings', 'profile'].includes(value?.phase) ? value.phase : 'bridge',
   httpStatus: Number.isInteger(value?.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599 ? value.httpStatus : null,
@@ -62,6 +76,8 @@ class DirectXAdapter {
     const child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
       stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
     });
+    activeProcesses.add(child);
+    child.once('exit', () => activeProcesses.delete(child));
     const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', () => { if (!child.pid) resolve(); }); });
     const state = { child, exited, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null };
     this.sessions.set(session, state);
@@ -71,12 +87,15 @@ class DirectXAdapter {
     child.on('exit', () => this._failed(state));
     child.stdout.on('data', chunk => {
       state.buffer += chunk.toString('utf8');
-      if (state.buffer.length > 1_048_576) return this._failed(state);
       let index;
       while ((index = state.buffer.indexOf('\n')) >= 0) {
-        const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1);
-        try { this._message(state, JSON.parse(line)); } catch { this._failed(state); }
+        const line = state.buffer.slice(0, index);
+        state.buffer = state.buffer.slice(index + 1);
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try { this._message(state, JSON.parse(trimmed)); } catch { this._failed(state); }
       }
+      if (state.buffer.length > 1_048_576) return this._failed(state);
     });
     try {
       const resolvedCookie = path.resolve(String(selected.cookieFile || selected.cookiePath));
@@ -87,13 +106,14 @@ class DirectXAdapter {
         use_cache: Boolean(effectiveUserId && !selected.verifyNetwork),
       }, proxy }, { timeout: this.openTimeoutMs, signal });
       const identity = result.identity;
-      if (validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
+      const isAccountFailed = Boolean(result.accountFailure || identity?.accountFailure || identity?.state === 'suspended' || identity?.state === 'blocked');
+      if (!isAccountFailed && validIdentity(identity) && (!expected(selected) || expected(selected) === handle(identity.username)) &&
           (!selected.userId || selected.userId === identity.userId)) {
         state.identity = Object.freeze({ ...identity, username: handle(identity.username) });
         session.identity = { ...state.identity };
         session.state = 'authenticated';
       } else {
-        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure, reason: result.reason || 'identity_unverified', readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure };
+        session.identity = { state: 'identity_unverified', authenticated: false, accountFailure: result.accountFailure || identity?.accountFailure, reason: result.reason || identity?.reason || (isAccountFailed ? 'account_suspended_or_failed' : 'identity_unverified'), readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure && !identity?.accountFailure };
         session.state = 'blocked';
         await this.close({ session });
       }
@@ -190,7 +210,7 @@ class DirectXAdapter {
   _failed(state) {
     if (state.dead) return;
     state.dead = true;
-    state.child.kill('SIGKILL');
+    try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
     state.pending?.reject();
   }
 
@@ -198,7 +218,23 @@ class DirectXAdapter {
     if (!session) return;
     session.closed = true;
     const state = this.sessions.get(session);
-    if (state) { this._failed(state); await state.exited; } // route owner must observe process exit
+    if (state) {
+      if (!state.dead) {
+        state.dead = true;
+        state.pending?.reject();
+        try {
+          state.child.stdin.end();
+          state.child.kill('SIGTERM');
+        } catch {}
+        const forceTimer = setTimeout(() => {
+          try { if (!state.child.killed && state.child.exitCode === null) state.child.kill('SIGKILL'); } catch {}
+        }, 500);
+        await state.exited;
+        clearTimeout(forceTimer);
+      } else {
+        await state.exited;
+      }
+    }
   }
 }
 function checkedTimeout(value) {

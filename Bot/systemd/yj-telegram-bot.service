@@ -1,0 +1,30 @@
+[Unit]
+Description=YJ Auto Post on X - Telegram Bot
+Documentation=https://github.com/YJAutoPostOnX
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Projects/YJAutoPostOnX/Bot
+ExecStartPre=/bin/bash -c 'for i in 1 2 3 4 5; do timeout 30 docker start yj_autopost_vpn_$i 2>/dev/null || true; done; sleep 5'
+ExecStart=/usr/local/bin/node src/index.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yj-telegram-bot
+Environment=NODE_ENV=production
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/root/Projects/YJAutoPostOnX/Bot/data
+ReadWritePaths=/root/Projects/YJAutoPostOnX/Bot/logs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

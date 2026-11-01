@@ -94,11 +94,14 @@ function transfer(url, { method = 'POST', body, headers, timeoutMs = 30_000, max
 
 function request(token, method, params = {}, options = {}) {
   if (!token) return Promise.reject(Object.assign(new Error('TELEGRAM_BOT_TOKEN is required'), { code: 'CONFIG_ERROR' }));
-  if (typeof options.request === 'function') return Promise.resolve(options.request(method, params));
+  const timeoutMs = method === 'getUpdates' && Number.isFinite(params?.timeout)
+    ? Math.max(options.timeoutMs || 30_000, (params.timeout + 15) * 1000)
+    : options.timeoutMs;
+  if (typeof options.request === 'function') return Promise.resolve(options.request(method, params, { timeoutMs }));
   const url = new URL(`/bot${encodeURIComponent(token)}/${method}`, options.baseUrl || 'https://api.telegram.org');
   const body = JSON.stringify(params);
   return transfer(url, {
-    body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs: options.timeoutMs,
+    body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs,
     decode: (data, response) => parseTelegramEnvelope(data.toString('utf8'), method, response)
   });
 }

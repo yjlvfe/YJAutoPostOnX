@@ -15,6 +15,16 @@ import urllib.parse
 
 # -I excludes even the script directory; add ONLY this owned directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from direct_x_compat import _compat_user_data
+
+if sys.platform == 'linux':
+    try:
+        import ctypes
+        import signal
+        # PR_SET_PDEATHSIG = 1: kernel sends SIGTERM to child when parent terminates
+        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
+    except Exception:
+        pass
 
 
 def validate_proxy(proxy):
@@ -386,11 +396,19 @@ class DirectSession:
         twid = unquote(getattr(self.client, 'get_cookies', lambda: {})().get('twid', ''))
         candidate = twid[2:] if twid.startswith('u=') and numeric_id(twid[2:]) else None
 
-        # Clean Pre-Tweet Fast Path:
-        # If use_cache is enabled and account has a saved identity and matching twid cookie,
-        # avoid hitting dead/robotic endpoints (settings.json 404, user_state.json) before tweeting.
-        # Identity and status are validated natively during CreateTweet.
+        # Clean Pre-Tweet Fast Path with active state verification (FINDING-007):
+        # Even when use_cache is enabled, do NOT bypass account suspension or active state verification.
+        # Verify account state against live API via profile fetch before declaring authenticated.
         if self.use_cache and self.expected and self.expected_id and candidate and candidate == self.expected_id:
+            if hasattr(self.client, 'get_user_by_id'):
+                self.read_phase = 'profile'
+                user = await self.client.get_user_by_id(candidate)
+                fetched_name = username(getattr(user, 'screen_name', None))
+                fetched_id = getattr(user, 'id', None)
+                if fetched_name and fetched_name != self.expected:
+                    raise ValueError('auth_identity_mismatch')
+                if fetched_id and str(fetched_id) != str(self.expected_id):
+                    raise ValueError('auth_identity_mismatch')
             result = {'state': 'authenticated', 'authenticated': True, 'username': self.expected, 'userId': self.expected_id}
             self.verified = result
             return result
@@ -571,6 +589,8 @@ class DirectSession:
                                             core_user = (user_res.get('result') or {}) if isinstance(user_res, dict) else {}
                                             if isinstance(core_user, dict) and isinstance(core_user.get('user'), dict):
                                                 core_user = core_user.get('user')
+                                            if isinstance(core_user, dict):
+                                                core_user = _compat_user_data(core_user)
                                             core_legacy = (core_user.get('legacy') or {}) if isinstance(core_user, dict) else {}
                                             user_name_extracted = (core_legacy.get('screen_name') if isinstance(core_legacy, dict) else None) or (legacy.get('screen_name') if isinstance(legacy, dict) else None)
                                             user_id_extracted = (legacy.get('user_id_str') if isinstance(legacy, dict) else None) or (core_user.get('rest_id') if isinstance(core_user, dict) else None)

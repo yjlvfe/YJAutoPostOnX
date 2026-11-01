@@ -4,6 +4,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const { isPublicIp } = require('./publicIp');
 const { normalizeAccountId } = require('./accounts');
 
@@ -11,7 +12,8 @@ const exec = promisify(execFile);
 const BASE_PORT = 18801;
 const MAX_SLOTS = 5;
 const CONTAINER_PREFIX = 'yj_autopost_vpn_';
-const VPN_IMAGE = 'yj_autopost_vpn_image:latest';
+const DEFAULT_VPN_VERSION = '6.0.2';
+const VPN_IMAGE = process.env.VPN_IMAGE || `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}`;
 const OWNER = 'yj-autopost';
 const CONTRACT = 'independent-v1';
 const TOKEN_TARGET = '/run/secrets/nordvpn_token';
@@ -36,7 +38,11 @@ async function validateTokenFile(file) {
 }
 
 /** Dependency injection keeps tests away from the real Docker daemon and credentials. */
-function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile } = {}) {
+function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile, serverIp: initialServerIp = null } = {}) {
+  let cachedServerIp = (initialServerIp && isPublicIp(String(initialServerIp).trim()))
+    ? String(initialServerIp).trim()
+    : null;
+
   async function docker(args, timeout = 15_000) {
     try { return await command('docker', args, { timeout, maxBuffer: 1024 * 1024 }); }
     catch { throw new Error(`VPN Docker ${args[0]} failed`); } // Never relay Docker inspect/env or command stderr.
@@ -47,11 +53,15 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
       const { stdout } = await docker(['container', 'inspect', name]);
       const [info] = JSON.parse(stdout);
       const labels = info.Config?.Labels || {};
+      const img = info.Config?.Image || '';
+      const imageCompatible = img === VPN_IMAGE ||
+        img === `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}` ||
+        img === 'yj_autopost_vpn_image:latest';
       return {
         exists: true, running: info.State?.Running === true, status: info.State?.Status,
         healthy: info.State?.Health?.Status === 'healthy', healthStatus: info.State?.Health?.Status || null,
         owned: labels['io.yj-autopost.owner'] === OWNER && labels['io.yj-autopost.slot'] === String(slot),
-        compatible: labels['io.yj-autopost.contract'] === CONTRACT && info.Config?.Image === VPN_IMAGE,
+        compatible: labels['io.yj-autopost.contract'] === CONTRACT && imageCompatible,
         name
       };
     } catch {
@@ -75,11 +85,50 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     return null;
   }
   async function getServerIp() {
+    if (cachedServerIp) return cachedServerIp;
+
+    // 1. Check configured process.env.SERVER_IP or config().SERVER_IP
+    let configuredIp = (process.env.SERVER_IP || '').trim();
+    if (!configuredIp) {
+      try {
+        const { config } = require('./env');
+        const envConf = config();
+        if (envConf && typeof envConf.SERVER_IP === 'string') {
+          configuredIp = envConf.SERVER_IP.trim();
+        }
+      } catch {}
+    }
+    if (configuredIp && isPublicIp(configuredIp)) {
+      cachedServerIp = configuredIp;
+      return cachedServerIp;
+    }
+
+    // 2. Check local network interfaces for a public IPv4 address
     try {
-      const { stdout } = await command('curl', ['--noproxy', '*', '--ipv4', '--fail', '--max-time', '5',
+      const interfaces = os.networkInterfaces();
+      for (const iface of Object.values(interfaces)) {
+        for (const net of iface || []) {
+          if (net.family === 'IPv4' && !net.internal && isPublicIp(net.address)) {
+            cachedServerIp = net.address;
+            return cachedServerIp;
+          }
+        }
+      }
+    } catch {}
+
+    // 3. Fallback: query ipify WITHOUT --noproxy '*' and cache in memory to prevent repeated external requests
+    try {
+      const { stdout } = await command('curl', ['--ipv4', '--fail', '--max-time', '5',
         '--silent', 'https://api.ipify.org'], { timeout: 7_000 });
-      const ip = stdout.trim(); return isPublicIp(ip) ? ip : null;
-    } catch { return null; }
+      const ip = stdout.trim();
+      if (isPublicIp(ip)) {
+        cachedServerIp = ip;
+        return cachedServerIp;
+      }
+    } catch {
+      return null;
+    }
+    return null;
   }
   async function healthCheck(slot) {
     const port = slotPort(slot);
@@ -225,7 +274,10 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
   }
   return { containerStatus, getExitIp, getServerIp, healthCheck, ensureContainer, destroyContainer,
     rotateContainerIp, normalizeSubnet,
-    testSocksProxy: async port => Boolean(await getExitIp(port)) };
+    testSocksProxy: async port => Boolean(await getExitIp(port)),
+    setServerIp: ip => { cachedServerIp = (ip && isPublicIp(String(ip).trim())) ? String(ip).trim() : null; },
+    getCachedServerIp: () => cachedServerIp,
+    clearCachedServerIp: () => { cachedServerIp = null; } };
 }
 const runtime = createDockerRuntime();
 
@@ -384,4 +436,5 @@ class VpnSlotManager {
   }
 }
 module.exports = { VpnSlotManager, createDockerRuntime, validateTokenFile, ...runtime,
-  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE };
+  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE,
+  DEFAULT_VPN_VERSION, NORDVPN_VERSION: DEFAULT_VPN_VERSION };

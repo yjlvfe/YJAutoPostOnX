@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
-# Optional exact package version for reproducible/operator-approved releases.
-ARG NORDVPN_VERSION=""
+# Pinned NordVPN package version for reproducible releases (FINDING-031).
+ARG NORDVPN_VERSION="6.0.2"
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg iproute2 iptables nftables procps util-linux tini microsocks \
     && curl -fsSL https://repo.nordvpn.com/gpg/nordvpn_public.asc \

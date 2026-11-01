@@ -36,30 +36,57 @@ async def _transaction_indices(home_page_response, session, headers):
     raise ValueError('transaction_manifest_unavailable')
 
 
+_BANNED_PATTERN = re.compile(
+    r'\b(?:account|user)\s+(?:has\s+been\s+|is\s+)?suspended\b|\baccount\s+suspended\b',
+    re.IGNORECASE,
+)
+
+
 def _compat_user_data(data):
-    """Copy only the legacy fields required by Twikit's User constructor."""
+    """Normalize and patch GraphQL user data so legacy entities (description.urls, url.urls, etc.)
+    never raise KeyError: 'urls' or AttributeError on None.
+    Handles root, wrapped, or nested user representations.
+    """
     if not isinstance(data, dict):
         return data
     result = dict(data)
+    if 'result' in result and isinstance(result['result'], dict):
+        result['result'] = _compat_user_data(result['result'])
+    if 'user' in result and isinstance(result['user'], dict):
+        result['user'] = _compat_user_data(result['user'])
+
     legacy = result.get('legacy')
     if isinstance(legacy, dict):
         legacy = dict(legacy)
-        entities = legacy.get('entities', {})
-        if isinstance(entities, dict):
-            entities = dict(entities)
-            description = entities.get('description', {})
-            if isinstance(description, dict):
-                description = dict(description)
-                description.setdefault('urls', [])
-                entities['description'] = description
-            else:
-                entities['description'] = {'urls': []}
-            entities.setdefault('url', {'urls': []})
-            legacy['entities'] = entities
+        entities = legacy.get('entities')
+        if not isinstance(entities, dict):
+            entities = {}
         else:
-            legacy['entities'] = {'description': {'urls': []}, 'url': {'urls': []}}
-        legacy.setdefault('pinned_tweet_ids_str', [])
-        legacy.setdefault('withheld_in_countries', [])
+            entities = dict(entities)
+
+        description = entities.get('description')
+        if not isinstance(description, dict):
+            description = {'urls': []}
+        else:
+            description = dict(description)
+            if not isinstance(description.get('urls'), list):
+                description['urls'] = []
+        entities['description'] = description
+
+        url_obj = entities.get('url')
+        if not isinstance(url_obj, dict):
+            url_obj = {'urls': []}
+        else:
+            url_obj = dict(url_obj)
+            if not isinstance(url_obj.get('urls'), list):
+                url_obj['urls'] = []
+        entities['url'] = url_obj
+
+        legacy['entities'] = entities
+        if not isinstance(legacy.get('pinned_tweet_ids_str'), list):
+            legacy['pinned_tweet_ids_str'] = []
+        if not isinstance(legacy.get('withheld_in_countries'), list):
+            legacy['withheld_in_countries'] = []
         result['legacy'] = legacy
     return result
 
@@ -67,7 +94,7 @@ def _compat_user_data(data):
 def classify_x_account_failure(raw_json=None, errors=None, text=''):
     """
     Inspect X responses/errors and classify failure into:
-      'banned'  -> Permanent suspension (64, 63, 141, suspended, banned)
+      'banned'  -> Permanent suspension (64, 63, 141, suspended)
       'captcha' -> Verification/Arkose/Lock challenge (326, 353, 399, 241, bounce_location, captcha, challenge)
       'auth'    -> Bad or expired credentials (32, 89, 135, 215)
       None      -> No terminal account failure detected
@@ -85,6 +112,11 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
             has_bounce = True
         if isinstance(raw_json.get('message'), str):
             messages.append(raw_json['message'])
+        if isinstance(raw_json.get('reason'), str):
+            reason_str = raw_json['reason'].strip().lower()
+            if reason_str == 'suspended':
+                return 'banned'
+            messages.append(raw_json['reason'])
 
     for e in errors:
         if isinstance(e, dict):
@@ -104,7 +136,7 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
 
     combined = ' '.join(messages).lower()
 
-    if codes & {64, 63, 141} or 'suspended' in combined or 'banned' in combined:
+    if (codes & {64, 63, 141}) or bool(_BANNED_PATTERN.search(combined)):
         return 'banned'
 
     captcha_kw = (
@@ -248,8 +280,11 @@ def compatibility_client():
             user_data = response.get('data', {}).get('user', {}).get('result', {})
             if user_data.get('__typename') == 'UserUnavailable':
                 msg = str(user_data.get('message', ''))
-                error = UserUnavailable(msg)
-                failure = classify_x_account_failure(raw_json=user_data, text=msg)
+                reason = str(user_data.get('reason', ''))
+                error = UserUnavailable(msg or reason or 'UserUnavailable')
+                failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
+                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
+                    failure = 'banned'
                 if failure:
                     error.account_failure = failure
                 raise error
@@ -262,8 +297,11 @@ def compatibility_client():
             user_data = response['data']['user']['result']
             if user_data.get('__typename') == 'UserUnavailable':
                 msg = str(user_data.get('message', ''))
-                error = UserUnavailable(msg)
-                failure = classify_x_account_failure(raw_json=user_data, text=msg)
+                reason = str(user_data.get('reason', ''))
+                error = UserUnavailable(msg or reason or 'UserUnavailable')
+                failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
+                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
+                    failure = 'banned'
                 if failure:
                     error.account_failure = failure
                 raise error
@@ -312,7 +350,13 @@ def compatibility_client():
 
 
 def validate_versions():
-    required = {'twikit': '2.3.3', 'httpx': '0.28.1', 'httpcore': '1.0.9', 'socksio': '1.0.0'}
+    required = {
+        'twikit': '2.3.3',
+        'curl_cffi': '0.16.3',
+        'httpx': '0.28.1',
+        'httpcore': '1.0.9',
+        'socksio': '1.0.0',
+    }
     if any(version(package) != pinned for package, pinned in required.items()):
         raise RuntimeError('direct_x_dependency_version_mismatch')
 

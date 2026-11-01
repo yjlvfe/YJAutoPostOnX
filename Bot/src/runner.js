@@ -61,7 +61,12 @@ class SingleInstanceLock {
     if (Number.isInteger(record?.pid) && record.pid > 0) {
       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
       // A long-lived polling service is not stale just because its lock is old.
-      if (!dead) return false;
+      if (!dead) {
+        const locked = new Error(`Telegram runner lock is held by PID ${record.pid}: ${this.lockPath}`);
+        locked.code = 'INSTANCE_LOCKED';
+        locked.pid = record.pid;
+        throw locked;
+      }
     }
     if (!(dead || (!record && Date.now() - stat.mtimeMs >= this.staleMs))) return false;
     // Atomic recovery: rename to an isolated stale path first to eliminate race conditions
@@ -1126,6 +1131,11 @@ async function run({
           }
         }
       } catch (error) {
+        if (error.telegramCode === 409 || error.statusCode === 409 || /conflict/i.test(error.message || '')) {
+          logger.error(JSON.stringify({ event: 'telegram_conflict', code: 'TELEGRAM_CONFLICT', message: error.message }));
+          const conflictErr = Object.assign(new Error(`Telegram polling conflict: another instance is running (${error.message})`), { code: 'TELEGRAM_CONFLICT', cause: error });
+          throw conflictErr;
+        }
         logger.error(JSON.stringify({ event: 'poll_failed', code: error.code || 'NETWORK' }));
         if (!stopping) await sleepFn(pollMs);
       }

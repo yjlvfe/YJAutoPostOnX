@@ -4,9 +4,9 @@ Build from **only this directory** (no parent/sibling build context or secrets):
 
 ```sh
 cd /root/Projects/YJAutoPostOnX/Bot
-docker build --progress=plain -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:latest docker
-# The verified package on 2026-10-29 was 6.0.2; optionally pin it:
-# docker build --build-arg NORDVPN_VERSION=6.0.2 -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:latest docker
+docker build --progress=plain -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:6.0.2 -t yj_autopost_vpn_image:latest docker
+# Default NORDVPN_VERSION is pinned to 6.0.2 (FINDING-031):
+# docker build --build-arg NORDVPN_VERSION=6.0.2 -f docker/Dockerfile.vpn -t yj_autopost_vpn_image:6.0.2 docker
 node --test test/independentVpn.test.js
 ```
 
