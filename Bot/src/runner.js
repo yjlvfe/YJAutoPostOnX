@@ -877,7 +877,7 @@ async function run({
           attempt.dispose();
           await bot.store.update(s => {
             const i = s.items.find(x => x.id === itemId);
-            if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+            if ((i?.state === 'processing' || (i?.state === 'ambiguous' && !i?.reason)) && claim?.token && i.attempt?.token === claim.token) {
               if (i.attempt?.phase === 'claimed' && !dispatchEntered) {
                 i.state = 'pending';
                 delete i.attempt;

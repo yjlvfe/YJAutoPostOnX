@@ -24,8 +24,8 @@ def validate_proxy(proxy):
 
 
 def username(value):
-    if isinstance(value, str) and re.fullmatch(r'@?[A-Za-z0-9_]{1,15}', value):
-        return value.lstrip('@').lower()
+    if isinstance(value, str) and value.strip():
+        return value.strip().lstrip('@').lower()
     return None
 
 
