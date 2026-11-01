@@ -603,7 +603,7 @@ async function run({
           if (result.accountFailure) await ui.recordAccountCheck(accountId, { accountFailure: result.accountFailure }, { session: true, expectedAccount: account });
           if (result.published && !dispatchEntered) throw Object.assign(new Error('Missing dispatch fence'), { code: 'DISPATCH_FENCE_MISSING' });
           const callbackAdapter = adapter instanceof DirectXAdapter || adapter.supportsDispatchCallback === true;
-          const newState = result.published && result.url ? 'published' : (result.published || result.ambiguous || (callbackAdapter && dispatchEntered)) ? 'ambiguous' : ['text_too_long', 'tweet_too_long'].includes(result.reason) ? 'cancelled' : 'pending';
+          const newState = result.published && result.url ? 'published' : (result.published || result.ambiguous || dispatchEntered) ? 'ambiguous' : ['text_too_long', 'tweet_too_long'].includes(result.reason) ? 'cancelled' : 'pending';
           const publishedAt = new Date(clock()).toISOString();
           let transitioned = false;
           await bot.store.update(s => {
@@ -691,9 +691,19 @@ async function run({
                   if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
                 }
                 const i = s.items.find(x => x.id === item.id);
-                if (i?.state === 'processing') { i.state = 'pending'; delete i.attempt; }
+                if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+                  if (dispatchEntered || i.attempt?.phase === 'dispatching') {
+                    i.state = 'ambiguous';
+                    i.reason = result.reason || failure || 'account_blocked_after_dispatch';
+                  } else if (i.attempt?.phase === 'claimed') {
+                    i.state = 'pending';
+                    delete i.attempt;
+                  }
+                  if (s.posting) s.posting.publishingAt = null;
+                }
                 return s;
               });
+              if (dispatchEntered) skipDelay = true;
               vpnSlots?.rotate(accountId).catch(() => {});
               bot.forensicLogger?.record({
                 eventType: isCaptcha ? 'account_captcha' : 'account_banned',
@@ -786,8 +796,14 @@ async function run({
                 }
                 const i = s.items.find(x => x.id === item.id);
                 if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-                  i.state = 'pending';
-                  delete i.attempt;
+                  if (dispatchEntered || i.attempt?.phase === 'dispatching') {
+                    i.state = 'ambiguous';
+                    i.reason ||= 'exception_after_dispatch';
+                  } else if (i.attempt?.phase === 'claimed') {
+                    i.state = 'pending';
+                    delete i.attempt;
+                  }
+                  if (s.posting) s.posting.publishingAt = null;
                 }
                 return s;
               });
@@ -862,9 +878,12 @@ async function run({
           await bot.store.update(s => {
             const i = s.items.find(x => x.id === itemId);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-              if (i.attempt?.phase === 'claimed') {
+              if (i.attempt?.phase === 'claimed' && !dispatchEntered) {
                 i.state = 'pending';
                 delete i.attempt;
+              } else if (i.attempt?.phase === 'dispatching' || dispatchEntered) {
+                i.state = 'ambiguous';
+                i.reason ||= 'unresolved_in_finally';
               }
               if (s.posting) s.posting.publishingAt = null;
             }

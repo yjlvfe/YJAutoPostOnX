@@ -60,6 +60,8 @@ def canonicalize_url(url):
     try:
         parsed = urllib.parse.urlsplit(url)
         scheme = parsed.scheme.lower()
+        if scheme not in ('http', 'https'):
+            return url
         netloc = parsed.netloc.lower()
         if scheme == 'http' and netloc.endswith(':80'):
             netloc = netloc[:-3]
@@ -82,19 +84,30 @@ def normalize_text_for_comparison(text, entities=None):
     # 1. Expand shortened URLs if entity mapping is provided
     cleaned = expand_urls_with_entities(text, entities)
 
-    # 2. Canonicalize all URLs found in text without deleting them
+    # 2. Extract and canonicalize URLs, substituting unique placeholder tokens
+    url_tokens = []
     def repl(m):
         url = m.group(0)
         trailing = ''
         while url and (url[-1] in '.,!?:;"\']' or (url[-1] == ')' and url.count(')') > url.count('('))):
             trailing = url[-1] + trailing
             url = url[:-1]
-        return canonicalize_url(url) + trailing
+        canon = canonicalize_url(url)
+        idx = len(url_tokens)
+        url_tokens.append(canon)
+        return f"\x00URL_TOKEN_{idx}\x00" + trailing
 
     cleaned = re.sub(r'https?://\S+', repl, cleaned, flags=re.IGNORECASE)
 
-    # 3. Normalize whitespace and lowercase
-    return ' '.join(cleaned.split()).strip().lower()
+    # 3. Normalize whitespace and lowercase surrounding text
+    normalized = ' '.join(cleaned.split()).strip().lower()
+
+    # 4. Restore canonicalized URLs with preserved path/query/fragment casing
+    for idx, canon in enumerate(url_tokens):
+        token_lower = f"\x00url_token_{idx}\x00"
+        normalized = normalized.replace(token_lower, canon)
+
+    return normalized
 
 
 
@@ -541,23 +554,32 @@ class DirectSession:
                                 item_content = content.get('itemContent', {})
                                 tweet_results = item_content.get('tweet_results', {}).get('result', {})
                                 if isinstance(tweet_results, dict):
-                                    legacy = tweet_results.get('legacy', {})
+                                    tw_res = tweet_results.get('tweet', tweet_results) if isinstance(tweet_results.get('tweet'), dict) else tweet_results
+                                    legacy = tw_res.get('legacy', {}) if isinstance(tw_res.get('legacy'), dict) else {}
                                     if isinstance(legacy, dict):
                                         tid = legacy.get('id_str')
                                         if tid:
                                             note_tweet_result = (
-                                                tweet_results.get('note_tweet', {})
+                                                tw_res.get('note_tweet', {})
                                                 .get('note_tweet_results', {})
                                                 .get('result', {})
                                             )
                                             full_text = note_tweet_result.get('text') or legacy.get('full_text', '')
                                             entities = note_tweet_result.get('entity_set') or legacy.get('entities', {})
+                                            core_obj = tw_res.get('core') or {}
+                                            user_res = (core_obj.get('user_results') or {}) if isinstance(core_obj, dict) else {}
+                                            core_user = (user_res.get('result') or {}) if isinstance(user_res, dict) else {}
+                                            if isinstance(core_user, dict) and isinstance(core_user.get('user'), dict):
+                                                core_user = core_user.get('user')
+                                            core_legacy = (core_user.get('legacy') or {}) if isinstance(core_user, dict) else {}
+                                            user_name_extracted = (core_legacy.get('screen_name') if isinstance(core_legacy, dict) else None) or (legacy.get('screen_name') if isinstance(legacy, dict) else None)
+                                            user_id_extracted = (legacy.get('user_id_str') if isinstance(legacy, dict) else None) or (core_user.get('rest_id') if isinstance(core_user, dict) else None)
                                             tweets_data.append({
                                                 'id': tid,
                                                 'full_text': full_text,
                                                 'created_at': legacy.get('created_at'),
-                                                'user_id': legacy.get('user_id_str'),
-                                                'user_name': identity['username'],
+                                                'user_id': user_id_extracted,
+                                                'user_name': username(user_name_extracted) if user_name_extracted else None,
                                                 'entities': entities
                                             })
 
@@ -611,12 +633,13 @@ class DirectSession:
                             author_id = tweet.get('user_id')
                             author_name = username(tweet.get('user_name'))
 
-                            # Strict author verification: author must match authenticated account
-                            if author_id is not None and str(author_id) != str(identity['userId']):
+                            expected_author_name = username(identity.get('username')) or identity.get('username')
+                            # Strict author verification: authentic author identity must be extracted from the tweet
+                            if (author_id is None and author_name is None) or (not author_id and not author_name):
                                 continue
-                            if author_name is not None and author_name != identity['username']:
+                            if author_id is not None and str(author_id) != str(identity.get('userId')):
                                 continue
-                            if author_id is None and author_name is None:
+                            if author_name is not None and author_name != expected_author_name:
                                 continue
 
                             return {
@@ -678,12 +701,14 @@ class DirectSession:
             tweet = await self.client.create_tweet(text=text)  # exactly ONE call
             author = getattr(tweet, 'user', None)
             tid = getattr(tweet, 'id', None)
-            if (not numeric_id(tid) or getattr(author, 'id', None) != identity['userId']
+            if (not numeric_id(tid) or str(getattr(author, 'id', '')) != str(identity['userId'])
                     or username(getattr(author, 'screen_name', None)) != identity['username']):
                 return uncertain('publish_author_or_id_unverified')
             return {'status': 'published', 'published': True, 'posted': True, 'tweetId': tid,
                     'username': identity['username'], 'userId': identity['userId']}
-        except BaseException as exc:
+        except Exception as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             # Dispatch crossed the fence — the tweet MAY have posted but the
             # response was lost (timeout/network glitch). Before marking
             # ambiguous, verify by reading the user's recent timeline.

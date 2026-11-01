@@ -127,3 +127,48 @@
 - Comprehensive reports updated: `MASTER_TODO.md` (33 findings intact, Codex status PENDING), `PROGRESS_HISTORY.md`, `TEST_RESULTS.md`, `GIT_COMMITS.md`, `REPORT.md`.
 - Complete deliverable archive packaged at `/root/Projects/YJAutoPostOnX/Bot/Reports/RepairHandoff/ARCHIVES/PHASE_P1.zip` and mirrored at `/root/Projects/YJAutoPostOnX/ARCHIVES/PHASE_P1.zip`.
 - Verified archive integrity with `unzip -t` and confirmed zero secrets included. Automated Telegram transmission withheld in compliance with production safety rules.
+
+---
+
+## 7. Multi-Agent Teamwork Distributed Hardening & Codex Pre-Review (Round 4)
+
+### 1. Multi-Agent Teamwork Deployment
+In accordance with `/teamwork`, distributed engineering was executed with 5 active, verified subagents:
+- **Project Orchestrator (`teamwork`)**: Coordinated tasks, updated roadmap progress, managed file conflict avoidance.
+- **Code Explorer (`code-explorer`)**: Mapped execution flows across `direct_x_bridge.py` and `runner.js`.
+- **Critic Code Reviewer (`python-reviewer`)**: Performed deep logic and security audit, surfacing URL case-folding risks and author identity gaps.
+- **Challenger Test Specialist (`tdd-guide`)**: Authored adversarial challenger tests for URL normalization and runner attempt token races.
+- **Auditor Security Reviewer (`security-reviewer`)**: Validated network namespace isolation, zero secrets leakage, and PENDING Codex status preservation.
+
+### 2. URL Path & Query Case Sensitivity (RFC 3986)
+- **Problem**: Lowercasing normalized strings folded case-sensitive path IDs, query parameters (e.g. YouTube video IDs `watch?v=XYZ` vs `xyz`, base64 slugs), and short URLs.
+- **Remediation**:
+  - Partitioned `normalize_text_for_comparison` into URL tokens and non-URL text tokens using distinct null-delimited placeholders (`\x00URL_TOKEN_{idx}\x00`).
+  - Canonicalized URL scheme and domain to lowercase, stripped default ports (80 for http, 443 for https), while preserving exact casing of path, query, and fragments.
+  - Lowercased and whitespace-collapsed non-URL text, then restored exact canonicalized URLs.
+  - Added `TestUrlNormalizationChallenger` suite with 5 comprehensive case sensitivity tests in `Bot/python/test_normalize_urls.py`.
+
+### 3. Timeline Author Identity Extraction & Fail-Closed Fencing
+- **Problem**: `verify_timeline` was previously hardcoding `identity['username']` on extracted tweets rather than extracting authentic author identity from Twitter GraphQL payloads (`core.user_results.result.legacy.screen_name` and `rest_id` / `user_id_str`).
+- **Remediation**:
+  - Updated GraphQL parsing in `verify_timeline` to extract authentic `user_name` from `core.user_results.result.legacy.screen_name` (and unpacked `core.user_results.result.user.legacy.screen_name` when present) and `user_id` from `legacy.user_id_str` or `core_user.rest_id`.
+  - Enforced fail-closed author fencing: tweets lacking all author data are strictly rejected (`status: 'ambiguous', found: False`); tweets with conflicting `user_id` or conflicting `screen_name` are rejected.
+  - Fixed type conversion in `publish()` (`str(getattr(author, 'id', '')) != str(identity['userId'])`) and ensured `asyncio.CancelledError` is not swallowed.
+  - Added negative author tests in `TestVerifyTimelineNegativeAuthorFencing` covering missing author data and mismatched author credentials.
+
+### 4. Runner Attempt Token & Concurrency Fencing Hardening
+- **Problem**: Race conditions in line 694, 786, and 862 could inadvertently reset a dispatched item back to `pending` upon account failure or worker exception, or clear locks across asynchronous boundaries.
+- **Remediation**:
+  - Hardened lines 691-703 and 786-806 so that if `dispatchEntered || i.attempt?.phase === 'dispatching'`, the item is transitioned to durable `ambiguous` with explicit diagnostic reason instead of reverting to `pending`.
+  - Guarded all state transitions with `claim?.token && i.attempt?.token === claim.token`.
+  - Updated line 606 to ensure any item that entered dispatch without a verified success URL is safely quarantined as `ambiguous`.
+  - Added dedicated test suite `Bot/test/runner_stale_tokens.test.js` (3/3 PASS) and standalone verification script `Bot/scripts/verify_stale_attempt_tokens.js` (3/3 PASS).
+
+### 5. Consolidated Empirical Verification Results
+- **CriticalClosure Acceptance Suite (netns isolation)**: 44/44 PASS (`{"PASS": 44, "FAIL": 0, "HARNESS_ERROR": 0, "NOT_TESTED": 0}`).
+- **Python Unit Tests (`test_normalize_urls.py`)**: 25/25 PASS (100%).
+- **Runner Stale Token Tests (`runner_stale_tokens.test.js`)**: 3/3 PASS (100%).
+- **Standalone Token Verification (`verify_stale_attempt_tokens.js`)**: 3/3 PASS (100%).
+- **Standalone Deduplication Proof (`verify_p1_004_dedup.js`)**: PASS (100%).
+- **Standalone Non-Blocking Flow Proof (`verify_p1_005_queue_flow.js`)**: PASS (100%).
+- **Codex Status**: All 33 findings remain strictly **PENDING** awaiting Codex review.
