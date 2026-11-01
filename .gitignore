@@ -1,12 +1,18 @@
-# Ignore all .md docs except README and LICENSE
+# Ignore all .md docs except README, LICENSE, MASTER_TODO, and PROGRESS_HISTORY
 *.md
 !README.md
 !LICENSE
 !LICENSE.md
+!MASTER_TODO.md
+!PROGRESS_HISTORY.md
+__pycache__/
+*.pyc
 
 node_modules/
 dist/
 .env
+.env.local
+Bot/.env.local
 .DS_Store
 *.log
 *.AppImage
