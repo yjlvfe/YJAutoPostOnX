@@ -21,7 +21,12 @@ function sanitizeString(str) {
   sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9_\-\.]{16,}/gi, 'Bearer [REDACTED]');
   // 3. Redact sensitive key-value pairs
   sanitized = sanitized.replace(/(auth_token|ct0|twid|kdt|password|secret|api[_-]?key|access[_-]?token)([\s:=]+)([^\s,;&"']+)/gi, '$1$2[REDACTED]');
-  // 4. Redact basic auth credentials in URLs
+  // 4. Redact JSON-style quoted secret fields embedded INSIDE log messages.
+  // The key may be a token/cookie/password field even when serialized as text.
+  // This runs before JSON.stringify(record), so the input quotes are not escaped.
+  sanitized = sanitized.replace(/(["'])([A-Za-z0-9_-]*(?:token|cookie|password|secret|api[_-]?key|ct0|twid|kdt)[A-Za-z0-9_-]*)\1\s*:\s*(["'])(?:\\.|[^\\])*?\3/gi,
+    (_match, quote, key, valueQuote) => quote + key + quote + ':' + valueQuote + '[REDACTED]' + valueQuote);
+  // 5. Redact basic auth credentials in URLs
   sanitized = sanitized.replace(/https?:\/\/[^:]+:[^@]+@/g, 'https://[REDACTED]@');
   return sanitized;
 }
@@ -70,21 +75,21 @@ function formatStructuredLog(input = {}) {
   const errCode = input.errorCode ?? (errorObj ? extractErrorCode(errorObj) : null);
 
   const record = {
-    timestamp: now,
-    level: input.level || 'info',
-    component: input.component ? String(input.component) : 'system',
-    event: input.event ? String(input.event) : 'unknown',
-    runId: input.runId != null ? String(input.runId) : null,
-    accountId: input.accountId != null ? String(input.accountId) : null,
-    queueItemId: input.queueItemId != null ? String(input.queueItemId) : null,
-    attemptId: input.attemptId != null ? String(input.attemptId) : null,
-    operation: input.operation != null ? String(input.operation) : null,
-    result: input.result != null ? String(input.result) : null,
+    timestamp: sanitizeString(String(now)),
+    level: sanitizeString(String(input.level || 'info')),
+    component: input.component ? sanitizeString(String(input.component)) : 'system',
+    event: input.event ? sanitizeString(String(input.event)) : 'unknown',
+    runId: input.runId != null ? sanitizeString(String(input.runId)) : null,
+    accountId: input.accountId != null ? sanitizeString(String(input.accountId)) : null,
+    queueItemId: input.queueItemId != null ? sanitizeString(String(input.queueItemId)) : null,
+    attemptId: input.attemptId != null ? sanitizeString(String(input.attemptId)) : null,
+    operation: input.operation != null ? sanitizeString(String(input.operation)) : null,
+    result: input.result != null ? sanitizeString(String(input.result)) : null,
     durationMs: typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? input.durationMs : null,
-    errorCode: errCode != null ? String(errCode) : null,
+    errorCode: errCode != null ? sanitizeString(String(errCode)) : null,
     sanitizedError: sanitizedErr != null ? sanitizeString(String(sanitizedErr)) : null,
     retryCount: typeof input.retryCount === 'number' && Number.isFinite(input.retryCount) ? input.retryCount : null,
-    suppressionReason: input.suppressionReason != null ? String(input.suppressionReason) : null
+    suppressionReason: input.suppressionReason != null ? sanitizeString(String(input.suppressionReason)) : null
   };
 
   // Merge extra fields safely (sanitizing strings and objects)
@@ -123,7 +128,7 @@ function logStructured(logger, input) {
       component: 'structured_logger',
       event: 'serialization_failed',
       errorCode: 'JSON_ERROR',
-      sanitizedError: err.message
+      sanitizedError: sanitizeString(err.message)
     });
   }
 
