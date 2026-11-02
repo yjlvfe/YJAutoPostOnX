@@ -93,11 +93,19 @@ class Queue {
     return this.store.update(current => {
       for (const item of current.items || []) {
         if (item.state === 'processing' || item.state === 'dispatch_started') {
-          item.state = state;
-          item.outcome = state;
-          item.reason = reason;
-          item.result = { ...(item.result || {}), reason };
-          item.completedAt = new Date().toISOString();
+          if (item.attempt?.phase === 'claimed') {
+            item.state = 'pending';
+            delete item.attempt;
+            delete item.claimedAt;
+          } else {
+            item.state = state;
+            item.outcome = state;
+            item.reason = reason;
+            item.result = { ...(item.result || {}), reason };
+            if (item.attempt?.accountId) item.accountId ||= item.attempt.accountId;
+            if (item.attempt?.token) item.result.attemptToken ||= item.attempt.token;
+            item.completedAt = new Date().toISOString();
+          }
         }
       }
       return current;

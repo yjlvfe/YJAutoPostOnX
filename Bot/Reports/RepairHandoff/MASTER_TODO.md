@@ -105,6 +105,36 @@ Verify that all P1 and P2 repairs operate seamlessly on the live VPS production 
 
 ---
 
+## 2.6. Round 3: Production Recovery with 3-Strikes Isolation, CSV Dedup, and Timeline Verification
+
+### Objective
+Achieve full production recovery following post-369 ambiguous results and duplicate CSV incidents. Enforce 3-strikes account failure isolation on natural rotation turns, quarantine ambiguous post outcomes without replay storms, exclude transient network/VPN/proxy errors from failure strikes, protect pre-dispatch claimed items, enforce strict 5-active account ceiling, fix Twikit `None` return handling with timeline verification, implement granular 8-class diagnostics, eliminate CSV duplicate deliveries with content hash deduplication, suppress notification spam with single Arabic isolation alerts, eliminate Telegram 409 collisions, and perform comprehensive live VPS operational verification with zero impact on user programs.
+
+### Round 3 Task Matrix
+
+| Task / Feature ID | Module / Component | Task Description | Acceptance Criteria | Antigravity Status | Codex Status | Evidence / Verification |
+|---|---|---|---|:---:|:---:|---|
+| **R3-SURVEY** | Workspace & Logs | Deep log investigation of post-11:30 incidents (items `f75e4f8d`, `bd12d092`, `fa1f2749`); map root causes across Runner, Python, Docker, VPN, and Telegram. | • Root cause traced<br>• Zero assumptions<br>• Formal survey report produced | **TESTED_PASS** | **PENDING** | `explorer_r3_3/report.md` |
+| **R3-3STRIKES** | `Bot/src/runner.js`, `Bot/src/accounts.js` | 3-strikes accounting distributed over 3 natural turns; cool on strikes 1 and 2; automatically isolate on strike 3 (`معزول (3 إخفاقات)`); reset to 0 on successful publish. | • Strike 1: cool + skip turn<br>• Strike 2: cool + skip turn<br>• Strike 3: isolate + alert<br>• Success: reset strikes to 0 | **TESTED_PASS** | **PENDING** | `m1_fixes_comprehensive.test.js` (20/20 PASS)<br>`challenger_iter2_concurrency_fuzz.test.js` |
+| **R3-AMBIGUOUS** | `Bot/src/runner.js`, `Bot/src/queue.js` | Ambiguous outcomes quench into durable quarantine; persist `accountId` and `accountUsername` in SQLite items; never auto-replay; trigger account strike on natural turn. | • 0 auto-replays<br>• Attribution preserved in DB<br>• Non-blocking queue traversal | **TESTED_PASS** | **PENDING** | `m1_fixes_comprehensive.test.js`<br>`live_vps_m4_operational.test.js` |
+| **R3-NETEXCLUDE** | `Bot/src/runner.js` | Exclude transient network/proxy/VPN container errors (`ECONNREFUSED`, `ProxyConnectionError`) from account strike counter. | • Transient proxy errors do not increment account strikes | **TESTED_PASS** | **PENDING** | `m1_fixes_comprehensive.test.js` (Test 2.1 PASS)<br>`live_vps_m4_operational.test.js` |
+| **R3-PREDISPATCH** | `Bot/src/queue.js`, `Bot/src/runner.js` | Pre-dispatch post protection: `recoverProcessing` resets unattempted `claimed` items to `pending`; immediate transfer to next eligible account on pre-dispatch fault. | • 0 lost posts on pre-dispatch faults<br>• Item unpinned and transferred | **TESTED_PASS** | **PENDING** | `m1_fixes_comprehensive.test.js` (Test 3.1 & 3.2 PASS) |
+| **R3-5ACCOUNT** | `Bot/src/accounts.js`, `Bot/src/telegramUi.js` | Unlimited stored accounts support with strict ceiling of max 5 active accounts; dynamic toggling mid-cycle without losing queue items or quotas. | • Max 5 active accounts enforced<br>• 6th activation rejected<br>• Dynamic slot reassignment | **TESTED_PASS** | **PENDING** | `m1_fixes_comprehensive.test.js` (Test 4.1 PASS)<br>`m3_telegram_and_csv_dedup.test.js` |
+| **R3-TWIKIT-NONE** | `Bot/python/direct_x_bridge.py` | Fix `create_tweet` returning `None` by executing live timeline verification (`verify_timeline`) before returning unconfirmed outcome; recover tweet ID if found. | • None response triggers timeline lookup<br>• Verified tweet recovered<br>• Missing tweet fails to ambiguous | **TESTED_PASS** | **PENDING** | `test_m2_timeline_and_diagnostics.py`<br>183 Python tests PASS |
+| **R3-8CLASS-DIAG** | `Bot/python/direct_x_compat.py` | Granular 8-class diagnostic classification: `banned`, `captcha`, `cookie_expired`, `auth_rejected`, `rate_limit`, `network_proxy_error`, `ambiguous`, `unknown`. | • Zero misclassifications<br>• Precise diagnostic attribution | **TESTED_PASS** | **PENDING** | `test_m2_timeline_and_diagnostics.py`<br>`test_adversarial_m2_challenger.py` |
+| **R3-CSVDEDUP** | `Bot/src/linkExports.js` | Dual-layer CSV export deduplication using SHA-256 content hashing against `linkDeliveries` in SQLite; suppress duplicate CSV on cycle stop when 0 new posts. | • Duplicate CSV suppressed on stop<br>• Fresh CSV sent on new posts<br>• Message ID 1322 delivered | **TESTED_PASS** | **PENDING** | `m3_telegram_and_csv_dedup.test.js` (45/45 PASS)<br>`live_vps_m4_operational.test.js` |
+| **R3-ALERTFENCE** | `Bot/src/telegramUi.js` | Single clear Arabic Telegram notification on account isolation (`تم عزل الحساب @... تلقائياً`); suppress retry spam on transient strikes 1 & 2; throttle queue stall alerts. | • Exactly 1 alert on strike 3<br>• 0 spam on strikes 1 and 2<br>• 1 alert on queue stall | **TESTED_PASS** | **PENDING** | `m3_telegram_and_csv_dedup.test.js` (Section 2 PASS) |
+| **R3-409RESILIENCE** | `Bot/src/singleInstance.js`, `Bot/src/telegramUi.js` | Resilience against Telegram 409 Conflict: exponential backoff with jitter (`executeWithConflictBackoff`), PID liveness checks, single instance lock mutual exclusion. | • Zero 409 polling storms<br>• Mutual exclusion under concurrency | **TESTED_PASS** | **PENDING** | `m3_telegram_and_csv_dedup.test.js` (Section 4 PASS)<br>`singleInstance.js` |
+| **R3-VPS-LIVE** | `Bot/test/live_vps_m4_operational.test.js` | Full live operational verification on VPS: 5 healthy VPN containers (ports 18801-18805), 1 authentic publish to X (`https://x.com/crytpokingxvo8/status/2117218878304801135`), quota -1, CSV 1322. | • 16/16 operational tests PASS<br>• 1 authentic tweet verified live<br>• Riyadh quota -1 persisted | **TESTED_PASS** | **PENDING** | `live_vps_m4_operational.test.js` (16/16 PASS)<br>HTTP/2 307 -> 200 OK on X |
+| **R3-CLEANUP** | `RESOURCE_CLEANUP_REPORT.md` | Strict resource safety: 50%–56% RAM baseline preserved; user services (`MexcRadar` PID 1001, `BinanceChecker`, `MyWalletChecker`) & 11 user containers untouched; `/tmp/yj_m4_test` cleaned. | • 0 user services touched<br>• 0 leftover test files<br>• Detailed audit report created | **TESTED_PASS** | **PENDING** | `RESOURCE_CLEANUP_REPORT.md` |
+
+### Governance & Signoff Status (Round 3)
+- **Phase P1 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Phase P2 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Codex Review Status**: Strictly **PENDING** across all findings and Round 3 tasks.
+
+---
+
 ## 3. Comprehensive Master Finding Registry (All 33 Findings)
 
 | Finding ID | Severity | Phase | Finding Title / Description | Affected Module | Antigravity Status | Codex Status |

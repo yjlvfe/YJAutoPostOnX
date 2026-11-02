@@ -6,6 +6,43 @@ const { accountCapacity, quotaAdmission } = require('./quota');
 const { DEFAULT_SETTINGS, parseDuration, formatDuration } = require('./settings');
 const { TelegramFlows } = require('./telegramFlows');
 const { preTable, richTable, accountStatus, formatAccountTable, clean } = require('./accountTable');
+const { isConflict409 } = require('./singleInstance');
+
+const MAX_ACTIVE_ACCOUNTS = 5;
+
+const ISOLATION_REASONS = {
+  BANNED: 'محظور قطعي (Permanent Ban)',
+  CAPTCHA: 'تحدي أمني / كابتشا (Security Challenge / CAPTCHA)',
+  STRIKES_EXCEEDED: 'تجاوز 3 إخفاقات طبيعية (Exceeded 3 qualified strikes)',
+  COOKIE_REJECTED: 'رفض جلسة الكوكيز (Session rejected / invalid cookies)'
+};
+
+function formatIsolationReason(reason) {
+  if (!reason) return ISOLATION_REASONS.STRIKES_EXCEEDED;
+  const str = String(reason).toLowerCase().trim();
+  if (/banned|محظور|suspended|permanent/i.test(str)) {
+    return ISOLATION_REASONS.BANNED;
+  }
+  if (/captcha|كابتشا|challenge|security/i.test(str)) {
+    return ISOLATION_REASONS.CAPTCHA;
+  }
+  if (/cookie|جلسة|session|auth_rejected|token|كوكيز/i.test(str)) {
+    return ISOLATION_REASONS.COOKIE_REJECTED;
+  }
+  if (/strike|failure|إخفاق|3|three/i.test(str)) {
+    return ISOLATION_REASONS.STRIKES_EXCEEDED;
+  }
+  return reason;
+}
+
+function buildIsolationMessage({ username, reason, otherActiveCount = 0 }) {
+  const cleanUsername = username ? `@${String(username).replace(/^@/, '')}` : 'الحساب';
+  const formattedReason = formatIsolationReason(reason);
+  if (otherActiveCount > 0) {
+    return `تم عزل الحساب ${cleanUsername} تلقائياً (السبب: ${formattedReason}) ومواصلة الدورة عبر بقية الحسابات (${otherActiveCount}).`;
+  }
+  return `تم عزل الحساب ${cleanUsername} تلقائياً (السبب: ${formattedReason}). لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`;
+}
 
 const formatDurationAdaptive = seconds => {
   if (!Number.isFinite(seconds)) return '-';
@@ -33,7 +70,29 @@ class TelegramUi {
     this.accountRefreshJob = null; this.accountRefreshRetryMs = accountRefreshRetryMs; this.destroyed = false;
     this.panelBlockedUntil = new Map(); this.panelLastEdit = new Map();
     this.onPanelTask = typeof onPanelTask === 'function' ? onPanelTask : null;
-    this.notify = notify; this.onCycleFinished = onCycleFinished; this.onCycleStop = onCycleStop; this.job = null; this.activeRun = null; this.panelLocks = new Map(); this.actionLocks = new Map(); this.refreshTask = null;
+    this.stallAlertSent = false;
+    this.rawNotify = notify;
+    this.notify = async (text) => {
+      if (!this.rawNotify) return;
+      if (typeof text === 'string') {
+        if (text.includes('جميع الحسابات غير مؤهلة أو في فترة انتظار')) {
+          if (this.stallAlertSent) return;
+          this.stallAlertSent = true;
+        }
+        if (/إخفاق مؤقت|محاولة (1|2) من 3|strike [12]\b/i.test(text)) {
+          return;
+        }
+        if (text.includes('تم عزل الحساب') && !text.includes('(السبب:')) {
+          text = text
+            .replace(/\(كابتشا\)/g, `(السبب: ${ISOLATION_REASONS.CAPTCHA})`)
+            .replace(/\(محظور\)/g, `(السبب: ${ISOLATION_REASONS.BANNED})`)
+            .replace(/\(معزول \(3 إخفاقات\)\)/g, `(السبب: ${ISOLATION_REASONS.STRIKES_EXCEEDED})`)
+            .replace(/\(جلسة مرفوضة\)/g, `(السبب: ${ISOLATION_REASONS.COOKIE_REJECTED})`);
+        }
+      }
+      return this.rawNotify(text);
+    };
+    this.onCycleFinished = onCycleFinished; this.onCycleStop = onCycleStop; this.job = null; this.activeRun = null; this.panelLocks = new Map(); this.actionLocks = new Map(); this.refreshTask = null;
     this.flows = new TelegramFlows(this, { downloadDocument, isolatedVerifier });
     this.startTicker();
   }
@@ -50,6 +109,10 @@ class TelegramUi {
         const priorityStop = name === 'cycleControl' && request.parsed?.action === 'stop';
         const previous = priorityStop ? Promise.resolve() : this.actionLocks.get(key) || Promise.resolve();
         const task = previous.catch(() => {}).then(() => this[name](request, raw)).catch(async error => {
+          if (isConflict409(error)) {
+            this.bot.logger?.error?.(JSON.stringify({ event: 'telegram_ui_conflict_409', action: name, message: error.message }));
+            return;
+          }
           if (error?.ambiguous || error?.telegramCode || ['TELEGRAM_TIMEOUT', 'TELEGRAM_INVALID_RESPONSE', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'].includes(error?.code)) throw error;
           return this.bot.transport.sendMessage(this.identity(raw).chat, 'تعذر تنفيذ الإجراء. لم يبدأ النشر. حاول مجدداً أو اضغط رجوع.', { reply_markup: this.bot.transport.keyboard('waiting') });
         });
@@ -437,6 +500,8 @@ class TelegramUi {
     const accessible = [];
     for (const a of accounts) { try { await fs.access(a.cookieFile); accessible.push(a); } catch {} }
     if (!accessible.length) reasons.push('لا يوجد حساب مفعل باسم مستخدم وملف جلسة قابل للقراءة');
+    const activeAccounts = (state.accounts || []).filter(a => a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status));
+    if (activeAccounts.length > MAX_ACTIVE_ACCOUNTS) reasons.push('الحد الأقصى للحسابات المفعلة في نفس الوقت هو 5 حسابات');
     if (cycleRunning(state) && (state.items || []).some(x => ['processing', 'dispatch_started'].includes(x.state))) reasons.push('توجد محاولة سابقة قيد التنفيذ');
     const pinned = (state.items || []).filter(x => x.state === 'pending' && x.payload?.account);
     if (pinned.some(x => !accessible.some(a => a.id === x.payload.account))) reasons.push('يوجد منشور مرتبط بحساب غير مؤهل');
@@ -730,6 +795,7 @@ class TelegramUi {
     });
     if (blockedQuota) return this.rejectQuota(blockedQuota, id);
     if (!started) return { started: false, reasons: ['الدورة جارية أو الزر قديم أو تغيرت البيانات'] };
+    this.resetQueueStall();
     this.attach(snapshot);
     await this.refreshPanels(true).catch(() => {}); return { started: true, runId };
   }
@@ -1318,5 +1384,79 @@ class TelegramUi {
     this.refreshPanels(true).catch(() => {});
     return { stopped: true };
   }
+
+  async sendIsolationAlert({ account, reason, failures = 3, otherActiveCount = 0 }) {
+    if (!account) return null;
+    const username = account.username || account.label || account.id;
+    let diagnosticReason = reason;
+    if (account.status === 'محظور' || String(reason).includes('banned')) {
+      diagnosticReason = ISOLATION_REASONS.BANNED;
+    } else if (account.status === 'كابتشا' || String(reason).includes('captcha')) {
+      diagnosticReason = ISOLATION_REASONS.CAPTCHA;
+    } else if (String(reason).includes('cookie') || String(reason).includes('session')) {
+      diagnosticReason = ISOLATION_REASONS.COOKIE_REJECTED;
+    } else if (failures >= 3 || account.status === 'معزول (3 إخفاقات)') {
+      diagnosticReason = ISOLATION_REASONS.STRIKES_EXCEEDED;
+    }
+    const message = buildIsolationMessage({ username, reason: diagnosticReason, otherActiveCount });
+    if (this.notify) {
+      await this.notify(message);
+    }
+    return message;
+  }
+
+  shouldNotifyStrike(strikeNumber) {
+    return Number.isInteger(strikeNumber) && strikeNumber >= 3;
+  }
+
+  async notifyStrike({ account, strikeNumber, reason, otherActiveCount = 0 }) {
+    if (!this.shouldNotifyStrike(strikeNumber)) {
+      return { notified: false, suppressed: true, strikeNumber };
+    }
+    const message = await this.sendIsolationAlert({
+      account,
+      reason: reason || ISOLATION_REASONS.STRIKES_EXCEEDED,
+      failures: strikeNumber,
+      otherActiveCount
+    });
+    return { notified: true, message, strikeNumber };
+  }
+
+  async sendQueueStallAlert() {
+    if (this.stallAlertSent) {
+      return { notified: false, throttled: true };
+    }
+    const alertText = 'جميع الحسابات غير مؤهلة أو في فترة انتظار؛ توقفت الدورة وبقيت المنشورات في الانتظار.';
+    if (this.notify) {
+      await this.notify(alertText);
+    }
+    return { notified: true, text: alertText };
+  }
+
+  resetQueueStall() {
+    this.stallAlertSent = false;
+  }
+
+  async handle409Conflict(error, { retryFn, maxRetries = 3, initialBackoffMs = 1000, sleepFn = (ms => new Promise(res => setTimeout(res, ms))) } = {}) {
+    if (!isConflict409(error)) throw error;
+    this.bot.logger?.error?.(JSON.stringify({ event: 'telegram_ui_conflict_detected', message: error.message }));
+    if (typeof retryFn !== 'function') return { handled: true, retried: false };
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const backoff = initialBackoffMs * Math.pow(2, attempt - 1);
+      await sleepFn(backoff);
+      try {
+        const result = await retryFn();
+        return { handled: true, retried: true, attempts: attempt, result };
+      } catch (retryErr) {
+        if (!isConflict409(retryErr) || attempt === maxRetries) throw retryErr;
+      }
+    }
+  }
 }
-module.exports = { TelegramUi };
+module.exports = {
+  TelegramUi,
+  MAX_ACTIVE_ACCOUNTS,
+  ISOLATION_REASONS,
+  formatIsolationReason,
+  buildIsolationMessage
+};

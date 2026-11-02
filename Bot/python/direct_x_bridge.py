@@ -25,31 +25,73 @@ KNOWN_ACCOUNT_FAILURES = {
 
 
 def extract_retry_after_seconds(exc, default=60):
+    if exc is None:
+        return max(60, min(900, int(default)))
     if hasattr(exc, 'retry_after_seconds') and isinstance(exc.retry_after_seconds, (int, float)):
         return max(60, min(900, int(exc.retry_after_seconds)))
+    if hasattr(exc, 'retry_after') and isinstance(exc.retry_after, (int, float)):
+        return max(60, min(900, int(exc.retry_after)))
+    if isinstance(getattr(exc, 'retry_after', None), str):
+        try:
+            return max(60, min(900, int(float(exc.retry_after))))
+        except (ValueError, TypeError):
+            pass
     import time
     if hasattr(exc, 'rate_limit_reset') and isinstance(exc.rate_limit_reset, (int, float)):
         diff = exc.rate_limit_reset - time.time()
         return max(60, min(900, int(diff)))
+
     headers = getattr(exc, 'headers', None)
-    if isinstance(headers, dict):
-        if 'retry-after' in headers:
+    if headers is None and hasattr(exc, 'response'):
+        headers = getattr(exc.response, 'headers', None)
+
+    if headers:
+        get_header = getattr(headers, 'get', None)
+        retry_val = None
+        if callable(get_header):
+            retry_val = get_header('retry-after') or get_header('Retry-After')
+        elif isinstance(headers, dict):
+            retry_val = headers.get('retry-after') or headers.get('Retry-After')
+        if retry_val is not None:
             try:
-                return max(60, min(900, int(float(headers['retry-after']))))
+                return max(60, min(900, int(float(retry_val))))
             except (ValueError, TypeError):
                 pass
-        if 'x-rate-limit-reset' in headers:
+
+        reset_val = None
+        if callable(get_header):
+            reset_val = get_header('x-rate-limit-reset') or get_header('X-Rate-Limit-Reset')
+        elif isinstance(headers, dict):
+            reset_val = headers.get('x-rate-limit-reset') or headers.get('X-Rate-Limit-Reset')
+        if reset_val is not None:
             try:
-                diff = float(headers['x-rate-limit-reset']) - time.time()
+                diff = float(reset_val) - time.time()
                 return max(60, min(900, int(diff)))
             except (ValueError, TypeError):
                 pass
+
+    msg = str(exc)
+    match = re.search(r'retry\s+after\s+(\d+)', msg, re.IGNORECASE)
+    if match:
+        try:
+            return max(60, min(900, int(match.group(1))))
+        except (ValueError, TypeError):
+            pass
+
     return max(60, min(900, int(default)))
 
 
 def is_rate_limit_exception(exc):
+    if exc is None:
+        return False
     if getattr(exc, 'http_status', None) == 429:
         return True
+    if getattr(exc, 'status_code', None) == 429:
+        return True
+    resp = getattr(exc, 'response', None)
+    if resp is not None:
+        if getattr(resp, 'status_code', None) == 429 or getattr(resp, 'http_status', None) == 429:
+            return True
     if getattr(exc, 'account_failure', None) == 'rate_limit':
         return True
     if getattr(exc, 'code', None) in (88, 185) or getattr(exc, 'error_code', None) in (88, 185):
@@ -60,8 +102,14 @@ def is_rate_limit_exception(exc):
             return True
     except Exception:
         pass
+    try:
+        import httpx
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+            return True
+    except Exception:
+        pass
     msg = str(exc).lower()
-    return 'rate limit' in msg or 'too many requests' in msg or '429' in msg
+    return 'rate limit' in msg or 'rate_limit' in msg or 'too many requests' in msg or '429' in msg or 'status update limit' in msg
 
 
 if sys.platform.startswith('linux'):
@@ -558,6 +606,10 @@ class DirectSession:
         self.verified = result
         return result
 
+    async def verify_timeline_has_post(self, text, identity):
+        """Verify whether user timeline contains post matching text authored by identity."""
+        return await self.verify_timeline(text, identity)
+
     async def verify_timeline(self, text, identity):
         """Check whether the tweet actually landed by reading the user timeline.
 
@@ -744,7 +796,8 @@ class DirectSession:
             'verified': False,
             'found': False,
             'reason': 'publish_confirmation_missing',
-            'fetchError': str(last_fetch_error) if last_fetch_error else None
+            'fetchError': str(last_fetch_error) if last_fetch_error else None,
+            'fetchException': last_fetch_error
         }
 
     async def publish(self, text, dispatch):
@@ -769,13 +822,169 @@ class DirectSession:
             if inspect.isawaitable(acknowledgement): acknowledgement = await acknowledgement
             if acknowledgement is not True: return uncertain('dispatch_not_acknowledged')
             tweet = await self.client.create_tweet(text=text)  # exactly ONE call
-            author = getattr(tweet, 'user', None)
-            tid = getattr(tweet, 'id', None)
-            if (not numeric_id(tid) or str(getattr(author, 'id', '')) != str(identity['userId'])
-                    or username(getattr(author, 'screen_name', None)) != identity['username']):
-                return uncertain('publish_author_or_id_unverified')
-            return {'status': 'published', 'published': True, 'posted': True, 'tweetId': tid,
-                    'username': identity['username'], 'userId': identity['userId']}
+            author = getattr(tweet, 'user', None) if tweet is not None else None
+            tid = getattr(tweet, 'id', None) if tweet is not None else None
+            author_id = getattr(author, 'id', None) if author is not None else None
+            author_screen_name = getattr(author, 'screen_name', None) if author is not None else None
+
+            is_valid_tweet = (
+                tweet is not None
+                and numeric_id(tid)
+                and str(author_id or '') == str(identity['userId'])
+                and username(author_screen_name) == identity['username']
+            )
+
+            if is_valid_tweet:
+                tid_str = str(tid)
+                url = f"https://x.com/{identity['username']}/status/{tid_str}"
+                return {
+                    'status': 'published',
+                    'published': True,
+                    'posted': True,
+                    'tweetId': tid_str,
+                    'url': url,
+                    'tweetUrl': url,
+                    'username': identity['username'],
+                    'userId': identity['userId'],
+                    'ok': True,
+                }
+
+            # If create_tweet returned None or author/id validation failed:
+            # Do NOT immediately collapse into publish_author_or_id_unverified.
+            # Inspect response and check timeline via verify_timeline_has_post or user tweets
+            # to definitively prove whether the tweet landed on X before classifying.
+            timeline_res = None
+            tl_exc = None
+            try:
+                if hasattr(self, 'verify_timeline_has_post') and callable(self.verify_timeline_has_post):
+                    timeline_res = await self.verify_timeline_has_post(text, identity)
+                else:
+                    timeline_res = await self.verify_timeline(text, identity)
+            except Exception as e:
+                tl_exc = e
+                timeline_res = {'fetchError': str(e), 'fetchException': e}
+
+            # If it landed on X: extract verified URL and tweet ID and return { published: true, url, tweetId }
+            if (isinstance(timeline_res, dict)
+                    and timeline_res.get('found') is True
+                    and timeline_res.get('status') == 'published'):
+                tid_str = str(timeline_res.get('tweetId') or '')
+                url = (timeline_res.get('url')
+                       or timeline_res.get('tweetUrl')
+                       or f"https://x.com/{identity['username']}/status/{tid_str}")
+                timeline_res['url'] = url
+                timeline_res['tweetUrl'] = url
+                timeline_res['tweetId'] = tid_str
+                timeline_res['username'] = identity['username']
+                timeline_res['userId'] = identity['userId']
+                timeline_res['recoveredFromTimeline'] = True
+                timeline_res['recovered_from_timeline'] = True
+                timeline_res['ok'] = True
+                return timeline_res
+
+            # If it did not land on X: diagnose the failure (e.g. rate limit, auth error, or network error)
+            # rather than returning ambiguous author unverified.
+            fetch_exc = tl_exc or (timeline_res.get('fetchException') if isinstance(timeline_res, dict) else None)
+            fetch_err_str = str(timeline_res.get('fetchError') or fetch_exc or '') if isinstance(timeline_res, dict) else ''
+
+            if fetch_exc and is_rate_limit_exception(fetch_exc):
+                retry_after = extract_retry_after_seconds(fetch_exc, default=60)
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': str(fetch_exc)[:2048],
+                }
+
+            client_error = getattr(self.client, '_last_create_tweet_error', None)
+            if client_error and is_rate_limit_exception(client_error):
+                retry_after = extract_retry_after_seconds(client_error, default=60)
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': str(client_error)[:2048],
+                }
+
+            if fetch_err_str and ('rate limit' in fetch_err_str.lower() or 'too many requests' in fetch_err_str.lower() or '429' in fetch_err_str):
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': 60,
+                    'reason': 'rate_limit',
+                    'rawError': fetch_err_str[:2048],
+                }
+
+            diag = None
+            last_resp = getattr(self.client, '_last_create_tweet_response', None)
+            if isinstance(last_resp, dict):
+                diag = classify_x_account_failure(raw_json=last_resp, errors=last_resp.get('errors', []))
+            if not diag and fetch_exc:
+                diag = classify_x_account_failure(raw_json=getattr(fetch_exc, 'raw_json', None), text=str(fetch_exc))
+            if not diag and fetch_err_str:
+                diag = classify_x_account_failure(text=fetch_err_str)
+            if not diag and client_error:
+                diag = classify_x_account_failure(raw_json=getattr(client_error, 'raw_json', None), text=str(client_error))
+
+            if diag == 'rate_limit':
+                retry_after = extract_retry_after_seconds(fetch_exc or client_error, default=60)
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': (fetch_err_str or str(client_error or ''))[:2048],
+                }
+
+            if diag == 'network_proxy_error':
+                return {
+                    'status': 'not_ready',
+                    'published': False,
+                    'posted': False,
+                    'ambiguous': False,
+                    'blocked': False,
+                    'retryable': True,
+                    'accountFailure': 'network_proxy_error',
+                    'reason': 'network_proxy_error',
+                    'rawError': (fetch_err_str or str(client_error or ''))[:2048],
+                }
+
+            if diag in ('banned', 'captcha', 'cookie_expired', 'auth_rejected'):
+                res = unsent(diag)
+                res['accountFailure'] = diag
+                if fetch_err_str or client_error:
+                    res['rawError'] = (fetch_err_str or str(client_error or ''))[:2048]
+                return res
+
+            if tweet is None:
+                result = uncertain('create_tweet_returned_none')
+                if fetch_err_str:
+                    result['fetchError'] = fetch_err_str[:2048]
+                return result
+
+            return uncertain('publish_author_or_id_unverified')
         except Exception as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -802,11 +1011,14 @@ class DirectSession:
             # response was lost (timeout/network glitch). Before marking
             # ambiguous, verify by reading the user's recent timeline.
             x_error_code = getattr(exc, 'code', None) or getattr(exc, 'error_code', None)
-            account_failure = getattr(exc, 'account_failure', None)
+            account_failure = getattr(exc, 'account_failure', None) or classify_x_account_failure(raw_json=getattr(exc, 'raw_json', None), text=str(exc))
 
             timeline_res = None
             try:
-                timeline_res = await self.verify_timeline(text, identity)
+                if hasattr(self, 'verify_timeline_has_post') and callable(self.verify_timeline_has_post):
+                    timeline_res = await self.verify_timeline_has_post(text, identity)
+                else:
+                    timeline_res = await self.verify_timeline(text, identity)
             except Exception:
                 pass
 
@@ -824,11 +1036,44 @@ class DirectSession:
                 timeline_res['userId'] = identity['userId']
                 timeline_res['recoveredFromTimeline'] = True
                 timeline_res['recovered_from_timeline'] = True
+                timeline_res['ok'] = True
                 if account_failure in KNOWN_ACCOUNT_FAILURES:
                     timeline_res['accountFailure'] = account_failure
                 if x_error_code:
                     timeline_res['xErrorCode'] = x_error_code
                 return timeline_res
+
+            # Check if timeline check encountered rate limit
+            fetch_exc = timeline_res.get('fetchException') if isinstance(timeline_res, dict) else None
+            if fetch_exc and is_rate_limit_exception(fetch_exc):
+                retry_after = extract_retry_after_seconds(fetch_exc, default=60)
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': str(fetch_exc)[:2048],
+                }
+
+            if account_failure == 'rate_limit':
+                retry_after = extract_retry_after_seconds(exc, default=60)
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': str(exc)[:2048],
+                }
 
             result = uncertain('publish_confirmation_missing')
             if account_failure in KNOWN_ACCOUNT_FAILURES:
@@ -882,8 +1127,19 @@ async def main():
             result['readDiagnostic'] = getattr(exc, 'read_diagnostic', None)
         if getattr(exc, 'account_failure', None) in KNOWN_ACCOUNT_FAILURES:
             result['accountFailure'] = getattr(exc, 'account_failure')
-        if is_rate_limit_exception(exc):
+        else:
+            classified = classify_x_account_failure(raw_json=getattr(exc, 'raw_json', None), text=str(exc))
+            if classified in KNOWN_ACCOUNT_FAILURES:
+                result['accountFailure'] = classified
+        if is_rate_limit_exception(exc) or result.get('accountFailure') == 'rate_limit':
+            result['status'] = 'rate_limit'
             result['rateLimit'] = True
+            result['published'] = False
+            result['posted'] = False
+            result['ambiguous'] = False
+            result['retryable'] = True
+            result['accountFailure'] = 'rate_limit'
+            result['reason'] = 'rate_limit'
             result['retryAfterSeconds'] = extract_retry_after_seconds(exc)
         emit({'event': 'result', 'result': result})
     finally:

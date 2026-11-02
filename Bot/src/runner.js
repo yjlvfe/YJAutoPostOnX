@@ -465,10 +465,14 @@ async function run({
       }) => {
         const isPermanent = ['banned', 'captcha'].includes(failure);
         const isRateLimit = failure === 'rate_limit' || Boolean(retryAfterSeconds) || reason === 'rate_limit';
+        const isTransportOrVpn = failure === 'network_proxy_error' ||
+          /network_proxy_error/i.test(String(failure || '')) ||
+          /vpn|proxy|socks|network|timeout|connecterror|econnreset|econnrefused/i.test(String(reason || ''));
         let accountResult = {
           failures: 0,
           isolated: false,
-          status: null
+          status: null,
+          transportOutage: isTransportOrVpn
         };
 
         const currentSubnet = session?.exitIp ? normalizeSubnet(session.exitIp) : null;
@@ -489,6 +493,9 @@ async function run({
               }
             } else if (isRateLimit) {
               // Rate limit: cooling only, no strike increment
+            } else if (isTransportOrVpn) {
+              // Transient network/proxy/VPN container issues: DO NOT increment account failure strikes
+              accountResult.failures = acc.failures || 0;
             } else {
               // Increment persistent failure strike in SQLite
               acc.failures = (acc.failures || 0) + 1;
@@ -504,7 +511,7 @@ async function run({
           }
 
           // Pre-dispatch post transfer: revert to pending, remove attempt, unpin payload
-          const i = s.items?.find(x => x.id === item.id);
+          const i = s.items?.find(x => x.id === item?.id);
           if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
             i.state = 'pending';
             delete i.attempt;
@@ -515,6 +522,21 @@ async function run({
           if (s.posting) s.posting.publishingAt = null;
           return s;
         });
+
+        const sNow = await bot.store.load();
+        const isCooling = a => {
+          const c = cooling.get(a.id);
+          return c && c.until > clock().getTime() && accountRevision(a) === c.revision;
+        };
+        const otherActive = (sNow.accounts || []).filter(a =>
+          a.id !== accountId &&
+          a.enabled !== false &&
+          !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
+          (a.failures || 0) < 3 &&
+          (run.accountIds || []).includes(a.id) &&
+          accountCapacity(sNow, a, clock()).remaining > 0 &&
+          !isCooling(a)
+        );
 
         if (accountResult.isolated) {
           cooling.delete(accountId);
@@ -534,9 +556,25 @@ async function run({
             s.posting.cooling[accountId] = entry;
             return s;
           });
+        } else if (isTransportOrVpn) {
+          vpnSlots?.rotate(accountId).catch(() => {});
+          const delayMs = 30000;
+          const entry = {
+            failures: accountResult.failures,
+            until: clock().getTime() + delayMs,
+            revision: accountRevision(account),
+            retryAfterMs: delayMs
+          };
+          cooling.set(accountId, entry);
+          await bot.store.update(s => {
+            s.posting ||= {};
+            s.posting.cooling ||= {};
+            s.posting.cooling[accountId] = entry;
+            return s;
+          });
         } else {
-          // Non-isolated failure: skip this account for the remainder of this pass (60s cooling)
-          const delayMs = 60000;
+          // Non-isolated failure: skip this account for the remainder of this pass (60s cooling if other accounts exist)
+          const delayMs = otherActive.length > 0 ? 60000 : Math.min(60000, Math.max(1000, (sNow.settings?.delayMinSeconds ?? 15) * 1000));
           const entry = {
             failures: accountResult.failures,
             until: clock().getTime() + delayMs,
@@ -554,7 +592,7 @@ async function run({
         bot.forensicLogger?.record({
           eventType: accountResult.isolated
             ? (accountResult.status === 'كابتشا' ? 'account_captcha' : accountResult.status === 'محظور' ? 'account_banned' : 'account_isolated_3_failures')
-            : isRateLimit ? 'account_rate_limited' : 'account_failure_strike',
+            : isRateLimit ? 'account_rate_limited' : isTransportOrVpn ? 'transport_or_vpn_error' : 'account_failure_strike',
           accountId,
           username: account?.username,
           slot: session?.slot,
@@ -562,34 +600,30 @@ async function run({
           exitIp: session?.exitIp,
           subnet: currentSubnet,
           xErrorMessage: reason,
-          details: { itemId: item.id, failure, failures: accountResult.failures, isolated: accountResult.isolated }
+          details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated }
         }).catch(() => {});
-
-        const sNow = await bot.store.load();
-        const otherActive = (sNow.accounts || []).filter(a =>
-          a.id !== accountId &&
-          a.enabled !== false &&
-          !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
-          (a.failures || 0) < 3 &&
-          (run.accountIds || []).includes(a.id) &&
-          accountCapacity(sNow, a, clock()).remaining > 0
-        );
 
         if (accountResult.isolated) {
           if (otherActive.length > 0) {
             await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}) ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
-            return { halt: false, skipDelay: true };
+            return { halt: false, skipDelay: true, isolated: true, failures: accountResult.failures };
           } else {
             await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}). لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`);
-            return { halt: true, skipDelay: true };
+            return { halt: true, skipDelay: true, isolated: true, failures: accountResult.failures };
           }
         }
 
+        if (failure === 'ambiguous') {
+          // Ambiguous outcome isolates the item, not the cycle.
+          // Do not halt the run unless the account was isolated on its 3rd strike.
+          return { halt: false, skipDelay: false, isolated: false, failures: accountResult.failures };
+        }
+
         if (otherActive.length > 0) {
-          return { halt: false, skipDelay: true };
+          return { halt: false, skipDelay: true, isolated: false, failures: accountResult.failures };
         } else {
           await notify('جميع الحسابات غير مؤهلة أو في فترة انتظار؛ توقفت الدورة وبقيت المنشورات في الانتظار.');
-          return { halt: true, skipDelay: true };
+          return { halt: true, skipDelay: true, isolated: false, failures: accountResult.failures };
         }
       };
 
@@ -601,7 +635,9 @@ async function run({
       }
       const hints = new Map((passSnapshot.items || []).map(i => [i.id, i]));
       const passExcluded = excluded(passSnapshot);
-      for (const itemId of itemIds) {
+      const itemIdsList = Array.from(itemIds);
+      for (let itemIdx = 0; itemIdx < itemIdsList.length; itemIdx++) {
+        const itemId = itemIdsList[itemIdx];
         // Do not deserialize the entire durable queue for every cooled/pinned
         // item. This snapshot is only a cheap skip hint; admission reloads below.
         const hint = hints.get(itemId);
@@ -623,7 +659,7 @@ async function run({
         if (signal.aborted || current.cycle?.state !== 'running' || current.cycle.runId !== run.runId) break;
         const account = (current.accounts || []).find(a => a.id === accountId && a.enabled !== false);
         if (!account) continue;
-        let retryCount = 0, halt = false, retryAfterMs = 0;
+        let retryCount = 0, halt = false, retryAfterMs = 0, preDispatchTransfer = false;
         let result;
         while (!signal.aborted) {
         let retry = false, skipDelay = false, safeTransient = false;
@@ -707,11 +743,12 @@ async function run({
             if (outcome.halt) { halt = true; }
             skipDelay = outcome.skipDelay;
             retry = false;
+            if (!dispatchEntered) preDispatchTransfer = !outcome.halt;
             break;
           } else {
           let dispatchCalled = false;
           const onDispatch = async ({ accountId: reportedAccountId } = {}) => {
-            if (dispatchCalled || attempt.signal.aborted || (reportedAccountId != null && reportedAccountId !== accountId)) throw Object.assign(new Error('Dispatch not admitted'), { code: 'DISPATCH_REJECTED' });
+            if (dispatchCalled || attempt.signal.aborted || (reportedAccountId != null && reportedAccountId !== accountId)) throw Object.assign(new Error('Dispatch not admitted: DISPATCH_REJECTED'), { code: 'DISPATCH_REJECTED' });
             dispatchCalled = true;
             let dispatchReady = false;
             dispatchEntered = true; // Failed durable acknowledgement may have committed.
@@ -727,7 +764,7 @@ async function run({
               }
               return s;
             }));
-            if (!dispatchReady || attempt.signal.aborted) throw Object.assign(new Error('Dispatch not admitted'), { code: 'DISPATCH_REJECTED' });
+            if (!dispatchReady || attempt.signal.aborted) throw Object.assign(new Error('Dispatch not admitted: DISPATCH_REJECTED'), { code: 'DISPATCH_REJECTED' });
             return true;
           };
           // Historical injected adapters have no pre-send callback. Preserve that
@@ -760,26 +797,26 @@ async function run({
             delete i.attempt;
             const wasProcessing = true;
             i.state = newState; i.reason = result.reason || null;
-              if (newState === 'published') {
-                i.publishedAt = publishedAt; i.url = result.url; i.accountId = accountId; i.accountUsername = account.username;
-                const acc = s.accounts?.find(a => a.id === accountId);
-                if (acc) {
-                  acc.failures = 0;
-                }
-                if (wasProcessing) {
-                  s.posting.quota ||= {};
-                  const day = riyadhDay(new Date(publishedAt));
-                  s.posting.quota[day] ||= {};
-                  s.posting.quota[day][accountId] = (s.posting.quota[day][accountId] || 0) + 1;
-                }
-                // Publication confirmation and the next inter-publication
-                // deadline are one durable state transition. This prevents a
-                // restart after confirmation from bypassing the delay.
-                const minSeconds = Number.isSafeInteger(s.settings?.delayMinSeconds) ? s.settings.delayMinSeconds : 15;
-                const maxSeconds = Number.isSafeInteger(s.settings?.delayMaxSeconds) ? Math.max(minSeconds, s.settings.delayMaxSeconds) : minSeconds;
-                const delaySeconds = Math.max(15, randomInt(minSeconds, maxSeconds + 1));
-                s.posting.nextPostAt = new Date(new Date(publishedAt).getTime() + delaySeconds * 1000).toISOString();
+            if (['published', 'ambiguous'].includes(newState)) {
+              i.accountId = accountId; i.accountUsername = account?.username;
+              const minSeconds = Number.isSafeInteger(s.settings?.delayMinSeconds) ? s.settings.delayMinSeconds : 15;
+              const maxSeconds = Number.isSafeInteger(s.settings?.delayMaxSeconds) ? Math.max(minSeconds, s.settings.delayMaxSeconds) : minSeconds;
+              const delaySeconds = Math.max(15, randomInt(minSeconds, maxSeconds + 1));
+              s.posting.nextPostAt = new Date(new Date(publishedAt).getTime() + delaySeconds * 1000).toISOString();
+            }
+            if (newState === 'published') {
+              i.publishedAt = publishedAt; i.url = result.url;
+              const acc = s.accounts?.find(a => a.id === accountId);
+              if (acc) {
+                acc.failures = 0;
               }
+              if (wasProcessing) {
+                s.posting.quota ||= {};
+                const day = riyadhDay(new Date(publishedAt));
+                s.posting.quota[day] ||= {};
+                s.posting.quota[day][accountId] = (s.posting.quota[day][accountId] || 0) + 1;
+              }
+            }
             return s;
           });
           if (!transitioned) break;
@@ -818,12 +855,25 @@ async function run({
             // Notify but do NOT halt — isolate this one item and let the cycle
             // continue with remaining pending items via other accounts/slots.
             await notify(`⚠️ نتيجة نشر غامضة للمنشور (${item.id.slice(0,8)}…)؛ تم عزله ولن يُعاد إرساله. الدورة مستمرة مع بقية المنشورات.`);
-            skipDelay = true;
+            const outcome = await handleAccountFailure({
+              accountId,
+              account,
+              item,
+              claim,
+              session,
+              failure: 'ambiguous',
+              reason: result.reason || 'publish_confirmation_missing',
+              details: { itemId: item.id }
+            });
+            if (outcome.halt) { halt = true; }
+            skipDelay = false;
+            retry = false;
+            break;
           } else if (result.retryable === true && (!dispatchEntered && result.reason === 'identity_read_unavailable') && !result.accountFailure) {
             retry = true; safeTransient = true;
             if (result.readDiagnostic?.httpStatus === 429) retryAfterMs = Math.min(900000, Math.max(60000, (result.readDiagnostic.retryAfterSeconds || 60) * 1000));
           }
-          else if (result.blocked || result.rateLimit || /challenge|blocked|restrict|auth|login|cookie|vpn|rate.?limit/i.test(String(result.reason || '') + ' ' + String(result.status || ''))) {
+          else if (result.blocked || result.rateLimit || /challenge|blocked|restrict|auth|login|cookie|rate.?limit/i.test(String(result.reason || '') + ' ' + String(result.status || '')) || result.accountFailure) {
             const failure = result.accountFailure || (result.rateLimit ? 'rate_limit' : null);
             const outcome = await handleAccountFailure({
               accountId,
@@ -838,6 +888,7 @@ async function run({
             if (outcome.halt) { halt = true; }
             skipDelay = outcome.skipDelay;
             retry = false;
+            if (!dispatchEntered) preDispatchTransfer = !outcome.halt;
             break;
           } else if (newState === 'pending') { retry = true; }
           else if (newState === 'cancelled') { skipDelay = true; }
@@ -863,6 +914,14 @@ async function run({
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
               i.state = dispatchEntered || i.attempt?.phase === 'dispatching' ? 'ambiguous' : 'pending';
+              if (i.state === 'ambiguous') {
+                i.accountId = accountId;
+                i.accountUsername = account?.username;
+                const minSeconds = Number.isSafeInteger(s.settings?.delayMinSeconds) ? s.settings.delayMinSeconds : 15;
+                const maxSeconds = Number.isSafeInteger(s.settings?.delayMaxSeconds) ? Math.max(minSeconds, s.settings.delayMaxSeconds) : minSeconds;
+                const delaySeconds = Math.max(15, randomInt(minSeconds, maxSeconds + 1));
+                s.posting.nextPostAt = new Date(clock().getTime() + delaySeconds * 1000).toISOString();
+              }
               if (i.state === 'pending') delete i.attempt;
               if (s.posting) s.posting.publishingAt = null;
             }
@@ -884,10 +943,25 @@ async function run({
             // been published. Isolate it as ambiguous but let the cycle continue
             // with remaining items instead of freezing the entire run.
             await notify(`⚠️ نتيجة نشر غامضة للمنشور (${item.id.slice(0,8)}…)؛ تم عزله. الدورة مستمرة.`);
-            skipDelay = true;
+            const outcome = await handleAccountFailure({
+              accountId,
+              account,
+              item,
+              claim,
+              session,
+              failure: 'ambiguous',
+              reason: err.code || err.message || 'exception_after_dispatch',
+              details: { itemId: item.id }
+            });
+            if (outcome.halt) { halt = true; }
+            skipDelay = false;
+            retry = false;
+            break;
           }
-          else if (!dispatchEntered && ['DIRECT_X_IDENTITY_READ_UNAVAILABLE', 'VPN_TRANSIENT_UNAVAILABLE'].includes(err.code)) { retry = true; safeTransient = err.code === 'DIRECT_X_IDENTITY_READ_UNAVAILABLE' || err.recoverySafe === true; } else if (err.code === 'ACCOUNT_CHECK_PERSIST_FAILED') halt = true;
-          else if (/auth|login|cookie|challenge|restrict|vpn/i.test(String(err.code || '') + ' ' + String(err.message || ''))) {
+          else if (!dispatchEntered && (['DIRECT_X_IDENTITY_READ_UNAVAILABLE', 'VPN_TRANSIENT_UNAVAILABLE', 'VPN_READINESS_FAILED'].includes(err.code) || /vpn|proxy|socks/i.test(err.code || err.message))) {
+            retry = true; safeTransient = err.code === 'DIRECT_X_IDENTITY_READ_UNAVAILABLE' || err.recoverySafe === true || /vpn|proxy|socks/i.test(err.code || err.message);
+          } else if (err.code === 'ACCOUNT_CHECK_PERSIST_FAILED') halt = true;
+          else if (/auth|login|cookie|challenge|restrict/i.test(String(err.code || '') + ' ' + String(err.message || ''))) {
             const failure = session?.identity?.accountFailure || result?.accountFailure || err.accountFailure;
             const outcome = await handleAccountFailure({
               accountId,
@@ -902,6 +976,7 @@ async function run({
             if (outcome.halt) { halt = true; }
             skipDelay = outcome.skipDelay;
             retry = false;
+            if (!dispatchEntered) preDispatchTransfer = !outcome.halt;
             break;
           }
           else if (['ATTEMPT_TIMEOUT', 'ATTEMPT_ABORTED', 'DISPATCH_REJECTED', 'DISPATCH_FENCE_MISSING'].includes(err.code)) halt = true;
@@ -925,6 +1000,8 @@ async function run({
               } else if (i.attempt?.phase === 'dispatching' || dispatchEntered) {
                 i.state = 'ambiguous';
                 i.reason ||= 'unresolved_in_finally';
+                i.accountId ||= accountId;
+                i.accountUsername ||= account?.username;
               }
               if (s.posting) s.posting.publishingAt = null;
             }
@@ -948,13 +1025,18 @@ async function run({
           // not a stopped session. Pending items remain in the same run.
         } else if (retry) {
           const sNow = await bot.store.load();
+          const isCooling = a => {
+            const c = cooling.get(a.id);
+            return c && c.until > clock().getTime() && accountRevision(a) === c.revision;
+          };
           const otherActive = (sNow.accounts || []).filter(a =>
             a.id !== accountId &&
             a.enabled !== false &&
             !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
             (a.failures || 0) < 3 &&
             (run.accountIds || []).includes(a.id) &&
-            accountCapacity(sNow, a, clock()).remaining > 0
+            accountCapacity(sNow, a, clock()).remaining > 0 &&
+            !isCooling(a)
           );
           if (otherActive.length > 0) {
             skipDelay = true;
@@ -977,6 +1059,9 @@ async function run({
         break;
         }
         if (halt || signal.aborted) break cycleLoop;
+        if (preDispatchTransfer) {
+          itemIdx--;
+        }
       }
       const next = await bot.store.load();
       if (signal.aborted || next.cycle?.state !== 'running' || next.cycle.runId !== run.runId) break;

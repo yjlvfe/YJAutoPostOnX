@@ -5,6 +5,7 @@
 !LICENSE.md
 !MASTER_TODO.md
 !PROGRESS_HISTORY.md
+!RESOURCE_CLEANUP_REPORT.md
 
 # Reports whitelisting for handoff and audit
 !Bot/Reports/RepairHandoff/**/*.md

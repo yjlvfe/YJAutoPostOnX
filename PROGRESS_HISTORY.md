@@ -593,3 +593,77 @@ Full-scale operational verification of the YJAutoPostOnX production engine execu
 - **Evidence Packaging**: Built `/root/Projects/YJAutoPostOnX/ARCHIVES/LIVE_OPERATIONAL_VERIFICATION.zip` with automated secret scanning (`SECRET_PATTERNS`).
 - **Telegram Document Delivery**: Dispatched ZIP archive via Telegram Bot API `sendDocument` to authorized chat IDs `528864559` and `5535435580`. Both delivery receipts verified (`ok: true`).
 - **Status**: **PASS**
+
+
+---
+
+## 2.7. Round 3: Multi-Agent Production Recovery, 3-Strikes Isolation, CSV Deduplication & Live Operational Verification (2026-11-02)
+
+### Executive Summary & Mandate
+Following previous test passes (369/369), production stability encountered post-run ambiguous results (items `f75e4f8d`, `bd12d092`, `fa1f2749`) and duplicate CSV transmissions. Round 3 was launched via Teamwork multi-agent orchestration across Milestones M1 to M5 to implement genuine structural remediation:
+1. **Milestone M1 (Core Runner & Queue)**: 3-strikes accounting on natural turns, cooling awareness on strikes 1 and 2, immediate isolation on strike 3 (`معزول (3 إخفاقات)`), SQLite attribution (`accountId` and `accountUsername` persisted for ambiguous items), exclusion of transient network/proxy/VPN container errors from strike penalty, pre-dispatch claim protection (`queue.recoverProcessing` resetting `claimed` items to `pending` without post loss), and enforcement of the 5-active account ceiling.
+2. **Milestone M2 (Python Bridge & Diagnostics)**: Twikit `None` return recovery via live timeline verification (`verify_timeline`), GraphQL author extraction and normalized comparison, and granular 8-class diagnostic taxonomy (`banned`, `captcha`, `cookie_expired`, `auth_rejected`, `rate_limit`, `network_proxy_error`, `ambiguous`, `unknown`).
+3. **Milestone M3 (Telegram UI & CSV Deduplication)**: Dual-layer CSV deduplication using SHA-256 content hashing against `linkDeliveries` in SQLite, suppression of redundant CSV exports upon cycle stop when 0 new posts exist, single clear Arabic isolation notification (`تم عزل الحساب @... تلقائياً`), suppression of transient strike spam, throttled queue stall alerts, and Telegram 409 Conflict resilience with exponential backoff and jitter (`executeWithConflictBackoff`).
+4. **Milestone M4 (Live VPS Operational Testing)**: 16 live operational checks on VPS host `MasterYJ`: healthy Docker VPN containers across ports 18801-18805, distinct exit IPs with 0 host leak, 1 controlled authentic publish to X (`https://x.com/crytpokingxvo8/status/2117218878304801135`), Attempt Token lifecycle tracking (`claimed` -> `dispatching` -> `published`), Riyadh daily quota decremented by exactly 1 for posting account while untouched for other accounts, and live terminal CSV export delivered to Telegram chat `528864559` (Message ID `1322`) with subsequent duplicate suppression verified.
+5. **Milestone M5 (Documentation, Resource Cleanup & Delivery)**: Full resource audit report (`RESOURCE_CLEANUP_REPORT.md`), baseline preservation (50%–56% RAM accepted), zero impact on user programs (`MexcRadar` PID 1001 running continuously for 2h+; 11 user Docker containers untouched), targeted cleanup of `/tmp/yj_m4_test`, git commit & push to `origin/main`, packaging evidence archive, and Telegram delivery.
+
+---
+
+### Detailed Milestone Execution Log
+
+#### Milestone M1: Core Runner & Queue Fixes
+- **Files Modified**: `Bot/src/runner.js`, `Bot/src/queue.js`, `Bot/src/accounts.js`.
+- **Key Changes**:
+  - `runner.js`: `handleAccountFailure` invoked for ambiguous outcomes. Increments `failures`, sets cooling deadline (`accountCoolingUntil = Date.now() + 180_000`), skips natural turn on strikes 1 and 2, and isolates on strike 3 (`معزول (3 إخفاقات)`).
+  - `runner.js`: Network/proxy/VPN container errors classified as `network_proxy_error` do NOT increment `acc.failures`.
+  - `queue.js`: `recoverProcessing` checks `attempt.phase === 'claimed'` and resets unattempted items to `pending` instead of quarantining them as `ambiguous`.
+  - `runner.js`: Pre-dispatch account failures immediately unpin and transfer the post to the next eligible account in the same cycle pass.
+- **Verification Evidence**:
+  - `Bot/test/m1_fixes_comprehensive.test.js`: 20/20 PASS.
+  - `Bot/test/challenger_iter2_concurrency_fuzz.test.js`: 13/13 PASS.
+  - Total M1 test pass rate: 100%.
+
+#### Milestone M2: Python Bridge Robustness & Granular Diagnostics
+- **Files Modified**: `Bot/python/direct_x_bridge.py`, `Bot/python/direct_x_compat.py`.
+- **Key Changes**:
+  - In `direct_x_bridge.py:publish()`, when `self.client.create_tweet()` returns `None` or an empty object, the bridge now calls `verify_timeline(text, identity)`. If the tweet is confirmed on the live timeline, the published tweet object is recovered with `recoveredFromTimeline: True`. If not found, it cleanly returns `uncertain('publish_confirmation_missing')`.
+  - Granular 8-class diagnostic classification implemented in `direct_x_compat.py`: `banned`, `captcha`, `cookie_expired`, `auth_rejected`, `rate_limit`, `network_proxy_error`, `ambiguous`, `unknown`.
+- **Verification Evidence**:
+  - `Bot/.venv-direct-x/bin/python -m unittest discover -s Bot/python -p "test_*.py"`: **183/183 PASS** in 1.268s (100% pass rate).
+
+#### Milestone M3: Telegram UI, CSV Export Deduplication & 409 Resilience
+- **Files Modified**: `Bot/src/linkExports.js`, `Bot/src/telegramUi.js`, `Bot/src/singleInstance.js`.
+- **Key Changes**:
+  - `linkExports.js`: Content hash computed via SHA-256 for terminal export rows. Compared against `state.linkDeliveries` in SQLite. If hash matches most recent delivery for that day and chat, export is suppressed (`duplicate_content_hash`).
+  - `telegramUi.js`: Built single clear Arabic isolation alert (`تم عزل الحساب @... تلقائياً`). Suppressed alerts for transient strikes 1 & 2. Throttled queue stall alert to emit once per stall transition.
+  - `singleInstance.js`: `executeWithConflictBackoff` retries transient Telegram 409 Conflict with exponential backoff and jitter up to 3 retries, eliminating getUpdates clash.
+- **Verification Evidence**:
+  - `Bot/test/m3_telegram_and_csv_dedup.test.js`, `challenger_r3_m3_adversarial_verification.test.js`, `challenger_r3_m3_2_fuzz.test.js`: **82/82 PASS** across Node suites (100% pass rate).
+
+#### Milestone M4: VPS Live Operational Testing & Safe Validation
+- **Target Item Dispatched**: `e1b0eadf-03f3-4e04-8ce1-571835debd33`
+- **Publishing Account**: `@crytpokingxvo8` (`x-930e0054b395228aefa9`)
+- **Proxy Port**: `127.0.0.1:18801` (`yj_autopost_vpn_1`)
+- **Verified Tweet ID**: `2117218878304801135`
+- **Verified Live Tweet URL**: `https://x.com/crytpokingxvo8/status/2117218878304801135`
+- **HTTP Reachability**: HTTP/2 307 -> 200 OK from Cloudflare Envoy, verified live on X public timeline.
+- **Riyadh Daily Quota Deduction**:
+  - `@crytpokingxvo8`: incremented from 4 to 5 used (+1 deduction).
+  - `@emiehg`: remained strictly at 2 used (0 side effects).
+- **Telegram Live CSV Delivery**:
+  - CSV file generated and sent to authorized chat `528864559`.
+  - Telegram API Message ID: `1322` (`ok: true`).
+  - SHA-256 Content Hash: `625f80f1899a00336c9bf68418b1361493785ceb6713b52ef9d8b730eafe52dd`.
+  - Subsequent cycle stop with 0 new posts suppressed transmission with `duplicate_content_hash`.
+- **Verification Evidence**:
+  - `node --test Bot/test/live_vps_m4_operational.test.js`: **16/16 PASS** (100% pass rate).
+
+#### Milestone M5: Documentation, Resource Baseline & Delivery
+- **Resource Cleanup Report**: `RESOURCE_CLEANUP_REPORT.md` created with full before/after memory utilization, steady-state baseline explanation, and inventory.
+- **Resource Safety**: Normal 50%–56% server RAM baseline preserved. Zero user processes stopped (`MexcRadar` PID 1001 running continuously 2h+; `BinanceChecker` and `MyWalletChecker` untouched). All 11 user Docker containers untouched. No batch `kill` or `docker prune` commands executed.
+- **Cleaned Test Artifacts**: Directory `/tmp/yj_m4_test` completely removed.
+- **Bot Service & Infrastructure Health**:
+  - `yj-telegram-bot.service` (PID 392369) active and healthy.
+  - All 5 Docker VPN containers (`yj_autopost_vpn_1..5`) healthy on ports 18801–18805 with zero server IP leak.
+- **Governance**: All 33 findings in `MASTER_TODO.md` strictly maintain Codex Status: **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained: **`PENDING`**.
+- **Delivery**: Evidence archive packaged and transmitted to Telegram admin chat `528864559`.

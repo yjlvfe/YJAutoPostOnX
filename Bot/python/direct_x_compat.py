@@ -70,7 +70,10 @@ _NETWORK_PROXY_KEYWORDS = (
     'proxy', 'socks', 'socks5', 'connection refused', 'connection reset',
     'connection error', 'connecterror', 'timed out', 'timeout',
     'network unreachable', 'host unreachable', 'name resolution failure',
-    'getaddrinfo failed', 'ssl error', 'remote protocol error', 'network error'
+    'getaddrinfo failed', 'ssl error', 'remote protocol error', 'network error',
+    'econnrefused', 'econnreset', 'etimedout', 'connect timeout', 'read timeout',
+    'socket timeout', 'pool timeout', 'broken pipe', 'connection abort',
+    'temporary failure in name resolution'
 )
 
 _AMBIGUOUS_KEYWORDS = (
@@ -178,7 +181,7 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
 
     combined = ' '.join(messages).lower()
 
-    if (codes & {64, 63, 141}) or bool(_BANNED_PATTERN.search(combined)):
+    if codes & {64, 63, 141}:
         return 'banned'
 
     if (codes & {326, 353, 399, 241}) or has_bounce or any(w in combined for w in _CAPTCHA_KEYWORDS):
@@ -193,8 +196,13 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
     if (codes & {32, 135, 215, 99, 231}) or any(w in combined for w in _AUTH_REJECTED_KEYWORDS):
         return 'auth_rejected'
 
+    # Network / proxy / timeout errors MUST strictly return network_proxy_error
+    # and NEVER banned, even if proxy error messages reference suspended account endpoints.
     if any(w in combined for w in _NETWORK_PROXY_KEYWORDS):
         return 'network_proxy_error'
+
+    if bool(_BANNED_PATTERN.search(combined)):
+        return 'banned'
 
     if any(w in combined for w in _AMBIGUOUS_KEYWORDS):
         return 'ambiguous'
@@ -306,6 +314,7 @@ def compatibility_client():
                 error = TwitterException('direct_x_http_failure')
                 error.http_status = response.status_code
                 if response.status_code == 429:
+                    error.account_failure = 'rate_limit'
                     import time
                     try:
                         seconds = float(response.headers.get('retry-after', '0'))
@@ -379,11 +388,14 @@ def compatibility_client():
                 attachment_url, community_id, share_with_followers,
                 richtext_options, edit_tweet_id, limit_mode,
             )
+            self._last_create_tweet_response = response
             if 'errors' in response:
                 failure = classify_x_account_failure(raw_json=response, errors=response.get('errors', []))
                 if failure:
                     error = TwitterException('direct_x_account_failure')
                     error.account_failure = failure
+                    if failure == 'rate_limit':
+                        error.http_status = 429
                     raise error
                 raise_exceptions_from_response(response['errors'])
                 raise CouldNotTweet(

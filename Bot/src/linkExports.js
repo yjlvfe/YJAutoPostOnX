@@ -1,7 +1,8 @@
 'use strict';
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const crypto = require('node:crypto');
+const { randomUUID } = crypto;
 
 function dayOf(value) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
@@ -106,11 +107,54 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
           ...(state.items || []),
           ...state.linkOutbox.filter(entry => entry.kind === 'document' && entry.day === day).flatMap(entry => entry.rows || [])
         ] }, day);
-        state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day });
-        if (!rows.length) continue;
+        if (!rows.length) {
+          state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day, reconciled: true, reason: 'empty_rows' });
+          continue;
+        }
+
+        const successfulDeliveries = (state.linkDeliveries || []).filter(entry =>
+          entry.ok === true && entry.kind === 'document' && entry.day === day && String(entry.chatId) === destination
+        );
+        const lastDelivery = successfulDeliveries[successfulDeliveries.length - 1];
+        const content = csv(rows);
+        const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+
+        // Check if all item IDs are already present in the last successful delivery:
+        let isDuplicateItemSet = false;
+        if (lastDelivery && Array.isArray(lastDelivery.itemIds)) {
+          const lastDeliveredItemIds = new Set(lastDelivery.itemIds);
+          isDuplicateItemSet = rows.length === lastDeliveredItemIds.size && rows.every(r => lastDeliveredItemIds.has(r.id));
+        }
+
+        // Check if content hash matches any successful delivery for this day and destination:
+        const isDuplicateHash = successfulDeliveries.some(entry => entry.contentHash === contentHash);
+
+        if (isDuplicateItemSet || isDuplicateHash) {
+          state.linkTerminalEvents.push({
+            runId: run.runId,
+            chatId: destination,
+            day,
+            reconciled: true,
+            suppressed: true,
+            reason: isDuplicateHash ? 'duplicate_content_hash' : 'duplicate_item_set',
+            contentHash,
+            itemIds: rows.map(r => r.id)
+          });
+          logger.log(JSON.stringify({
+            event: 'link_export_terminal_suppressed',
+            runId: run.runId,
+            chatId: destination,
+            day,
+            reason: isDuplicateHash ? 'duplicate_content_hash' : 'duplicate_item_set',
+            itemCount: rows.length
+          }));
+          continue;
+        }
+
+        state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day, reconciled: false, contentHash });
         state.linkOutbox.push({ outboxId: randomUUID(), runId: run.runId, terminalId: run.runId, day,
           kind: 'document', chatId: destination, itemIds: rows.map(row => row.id), rows: structuredClone(rows),
-          status: 'pending', attempts: 0, createdAt: new Date(clock()).toISOString() });
+          contentHash, status: 'pending', attempts: 0, createdAt: new Date(clock()).toISOString() });
       }
       return state;
     });
@@ -119,6 +163,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
   async function deliver(outboxId, { idleOnly = false } = {}) {
     let entry;
     const deliveryId = randomUUID();
+    let contentHash = null;
     await store.update(state => {
       if (idleOnly && ['running', 'stopping'].includes(state.cycle?.state)) return state;
       const current = (state.linkOutbox || []).find(record => record.outboxId === outboxId);
@@ -126,18 +171,39 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       current.status = 'sending'; current.deliveryId = deliveryId; current.attempts += 1;
       current.attemptedAt = new Date().toISOString();
       state.linkDeliveries ||= [];
-      state.linkDeliveries.push({ deliveryId, outboxId, runId: current.runId, day: current.day, kind: current.kind,
-        chatId: current.chatId, itemIds: current.itemIds, attempted: true, ok: false, attemptedAt: current.attemptedAt });
       // Freeze the complete durable daily total in this attempt, not just
       // the triggering run's new rows. Delivery coverage remains per new item.
       if (current.kind === 'document') current.rows = dailyRows({ items: [
         ...(state.items || []),
         ...(state.linkOutbox || []).filter(record => record.day === current.day && record.kind === 'document').flatMap(record => record.rows || [])
       ] }, current.day);
+      contentHash = current.kind === 'document' ? crypto.createHash('sha256').update(csv(current.rows)).digest('hex') : null;
+      current.contentHash = contentHash;
+      state.linkDeliveries.push({ deliveryId, outboxId, runId: current.runId, day: current.day, kind: current.kind,
+        chatId: current.chatId, itemIds: current.itemIds, contentHash, attempted: true, ok: false, attemptedAt: current.attemptedAt });
       entry = structuredClone(current);
       return state;
     });
     if (!entry) return;
+    // Fast deduplication check: if identical contentHash has already been successfully delivered for this destination & day
+    if (entry.kind === 'document' && contentHash) {
+      const state = await store.load();
+      const alreadyDelivered = (state.linkDeliveries || []).some(d =>
+        d.ok === true && d.kind === 'document' && d.day === entry.day &&
+        String(d.chatId) === String(entry.chatId) && d.contentHash === contentHash && d.deliveryId !== deliveryId
+      );
+      if (alreadyDelivered) {
+        await store.update(s => {
+          const cur = (s.linkOutbox || []).find(r => r.outboxId === outboxId);
+          const att = (s.linkDeliveries || []).find(r => r.deliveryId === deliveryId);
+          if (cur) { cur.status = 'delivered'; cur.deliveredAt = new Date().toISOString(); }
+          if (att) { att.ok = true; att.suppressed = true; att.reason = 'duplicate_hash_in_deliver'; }
+          return s;
+        });
+        logger.log(JSON.stringify({ event: 'telegram_document_delivery_suppressed', outboxId, chatId: entry.chatId, day: entry.day, reason: 'already_delivered_identical_hash' }));
+        return;
+      }
+    }
     // A persisted 'sending' record is fenced forever after a crash. Telegram
     // offers no idempotency key: absence of a receipt is NOT proof of failure.
     let response;
@@ -169,7 +235,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       const attempt = (state.linkDeliveries || []).find(record => record.deliveryId === deliveryId);
       const deliveredAt = new Date().toISOString();
       if (current) { current.status = 'delivered'; current.messageId = messageId; current.deliveredAt = deliveredAt; }
-      if (attempt) { attempt.ok = true; attempt.messageId = messageId; attempt.deliveredAt = deliveredAt; }
+      if (attempt) { attempt.ok = true; attempt.messageId = messageId; attempt.deliveredAt = deliveredAt; if (contentHash) attempt.contentHash = contentHash; }
       return state;
     });
     logger.log(JSON.stringify({ event: entry.kind === 'empty' ? 'telegram_empty_notice_sent' : 'telegram_document_sent', ok: true, chat_id: entry.chatId, message_id: messageId }));
