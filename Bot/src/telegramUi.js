@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const { accountCapacity, quotaAdmission } = require('./quota');
 const { DEFAULT_SETTINGS, parseDuration, formatDuration } = require('./settings');
 const { TelegramFlows } = require('./telegramFlows');
-const { preTable, richTable, accountStatus, formatAccountTable, clean } = require('./accountTable');
+const { richTable, accountStatus, formatAccountTable, clean } = require('./accountTable');
 const { isConflict409 } = require('./singleInstance');
 
 const MAX_ACTIVE_ACCOUNTS = 5;
@@ -150,9 +150,9 @@ class TelegramUi {
       inline_keyboard: [
         [
           isEnabled
-            ? { text: '🔴 تعطيل الجدولة', callback_data: 'schedule_btn:toggle:disable', ...(this.inlineStyles ? { style: 'danger' } : {}) }
-            : { text: '🟢 تفعيل الجدولة', callback_data: 'schedule_btn:toggle:enable', ...(this.inlineStyles ? { style: 'success' } : {}) },
-          { text: '⏰ تحديد الموعد', callback_data: 'schedule_btn:set_time:prompt' }
+            ? { text: 'تعطيل الجدولة', callback_data: 'schedule_btn:toggle:disable', ...(this.inlineStyles ? { style: 'danger' } : {}) }
+            : { text: 'تفعيل الجدولة', callback_data: 'schedule_btn:toggle:enable', ...(this.inlineStyles ? { style: 'success' } : {}) },
+          { text: 'تحديد الموعد', callback_data: 'schedule_btn:set_time:prompt', ...(this.inlineStyles ? { style: 'primary' } : {}) }
         ]
       ]
     };
@@ -224,8 +224,8 @@ class TelegramUi {
       `اختر الحد لتعديل توقيته:`;
     const markup = {
       inline_keyboard: [[
-        { text: 'أدنى', callback_data: 'delay:set_min:prompt' },
-        { text: 'أعلى', callback_data: 'delay:set_max:prompt' }
+        { text: 'أدنى', callback_data: 'delay:set_min:prompt', ...(this.inlineStyles ? { style: 'primary' } : {}) },
+        { text: 'أعلى', callback_data: 'delay:set_max:prompt', ...(this.inlineStyles ? { style: 'danger' } : {}) }
       ]]
     };
     return this.bot.transport.sendMessage(id.chat, text, { parse_mode: 'HTML', reply_markup: markup });
@@ -260,6 +260,17 @@ class TelegramUi {
     return {};
   }
 
+  async getSettingsKeyboard() {
+    const s = await this.bot.settings.get();
+    const isScheduleEnabled = s.schedule?.enabled === true;
+    const scheduleStyle = isScheduleEnabled ? 'success' : 'danger';
+    return this.bot.transport.keyboard('settings', null, {
+      styles: {
+        'الجدولة': scheduleStyle
+      }
+    });
+  }
+
   async quotaMenu(_, raw) {
     const id = this.identity(raw);
     await this.flows.cleanup(id);
@@ -269,7 +280,8 @@ class TelegramUi {
     const text = `📊 <b>إعدادات الحصة اليومية:</b>\n\n` +
       `الحصة الحالية: <b>${quotaStr}</b> لكل حساب.\n\n` +
       `أرسل الحصة اليومية الجديدة رقماً صحيحاً أكبر من صفر (مثال: 10)، أو اضغط أي زر في القائمة للإلغاء:`;
-    return this.bot.transport.sendMessage(id.chat, text, { parse_mode: 'HTML', reply_markup: this.bot.transport.keyboard('settings') });
+    const keyboardObj = await this.getSettingsKeyboard();
+    return this.bot.transport.sendMessage(id.chat, text, { parse_mode: 'HTML', reply_markup: keyboardObj });
   }
 
   async back(_, raw) {
@@ -294,7 +306,7 @@ class TelegramUi {
       await this.flows.set(id, { prompt: null, promptMessageId: null, page: 'schedule' });
       return this.scheduleMenu(_, raw);
     }
-    if (['accounts', 'schedule', 'delay', 'quota'].includes(u.page)) {
+    if (['accounts'].includes(u.page)) {
       return this.settings(_, raw);
     }
     return this.menu(_, raw);
@@ -318,7 +330,7 @@ class TelegramUi {
 
     if ((cleanText === 'رجوع' || cleanText === 'إلغاء') && ['delay', 'quota', 'schedule', 'posts', 'cookies'].includes(u.page)) {
       await this.flows.cleanup(id);
-      return ['posts', 'cookies'].includes(u.page) ? this.menu(_, raw) : this.settings(_, raw);
+      return ['posts', 'cookies', 'delay', 'quota', 'schedule'].includes(u.page) ? this.menu(_, raw) : this.settings(_, raw);
     }
 
     const flow = await this.flows.input(id, text);
@@ -661,7 +673,13 @@ class TelegramUi {
     return this.panel(id, true, true);
   }
   async posts(_, raw) { const id = this.identity(raw); await this.flows.cleanup(id); return this.flows.posts(id); }
-  async settings(_, raw) { const id = this.identity(raw); await this.flows.cleanup(id); return this.show(id, 'settings', 'الإعدادات'); }
+  async settings(_, raw) {
+    const id = this.identity(raw);
+    await this.flows.cleanup(id);
+    await this.page(id, 'settings', null);
+    const keyboardObj = await this.getSettingsKeyboard();
+    return this.bot.transport.sendMessage(id.chat, 'الإعدادات', { reply_markup: keyboardObj });
+  }
   async accounts(_, raw) { const id = this.identity(raw); await this.flows.cleanup(id); return this.flows.accounts(id); }
   refreshPanels(force = false) {
     if (force) this.pendingForcedRefresh = true;
@@ -850,8 +868,8 @@ class TelegramUi {
         const isCaptcha = a.status === 'كابتشا' || String(a.status || '').toLowerCase() === 'captcha';
         const isEnabled = a.enabled !== false && !isBanned && !isCaptcha;
         const name = a.username ? `@${clean(a.username)}` : a.label || a.id;
-        const text = isBanned ? `🚫 ${name}` : isCaptcha ? `⚠️ ${name}` : isEnabled ? `🟢 ${name}` : `🔴 ${name}`;
-        const style = isBanned ? 'danger' : isEnabled ? 'success' : 'danger';
+        const text = name;
+        const style = isBanned ? 'danger' : isEnabled ? 'success' : 'primary';
         return {
           text,
           callback_data: `acctoggle:toggle:${a.id}`,
@@ -1041,10 +1059,11 @@ class TelegramUi {
         const isBanned = a.status === 'محظور' || ['suspended', 'banned'].includes(String(a.status || '').toLowerCase());
         const isCaptcha = a.status === 'كابتشا' || String(a.status || '').toLowerCase() === 'captcha';
         const isEnabled = a.enabled !== false && !isBanned && !isCaptcha;
-        const icon = isBanned ? '🚫 ' : isCaptcha ? '⚠️ ' : isEnabled ? '🟢 ' : '🔴 ';
+        const style = isBanned ? 'danger' : isEnabled ? 'success' : 'primary';
         return {
-          text: `${icon}${name}`,
-          callback_data: `accmanage:select:${a.id}`
+          text: name,
+          callback_data: `accmanage:select:${a.id}`,
+          ...(this.inlineStyles ? { style } : {})
         };
       });
       inline_keyboard.push(row);
@@ -1080,20 +1099,26 @@ class TelegramUi {
   }
 
   accountDetailKeyboard(account) {
+    const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
+    const isCaptcha = account.status === 'كابتشا' || String(account.status || '').toLowerCase() === 'captcha';
+    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha;
+
+    // زر واحد للتبديل: إذا كان مفعلاً يظهر أحمر ومكتوب "تعطيل"، وإذا كان غير مفعل يظهر أخضر ومكتوب "تفعيل"
+    const toggleButton = isEnabled
+      ? { text: 'تعطيل', callback_data: `accmanage:disable:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
+      : { text: 'تفعيل', callback_data: `accmanage:enable:${account.id}`, ...(this.inlineStyles ? { style: 'success' } : {}) };
+
     const inline_keyboard = [
       [
-        { text: '🟢 تفعيل', callback_data: `accmanage:enable:${account.id}`, ...(this.inlineStyles ? { style: 'success' } : {}) },
-        { text: '🔴 تعطيل', callback_data: `accmanage:disable:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
+        toggleButton,
+        { text: 'حذف الحساب', callback_data: `accmanage:delete_prompt:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
       ],
       [
-        { text: '🔍 فحص جلسة X', callback_data: `accmanage:check_session:${account.id}` },
-        { text: '🌐 فحص VPN وIP', callback_data: `accmanage:check_vpn:${account.id}` }
+        { text: 'فحص جلسة X', callback_data: `accmanage:check_session:${account.id}`, ...(this.inlineStyles ? { style: 'primary' } : {}) },
+        { text: 'فحص VPN وIP', callback_data: `accmanage:check_vpn:${account.id}`, ...(this.inlineStyles ? { style: 'primary' } : {}) }
       ],
       [
-        { text: '🗑️ حذف الحساب', callback_data: `accmanage:delete_prompt:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
-      ],
-      [
-        { text: '↩️ رجوع', callback_data: 'accmanage:list:all' }
+        { text: 'رجوع', callback_data: 'accmanage:list:all', ...(this.inlineStyles ? { style: 'primary' } : {}) }
       ]
     ];
     return { inline_keyboard };

@@ -2,7 +2,12 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = require('node:sqlite'));
+} catch (err) {
+  throw new Error(`NODE_SQLITE_UNAVAILABLE: node:sqlite requires Node.js >= 22.5.0 (running on ${process.version}): ${err.message}`);
+}
 
 function secureFileMode(file, { missing = false } = {}) {
   let stat;
@@ -60,7 +65,7 @@ class SqliteStore {
     for (const suffix of ['-wal', '-shm']) secureFileMode(this.key + suffix, { missing: true });
     const db = new DatabaseSync(this.key);
     try {
-      db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
+      db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000;');
       for (const suffix of ['-wal', '-shm']) {
         secureFileMode(this.key + suffix, { missing: true });
       }
@@ -73,9 +78,8 @@ class SqliteStore {
     try {
       const result = fn();
       if (result && typeof result.then === 'function') {
-        return result.then(value => { this.db.exec('COMMIT'); return value; }).catch(error => {
-          try { this.db.exec('ROLLBACK'); } catch {} throw error;
-        });
+        try { this.db.exec('ROLLBACK'); } catch {}
+        throw new TypeError('TRANSACTION_ASYNC_YIELD: SQLite transaction must be synchronous; cannot hold locks across async Promise');
       }
       this.db.exec('COMMIT');
       return result;
@@ -84,7 +88,7 @@ class SqliteStore {
     }
   }
 
-  _readOrInitialize() {
+  _readRecord() {
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
     if (version === 0) {
       // An existing uninitialized file may be a damaged former authority.
@@ -100,12 +104,16 @@ class SqliteStore {
       const json = this._encode(value);
       this.db.exec('CREATE TABLE state (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision >= 0)); PRAGMA user_version=1');
       this.db.prepare('INSERT INTO state (id, json, revision) VALUES (1, ?, 0)').run(json);
-      return JSON.parse(json);
+      return { data: JSON.parse(json), revision: 0 };
     }
     if (version !== 1) throw new Error('Unsupported SQLite store version');
     const rows = this.db.prepare('SELECT id, json, revision FROM state').all();
     if (rows.length !== 1 || rows[0].id !== 1 || !Number.isSafeInteger(rows[0].revision) || rows[0].revision < 0) throw new Error('Invalid SQLite store record');
-    return JSON.parse(rows[0].json);
+    return { data: JSON.parse(rows[0].json), revision: rows[0].revision };
+  }
+
+  _readOrInitialize() {
+    return this._readRecord().data;
   }
 
   _encode(value) {
@@ -128,9 +136,12 @@ class SqliteStore {
     return serialize(this.key, () => {
       this._open();
       const result = this._transaction(() => {
-        this._readOrInitialize();
+        const { revision } = this._readRecord();
         const json = this._encode(snapshot);
-        this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1').run(json);
+        const res = this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1 AND revision = ?').run(json, revision);
+        if (res.changes !== 1) {
+          throw Object.assign(new Error(`Optimistic concurrency conflict at revision ${revision}`), { code: 'OPTIMISTIC_CONCURRENCY_CONFLICT' });
+        }
         return JSON.parse(json);
       });
       this.state = structuredClone(result);
@@ -141,22 +152,39 @@ class SqliteStore {
   async update(mutator) {
     return serialize(this.key, async () => {
       this._open();
-      const result = await this._transaction(async () => {
-        const current = this._readOrInitialize();
+      let attempts = 0;
+      while (attempts < 3) {
+        attempts++;
+        const { data: current, revision } = this._readRecord();
         const draft = structuredClone(current);
         const next = await mutator(draft);
         const json = this._encode(next === undefined ? draft : next);
-        this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1').run(json);
-        return JSON.parse(json);
-      });
-      this.state = structuredClone(result);
-      return structuredClone(result);
+        try {
+          const result = this._transaction(() => {
+            const res = this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1 AND revision = ?').run(json, revision);
+            if (res.changes !== 1) {
+              throw Object.assign(new Error(`Optimistic concurrency conflict at revision ${revision}`), { code: 'OPTIMISTIC_CONCURRENCY_CONFLICT' });
+            }
+            return JSON.parse(json);
+          });
+          this.state = structuredClone(result);
+          return structuredClone(result);
+        } catch (err) {
+          if (err.code === 'OPTIMISTIC_CONCURRENCY_CONFLICT' && attempts < 3) {
+            continue;
+          }
+          throw err;
+        }
+      }
     });
   }
 
   async close() {
     return serialize(this.key, () => {
-      if (this.db) this.db.close();
+      if (this.db) {
+        try { this.db.exec('PRAGMA wal_checkpoint(PASSIVE)'); } catch {}
+        this.db.close();
+      }
       this.db = null;
       this.closed = true;
     });

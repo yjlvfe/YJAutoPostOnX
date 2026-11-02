@@ -8,7 +8,7 @@ const { splitRows, parseLine } = require('./csv');
 const { parseCookies } = require('./cookieFormat');
 const { Queue, hash } = require('./queue');
 const { normalizeAccountId } = require('./accounts');
-const { formatAccountTable, escapeHtml, clean } = require('./accountTable');
+const { formatAccountTable, escapeHtml } = require('./accountTable');
 const nonce = () => crypto.randomBytes(10).toString('hex');
 const MAX_FILE = 2 * 1024 * 1024;
 

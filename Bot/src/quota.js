@@ -2,7 +2,9 @@
 
 const dayFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' });
 function riyadhDay(now = new Date()) {
-  const parts = Object.fromEntries(dayFormatter.formatToParts(new Date(now)).map(p => [p.type, p.value]));
+  const d = now instanceof Date ? now : new Date(now ?? Date.now());
+  const validDate = isNaN(d.getTime()) ? new Date() : d;
+  const parts = Object.fromEntries(dayFormatter.formatToParts(validDate).map(p => [p.type, p.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 

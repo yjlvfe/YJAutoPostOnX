@@ -2,7 +2,9 @@
 
 const RIYADH = 'Asia/Riyadh';
 function riyadhDateParts(date = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: RIYADH, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+  const d = date instanceof Date ? date : new Date(date ?? Date.now());
+  const validDate = isNaN(d.getTime()) ? new Date() : d;
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: RIYADH, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(validDate);
   return Object.fromEntries(parts.filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
 }
 function isDue({ hour = 9, minute = 0 } = {}, date = new Date()) {

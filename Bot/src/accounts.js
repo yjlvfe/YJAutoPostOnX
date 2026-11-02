@@ -191,7 +191,18 @@ class AccountManager {
   }
 
   async replaceFromCsv(input) {
-    const rows = parseCsv(input, { required: ['account'], rejectFormulas: true });
+    let rows;
+    try {
+      rows = parseCsv(input, { required: ['account'], rejectFormulas: true });
+    } catch (err) {
+      if (err.message && (err.message.includes('must not be empty') || err.message.includes('at least one row'))) {
+        throw new Error('EMPTY_ACCOUNTS_CSV: Refusing to replace accounts with an empty CSV file');
+      }
+      throw err;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new Error('EMPTY_ACCOUNTS_CSV: Refusing to replace accounts with an empty CSV file');
+    }
     return this.replace(rows.map(row => ({
       ...row,
       id: row.account,

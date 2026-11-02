@@ -117,7 +117,7 @@ class TelegramTransport {
   async deleteMessage(chatId, messageId) {
     return this._deleteMessage({ chat_id: chatId, message_id: messageId }).catch(() => {});
   }
-  keyboard(page = 'main', customRows) {
+  keyboard(page = 'main', customRows, options = {}) {
     const rows = customRows || PAGES[page] || PAGES.main;
     const normal = rows.flatMap(row => {
       const labels = row.filter(text => text !== 'رجوع');
@@ -126,8 +126,9 @@ class TelegramTransport {
     if (rows.flat().includes('رجوع')) normal.push(['رجوع']);
     // Keep the existing rows and labels; the current theme includes Back and
     // dynamically generated account buttons, not just the top-level menu.
+    const customStyles = options.styles || {};
     return {
-      keyboard: normal.map(row => row.map(text => ({ text, style: MENU_BUTTON_STYLES[text] || 'primary' }))),
+      keyboard: normal.map(row => row.map(text => ({ text, style: customStyles[text] || MENU_BUTTON_STYLES[text] || 'primary' }))),
       resize_keyboard: true,
       is_persistent: true,
       one_time_keyboard: false

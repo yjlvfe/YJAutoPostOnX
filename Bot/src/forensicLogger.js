@@ -62,7 +62,9 @@ class ForensicLogger {
           state.forensicLogs = state.forensicLogs.filter(e => typeof e.epoch === 'number' && e.epoch >= cutoff);
           return state;
         });
-      } catch {}
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'store', error: err.message }) + '\n');
+      }
     }
 
     // 2. Persist to JSONL file
@@ -70,7 +72,9 @@ class ForensicLogger {
       try {
         const line = JSON.stringify(record) + '\n';
         await fsp.appendFile(this.logFile, line, { mode: 0o600 });
-      } catch {}
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'file', error: err.message }) + '\n');
+      }
     }
 
     return record;
@@ -90,7 +94,9 @@ class ForensicLogger {
           prunedCount += (before - state.forensicLogs.length);
           return state;
         });
-      } catch {}
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'store_prune', error: err.message }) + '\n');
+      }
     }
 
     // Prune JSONL file
@@ -112,7 +118,9 @@ class ForensicLogger {
           }
           await fsp.writeFile(this.logFile, retained.length ? retained.join('\n') + '\n' : '', { mode: 0o600 });
         }
-      } catch {}
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'file_prune', error: err.message }) + '\n');
+      }
     }
 
     return { prunedCount, cutoff };
@@ -158,6 +166,79 @@ class ForensicLogger {
     if (sinceEpoch) filtered = filtered.filter(l => l.epoch >= sinceEpoch);
 
     return filtered.slice(-limit);
+  }
+
+  async reconcile(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
+    const cutoff = now - this.maxAgeMs;
+    const storeLogs = [];
+    if (this.store) {
+      try {
+        const state = await this.store.load();
+        if (Array.isArray(state.forensicLogs)) {
+          storeLogs.push(...state.forensicLogs);
+        }
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_store_error', error: err.message }) + '\n');
+      }
+    }
+
+    const fileLogs = [];
+    if (this.logFile) {
+      try {
+        const content = await fsp.readFile(this.logFile, 'utf8').catch(() => '');
+        if (content) {
+          for (const line of content.split('\n').filter(Boolean)) {
+            try { fileLogs.push(JSON.parse(line)); } catch {}
+          }
+        }
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_file_error', error: err.message }) + '\n');
+      }
+    }
+
+    const map = new Map();
+    for (const log of [...storeLogs, ...fileLogs]) {
+      if (!log || !log.id) continue;
+      if (typeof log.epoch === 'number' && log.epoch < cutoff) continue;
+      map.set(log.id, log);
+    }
+
+    const reconciled = Array.from(map.values()).sort((a, b) => (a.epoch || 0) - (b.epoch || 0));
+
+    let updatedStore = false;
+    if (this.store) {
+      try {
+        await this.store.update(state => {
+          state.forensicLogs = reconciled;
+          return state;
+        });
+        updatedStore = true;
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_store_write_error', error: err.message }) + '\n');
+      }
+    }
+
+    let updatedFile = false;
+    if (this.logFile) {
+      try {
+        const content = reconciled.map(r => JSON.stringify(r)).join('\n') + (reconciled.length ? '\n' : '');
+        const tempPath = `${this.logFile}.${crypto.randomUUID()}.tmp`;
+        await fsp.writeFile(tempPath, content, { mode: 0o600 });
+        await fsp.rename(tempPath, this.logFile);
+        updatedFile = true;
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_file_write_error', error: err.message }) + '\n');
+      }
+    }
+
+    return {
+      reconciled: true,
+      totalEntries: reconciled.length,
+      storeEntries: storeLogs.length,
+      fileEntries: fileLogs.length,
+      updatedStore,
+      updatedFile
+    };
   }
 }
 

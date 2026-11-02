@@ -1135,17 +1135,21 @@ async function run({
         reconcileLinks();
         // Panel delivery must never gate incoming controls or scheduled work.
         trackPanel(ui.refreshPanels());
-        const schedule = (await bot.settings.get()).schedule;
-        const now = clock();
-        if (schedule.enabled && isDue(schedule, now)) {
-          const parts = riyadhDateParts(now);
-          const day = `${parts.year}-${parts.month}-${parts.day}`;
-          let due = false;
-          await bot.store.update(current => {
-            if (current.uiScheduleDay !== day) { current.uiScheduleDay = day; due = true; }
-            return current;
-          });
-          if (due) await ui.startScheduled();
+        try {
+          const schedule = (await bot.settings.get()).schedule;
+          const now = clock();
+          if (schedule.enabled && isDue(schedule, now)) {
+            const parts = riyadhDateParts(now);
+            const day = `${parts.year}-${parts.month}-${parts.day}`;
+            let due = false;
+            await bot.store.update(current => {
+              if (current.uiScheduleDay !== day) { current.uiScheduleDay = day; due = true; }
+              return current;
+            });
+            if (due) await ui.startScheduled();
+          }
+        } catch (scheduleErr) {
+          logger.error(JSON.stringify({ event: 'schedule_check_error', message: scheduleErr.message }));
         }
         const updates = await api.getUpdates({ offset, timeout: pollTimeout, allowed_updates: ['message', 'callback_query'] }) || [];
         conflictRetries = 0;
@@ -1200,8 +1204,15 @@ async function run({
                   const file = await api.getFile({ file_id: raw.message.document.file_id });
                   csv = (await api.downloadFile(file.file_path)).toString('utf8');
                 }
-                const accounts = await bot.accounts.replaceFromCsv(csv);
-                return bot.transport.sendMessage(destination, `تم استبدال الحسابات (${accounts.length}).`);
+                try {
+                  const accounts = await bot.accounts.replaceFromCsv(csv);
+                  return bot.transport.sendMessage(destination, `تم استبدال الحسابات (${accounts.length}).`);
+                } catch (err) {
+                  if (err.message && err.message.includes('EMPTY_ACCOUNTS_CSV')) {
+                    return bot.transport.sendMessage(destination, '⚠️ تم رفض استبدال الحسابات: ملف CSV فارغ أو لا يحتوي على أي حسابات.');
+                  }
+                  throw err;
+                }
               },
               cookie: async (request, raw) => {
                 const destination = raw.message.chat.id;
