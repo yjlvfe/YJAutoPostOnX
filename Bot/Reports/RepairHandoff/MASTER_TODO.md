@@ -135,6 +135,52 @@ Achieve full production recovery following post-369 ambiguous results and duplic
 
 ---
 
+## 2.7. Round 4: Production Hardening, 15 Findings Closure & NordVPN Thrashing Elimination (Milestone M6)
+
+### Objective
+Resolve the remaining 15 open findings across Phases P3 and P4, eliminate NordVPN container restart thrashing on transient disconnects, implement optimistic concurrency control (OCC) and sync transactions in `SqliteStore`, reject empty accounts CSV uploads fail-closed, consolidate duplicate table formatting into `tableUtils.js`, harden forensic logger durability, and guarantee zero regression across all test tiers.
+
+### Round 4 Task Matrix
+
+| Task / Feature ID | Module / Component | Task Description | Acceptance Criteria | Antigravity Status | Codex Status | Evidence / Verification |
+|---|---|---|---|:---:|:---:|---|
+| **R4-NORDVPN** | `Bot/docker/entrypoint.sh`, `sticky-health.sh` | Eliminate NordVPN reconnect thrashing; add resilient country-level fallback when pinned server disconnects; 60s failure backoff. | • 0 container restart loops<br>• 5/5 VPN slots healthy<br>• Restarts=0 | **TESTED_PASS** | **PENDING** | `docker_vpn_live_slots.test.js`<br>Live container uptime verified |
+| **R4-SQLITE-OCC** | `Bot/src/sqliteStore.js` | Multi-process optimistic concurrency (`revision` check), reject async functions inside transactions fail-closed, WAL auto-checkpoint. | • OCC retries on revision conflict<br>• Async inside transaction rejected<br>• Node >= 22.5.0 enforced | **TESTED_PASS** | **PENDING** | `p3_p4_findings_verification.test.js` (Test 2 PASS) |
+| **R4-EMPTYCSV** | `Bot/src/accounts.js`, `runner.js` | Reject empty or header-only accounts CSV uploads fail-closed (`EMPTY_ACCOUNTS_CSV`); alert operator via Telegram. | • Empty upload rejected<br>• Preserves existing accounts<br>• User-friendly Arabic alert | **TESTED_PASS** | **PENDING** | `p3_p4_findings_verification.test.js` (Test 1 PASS) |
+| **R4-FORENSIC** | `Bot/src/forensicLogger.js` | Atomic two-way `reconcile()` between SQLite store and `forensic.jsonl`; tolerate corrupted JSONL lines; log structured stderr on I/O error. | • Atomic deduplication by ID<br>• Corrupt lines ignored<br>• Stderr structured error logged | **TESTED_PASS** | **PENDING** | `p3_p4_findings_verification.test.js` (Test 4 PASS) |
+| **R4-TIMEZONE** | `Bot/src/quota.js`, `scheduling.js` | Defensive parsing of dates and timestamps for exact Asia/Riyadh calendar boundaries across all edge cases. | • Robust string/timestamp conversion<br>• Riyadh calendar day preserved | **TESTED_PASS** | **PENDING** | `p3_p4_findings_verification.test.js` (Test 5 PASS) |
+| **R4-TABLES** | `Bot/src/tableUtils.js`, `accountTable.js` | Consolidate table formatting into single reusable `tableUtils.js`; eliminate duplicate rendering code. | • Centralized table generator<br>• Clean HTML output with caption | **TESTED_PASS** | **PENDING** | `p3_p4_findings_verification.test.js` (Test 3 PASS) |
+
+### Governance & Signoff Status (Round 4)
+- **Phase P1 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Phase P2 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Codex Review Status**: Strictly **PENDING** across all findings and Round 4 tasks.
+
+---
+
+## 2.8. Round 5: Real Telegram Stop Lifecycle & Per-RunId CSV Delivery Repair (Milestone M7)
+
+### Objective
+Resolve the operational defect where stopping the bot from Telegram suppressed the cumulative daily links CSV export with `reason: duplicate_content_hash` and failed to send an explicit stop acknowledgment to the operator. Scope export deduplication strictly to `(chatId, runId)` idempotency, deliver daily CSV on independent cycle stop even when 0 new items were posted in that cycle, send clear Arabic notice when 0 links exist today, acknowledge stop requests immediately in Telegram chat, flush link outbox immediately upon cycle finish, and maintain 100% safety invariants across quotas and ambiguous items.
+
+### Round 5 Task Matrix
+
+| Task / Feature ID | Module / Component | Task Description | Acceptance Criteria | Antigravity Status | Codex Status | Evidence / Verification |
+|---|---|---|---|:---:|:---:|---|
+| **R5-CSV-RUNID** | `Bot/src/linkExports.js` | Scope terminal CSV export deduplication to `(chatId, runId)` idempotency (`alreadyDelivered`, `alreadyOutbox`, `existingEvent`). Independent cycles (`runId_B !== runId_A`) on same day reliably deliver daily CSV. | • Cycle B delivers daily CSV even if 0 new items posted<br>• Replays of same runId safely suppressed (`duplicate_run_id`)<br>• Dual-layer protection in `deliver()` | **TESTED_PASS** | **PENDING** | `m5_cycle_report_delivery.test.js` (Tests 1, 2, 3 PASS) |
+| **R5-EMPTY-NOTICE** | `Bot/src/linkExports.js` | When a cycle finishes on a day with 0 confirmed published links, enqueue and deliver clear Arabic notice: `لا توجد روابط منشورات مؤكدة لهذا اليوم.` protected by per-runId idempotency. | • 0 CSV files sent<br>• Exactly 1 clear Arabic text notice sent<br>• Replay of empty cycle suppressed | **TESTED_PASS** | **PENDING** | `m5_cycle_report_delivery.test.js` (Test 4 PASS) |
+| **R5-STOP-NOTIFY** | `Bot/src/telegramUi.js` | In `stop()`, when stop request is accepted (`accepted === true`), immediately dispatch explicit Arabic acknowledgment message to chat prior to cancellation. | • Immediate Telegram chat confirmation<br>• Rapid duplicate clicks rejected (`stopped: false`, 0 duplicate alerts) | **TESTED_PASS** | **PENDING** | `m5_cycle_report_delivery.test.js` (Test 6 PASS) |
+| **R5-OUTBOX-FLUSH** | `Bot/src/runner.js` | In `onCycleFinished`, immediately invoke `links.flush()` to drain terminal outbox obligations without waiting for periodic polling. | • Terminal export drained instantly<br>• Zero outbox lag on cycle stop | **TESTED_PASS** | **PENDING** | `m5_cycle_report_delivery.test.js` (Tests 1, 3 PASS) |
+| **R5-SAFETY-GATES** | `Bot/src/linkExports.js`, `runner.js` | Maintain 100% isolation of quota values (untouched by report delivery or stop events); preserve ambiguous post quarantine; quarantine ambiguous Telegram sends. | • Quota debited strictly on published posts<br>• Ambiguous items excluded from CSV<br>• Failed sends quarantined | **TESTED_PASS** | **PENDING** | `m5_cycle_report_delivery.test.js` (Test 5 PASS)<br>Production DB inspection |
+| **R5-VERIFICATION** | Full Test Suite & VPS Health | Execute all test suites across Node.js and Python; verify live systemd service (PID 491101), 5/5 Docker VPNs, and zero host IP leak. | • 321 Node.js tests PASS (0 fail)<br>• 183 Python tests PASS (0 fail)<br>• 7 reproducer tests PASS (0 fail)<br>• 5/5 VPNs healthy, 0 host leak | **TESTED_PASS** | **PENDING** | `npm test`<br>`unittest discover`<br>`p2_reproducer_test.py` |
+
+### Governance & Signoff Status (Round 5)
+- **Phase P1 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Phase P2 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Codex Review Status**: Strictly **PENDING** across all findings and Round 5 tasks.
+
+---
+
 ## 3. Comprehensive Master Finding Registry (All 33 Findings)
 
 | Finding ID | Severity | Phase | Finding Title / Description | Affected Module | Antigravity Status | Codex Status |

@@ -692,3 +692,31 @@ Following previous test passes (369/369), production stability encountered post-
   - NordVPN infrastructure: All 5 slots (`yj_autopost_vpn_1..5`) active and healthy with `Restarts=0` and distinct public exit IPs. Zero host IP leaks.
   - Production service: `yj-telegram-bot.service` active and responsive without Telegram 409 conflicts.
 - **Governance**: All 33 findings in `MASTER_TODO.md` updated to **`TESTED_PASS`**. Codex Status remains **`PENDING`**. User P1/P2 final signoff remains **`PENDING`**.
+
+#### Milestone M7 (Round 5): Telegram Stop Lifecycle & Per-RunId CSV Export Delivery Repair
+- **Date**: 2026-11-02 (Riyadh Time: UTC+03:00)
+- **Problem Statement & Root Cause (D01 Forensic Audit)**:
+  - When the operator clicked "🔴 إيقاف" to halt the publishing cycle, no stop acknowledgment message was sent to Telegram chat, and the cumulative daily CSV export was silently suppressed.
+  - Forensic audit identified that `linkExports.js` (`enqueueTerminal`) suppressed CSV generation whenever the daily cumulative CSV content hash matched *any* prior delivery on the same calendar day (`successfulDeliveries.some(entry => entry.contentHash === contentHash)`). Consequently, any subsequent cycle stop that finished without posting new tweets was suppressed with `reason: duplicate_content_hash`, resulting in complete silence.
+  - Furthermore, `telegramUi.js` only edited inline buttons on the existing dashboard panel without dispatching a direct chat message to confirm receipt of the stop request.
+- **Surgical Repairs (D02 Implementation)**:
+  - `Bot/src/linkExports.js`:
+    - Replaced daily cumulative hash deduplication with strict per-`runId` idempotency (`existingEvent`, `alreadyDelivered`, `alreadyOutbox`).
+    - Independent cycles (`runId_B !== runId_A`) on the same day reliably deliver today's cumulative confirmed links CSV even when 0 new items were posted in that specific cycle.
+    - Replays of the same `runId` are safely deduplicated (`reason: duplicate_run_id`).
+    - Added empty links handling (`kind: 'empty'`): when 0 links exist today, delivers clear Arabic text notice `لا توجد روابط منشورات مؤكدة لهذا اليوم.` with per-`runId` idempotency.
+    - Added secondary idempotency guards in `deliver()` for both document and empty message dispatches.
+  - `Bot/src/telegramUi.js`:
+    - In `stop()`, when a stop request is accepted (`accepted === true`), immediately dispatches an explicit Arabic acknowledgment text message (`⏹️ تم استقبال طلب إيقاف دورة النشر وجاري إنهاء الدورة وإرسال التقرير...`) to the operator's chat prior to cancellation and panel settlement.
+    - Rapid duplicate clicks see `cycle.state !== 'running'`, set `accepted = false`, and emit 0 duplicate messages.
+  - `Bot/src/runner.js`:
+    - In `onCycleFinished`, immediately invokes `links.flush()` to drain terminal outbox obligations without waiting for periodic polling ticks.
+- **Verification & Evidence (D03 & D04 Audits)**:
+  - Dedicated regression test suite `Bot/test/m5_cycle_report_delivery.test.js`: **6/6 PASS** (100% pass rate).
+  - Node.js test suites: **34/34 test files PASSED** (321 total tests, 0 failures, 0 skipped, 100% pass rate).
+  - Python test suites: **183/183 unit tests PASSED** + **7/7 reproducer tests PASSED** (100% pass rate).
+  - Grand total: **511 tests PASS / 0 FAIL**.
+  - Systemd Service: `yj-telegram-bot.service` active and healthy (PID 491101, WAL revision 53375, 4353 pending, 89 published, 13 ambiguous).
+  - Docker VPNs: 5/5 healthy on ports 18801-18805 with pairwise distinct public IPs and zero host IP leak.
+  - Safety Invariants: 0 live tweets published during testing; quota completely isolated from stop/report events; ambiguous post quarantine 100% preserved.
+- **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
