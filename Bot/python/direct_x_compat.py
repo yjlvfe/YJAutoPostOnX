@@ -41,6 +41,43 @@ _BANNED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_CAPTCHA_KEYWORDS = (
+    'captcha', 'arkose', 'funcaptcha', 'verification_required',
+    'verification required', 'challenge_required', 'challenge required',
+    'temporarily locked', 'unlock your account', 'account/access',
+    'login_verification', 'user is locked', 'account is locked'
+)
+
+_COOKIE_EXPIRED_KEYWORDS = (
+    'token is expired', 'session expired', 'expired token',
+    'cookie expired', 'cookies expired', 'session invalidated',
+    'invalid session', 'invalid or expired token'
+)
+
+_AUTH_REJECTED_KEYWORDS = (
+    'bad authentication data', 'could not authenticate you',
+    'auth rejected', 'authentication failed', 'unauthorized',
+    'incorrect password', 'account compromised', 'unable to verify credentials'
+)
+
+_RATE_LIMIT_KEYWORDS = (
+    'rate limit', 'rate_limit', 'too many requests',
+    'over capacity', 'over daily status update limit',
+    'exceeded rate limit', 'user is over daily status update limit'
+)
+
+_NETWORK_PROXY_KEYWORDS = (
+    'proxy', 'socks', 'socks5', 'connection refused', 'connection reset',
+    'connection error', 'connecterror', 'timed out', 'timeout',
+    'network unreachable', 'host unreachable', 'name resolution failure',
+    'getaddrinfo failed', 'ssl error', 'remote protocol error', 'network error'
+)
+
+_AMBIGUOUS_KEYWORDS = (
+    'ambiguous', 'unconfirmed', 'publish_confirmation_missing',
+    'dispatch_already_attempted', 'eventual consistency'
+)
+
 
 def _compat_user_data(data):
     """Normalize and patch GraphQL user data so legacy entities (description.urls, url.urls, etc.)
@@ -91,13 +128,18 @@ def _compat_user_data(data):
     return result
 
 
-def classify_x_account_failure(raw_json=None, errors=None, text=''):
+def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=None):
     """
-    Inspect X responses/errors and classify failure into:
-      'banned'  -> Permanent suspension (64, 63, 141, suspended)
-      'captcha' -> Verification/Arkose/Lock challenge (326, 353, 399, 241, bounce_location, captcha, challenge)
-      'auth'    -> Bad or expired credentials (32, 89, 135, 215)
-      None      -> No terminal account failure detected
+    Inspect X responses/errors and classify failure into one of 8 granular categories:
+      'banned'              -> Permanent suspension (64, 63, 141, suspended)
+      'captcha'             -> Verification/Arkose/Lock challenge (326, 353, 399, 241, bounce_location, captcha, challenge)
+      'cookie_expired'      -> Expired/invalid session cookies (89, token is expired, session expired)
+      'auth_rejected'       -> Rejected credentials / unauthorized (32, 135, 215, 99, 231, bad auth)
+      'rate_limit'          -> API rate limit or status limit exceeded (88, 185, HTTP 429)
+      'network_proxy_error' -> Proxy, SOCKS5, DNS, connection reset/timeout errors
+      'ambiguous'           -> Unconfirmed dispatch, eventual consistency, or outcome unknown
+      'unknown'             -> Unclassified account failure with explicit error present
+      None                  -> No account failure detected
     """
     if isinstance(raw_json, dict) and not errors:
         errors = raw_json.get('errors', [])
@@ -139,17 +181,26 @@ def classify_x_account_failure(raw_json=None, errors=None, text=''):
     if (codes & {64, 63, 141}) or bool(_BANNED_PATTERN.search(combined)):
         return 'banned'
 
-    captcha_kw = (
-        'captcha', 'arkose', 'funcaptcha', 'verification_required',
-        'verification required', 'challenge_required', 'challenge required',
-        'temporarily locked', 'unlock your account', 'account/access',
-        'login_verification', 'user is locked', 'account is locked'
-    )
-    if codes & {326, 353, 399, 241} or has_bounce or any(w in combined for w in captcha_kw):
+    if (codes & {326, 353, 399, 241}) or has_bounce or any(w in combined for w in _CAPTCHA_KEYWORDS):
         return 'captcha'
 
-    if codes & {32, 89, 135, 215}:
-        return 'auth'
+    if (codes & {88, 185}) or http_status == 429 or any(w in combined for w in _RATE_LIMIT_KEYWORDS):
+        return 'rate_limit'
+
+    if (codes & {89}) or any(w in combined for w in _COOKIE_EXPIRED_KEYWORDS):
+        return 'cookie_expired'
+
+    if (codes & {32, 135, 215, 99, 231}) or any(w in combined for w in _AUTH_REJECTED_KEYWORDS):
+        return 'auth_rejected'
+
+    if any(w in combined for w in _NETWORK_PROXY_KEYWORDS):
+        return 'network_proxy_error'
+
+    if any(w in combined for w in _AMBIGUOUS_KEYWORDS):
+        return 'ambiguous'
+
+    if 'unknown' in combined or 'unspecified' in combined:
+        return 'unknown'
 
     return None
 

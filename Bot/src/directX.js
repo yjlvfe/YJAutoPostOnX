@@ -162,8 +162,28 @@ class DirectXAdapter {
             reason: result.reason || 'publish_not_posted_on_timeline'
           };
         }
+        if (result.rateLimit === true || result.status === 'rate_limit') {
+          return {
+            status: 'rate_limit',
+            published: false,
+            posted: false,
+            rateLimit: true,
+            ambiguous: false,
+            retryable: true,
+            accountFailure: 'rate_limit',
+            retryAfterSeconds: result.retryAfterSeconds || 60,
+            reason: result.reason || 'rate_limit',
+          };
+        }
         if (state.used || result.ambiguous) return { ...ambiguous(result.reason || 'publish_unverified'), accountFailure: result.accountFailure };
-        return { ...unsent(result.reason || 'auth_pre_dispatch_failed'), accountFailure: result.accountFailure, readDiagnostic: readDiagnostic(result.readDiagnostic), retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure };
+        return {
+          ...unsent(result.reason || (result.rateLimit ? 'rate_limit' : 'auth_pre_dispatch_failed')),
+          accountFailure: result.accountFailure || (result.rateLimit ? 'rate_limit' : undefined),
+          rateLimit: Boolean(result.rateLimit),
+          retryAfterSeconds: result.retryAfterSeconds,
+          readDiagnostic: readDiagnostic(result.readDiagnostic),
+          retryable: result.retryable === true && result.reason === 'identity_read_unavailable' && !result.accountFailure
+        };
       }
       if (!state.used || !numericId(result.tweetId) || result.userId !== state.identity.userId || handle(result.username) !== state.identity.username) {
         return ambiguous('publish_author_or_id_unverified');

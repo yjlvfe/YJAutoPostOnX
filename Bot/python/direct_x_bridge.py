@@ -15,7 +15,54 @@ import urllib.parse
 
 # -I excludes even the script directory; add ONLY this owned directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from direct_x_compat import _compat_user_data
+from direct_x_compat import _compat_user_data, classify_x_account_failure
+
+KNOWN_ACCOUNT_FAILURES = {
+    'banned', 'captcha', 'cookie_expired', 'auth_rejected',
+    'rate_limit', 'network_proxy_error', 'ambiguous', 'unknown',
+    'auth',  # legacy alias
+}
+
+
+def extract_retry_after_seconds(exc, default=60):
+    if hasattr(exc, 'retry_after_seconds') and isinstance(exc.retry_after_seconds, (int, float)):
+        return max(60, min(900, int(exc.retry_after_seconds)))
+    import time
+    if hasattr(exc, 'rate_limit_reset') and isinstance(exc.rate_limit_reset, (int, float)):
+        diff = exc.rate_limit_reset - time.time()
+        return max(60, min(900, int(diff)))
+    headers = getattr(exc, 'headers', None)
+    if isinstance(headers, dict):
+        if 'retry-after' in headers:
+            try:
+                return max(60, min(900, int(float(headers['retry-after']))))
+            except (ValueError, TypeError):
+                pass
+        if 'x-rate-limit-reset' in headers:
+            try:
+                diff = float(headers['x-rate-limit-reset']) - time.time()
+                return max(60, min(900, int(diff)))
+            except (ValueError, TypeError):
+                pass
+    return max(60, min(900, int(default)))
+
+
+def is_rate_limit_exception(exc):
+    if getattr(exc, 'http_status', None) == 429:
+        return True
+    if getattr(exc, 'account_failure', None) == 'rate_limit':
+        return True
+    if getattr(exc, 'code', None) in (88, 185) or getattr(exc, 'error_code', None) in (88, 185):
+        return True
+    try:
+        import twikit.errors
+        if isinstance(exc, twikit.errors.TooManyRequests):
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return 'rate limit' in msg or 'too many requests' in msg or '429' in msg
+
 
 if sys.platform.startswith('linux'):
     try:
@@ -711,7 +758,7 @@ class DirectSession:
             if reason == 'identity_read_unavailable':
                 result['retryable'] = True
                 result['readDiagnostic'] = getattr(exc, 'read_diagnostic', None)
-            if getattr(exc, 'account_failure', None) in ('banned', 'captcha', 'auth'):
+            if getattr(exc, 'account_failure', None) in KNOWN_ACCOUNT_FAILURES:
                 result['accountFailure'] = getattr(exc, 'account_failure')
             return result;
         if not isinstance(text, str) or not text.strip(): return unsent('invalid_text')
@@ -732,6 +779,25 @@ class DirectSession:
         except Exception as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
+
+            # Rate Limit Fast Path: HTTP 429 during create_tweet means the tweet
+            # was rejected by X API. Propagate rate limit diagnostics immediately
+            # without falling into publish_confirmation_missing.
+            if is_rate_limit_exception(exc):
+                retry_after = extract_retry_after_seconds(exc, default=60)
+                return {
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': False,
+                    'retryable': True,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': str(exc)[:2048],
+                }
+
             # Dispatch crossed the fence — the tweet MAY have posted but the
             # response was lost (timeout/network glitch). Before marking
             # ambiguous, verify by reading the user's recent timeline.
@@ -758,14 +824,14 @@ class DirectSession:
                 timeline_res['userId'] = identity['userId']
                 timeline_res['recoveredFromTimeline'] = True
                 timeline_res['recovered_from_timeline'] = True
-                if account_failure in ('banned', 'captcha', 'auth'):
+                if account_failure in KNOWN_ACCOUNT_FAILURES:
                     timeline_res['accountFailure'] = account_failure
                 if x_error_code:
                     timeline_res['xErrorCode'] = x_error_code
                 return timeline_res
 
             result = uncertain('publish_confirmation_missing')
-            if account_failure in ('banned', 'captcha', 'auth'):
+            if account_failure in KNOWN_ACCOUNT_FAILURES:
                 result['accountFailure'] = account_failure
             if x_error_code:
                 result['xErrorCode'] = x_error_code
@@ -814,8 +880,11 @@ async def main():
             result['reason'] = 'identity_read_unavailable'
             result['retryable'] = True
             result['readDiagnostic'] = getattr(exc, 'read_diagnostic', None)
-        if getattr(exc, 'account_failure', None) in ('banned', 'captcha', 'auth'):
+        if getattr(exc, 'account_failure', None) in KNOWN_ACCOUNT_FAILURES:
             result['accountFailure'] = getattr(exc, 'account_failure')
+        if is_rate_limit_exception(exc):
+            result['rateLimit'] = True
+            result['retryAfterSeconds'] = extract_retry_after_seconds(exc)
         emit({'event': 'result', 'result': result})
     finally:
         if session:

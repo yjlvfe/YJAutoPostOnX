@@ -33,7 +33,7 @@ class TelegramUi {
     this.accountRefreshJob = null; this.accountRefreshRetryMs = accountRefreshRetryMs; this.destroyed = false;
     this.panelBlockedUntil = new Map(); this.panelLastEdit = new Map();
     this.onPanelTask = typeof onPanelTask === 'function' ? onPanelTask : null;
-    this.notify = notify; this.onCycleFinished = onCycleFinished; this.onCycleStop = onCycleStop; this.job = null; this.panelLocks = new Map(); this.actionLocks = new Map(); this.refreshTask = null;
+    this.notify = notify; this.onCycleFinished = onCycleFinished; this.onCycleStop = onCycleStop; this.job = null; this.activeRun = null; this.panelLocks = new Map(); this.actionLocks = new Map(); this.refreshTask = null;
     this.flows = new TelegramFlows(this, { downloadDocument, isolatedVerifier });
     this.startTicker();
   }
@@ -736,6 +736,7 @@ class TelegramUi {
   attach(snapshot) {
     if (this.job) return false;
     const runId = snapshot.runId;
+    this.activeRun = snapshot;
     const task = Promise.resolve().then(() => this.launch(snapshot)).then(async () => {
       await this.bot.store.update(s => {
         s.telegramUi ||= {};
@@ -752,7 +753,14 @@ class TelegramUi {
         if (s.cycle?.runId === runId) s.cycle = { ...s.cycle, state: 'error', runId: null, reason: 'تعذر إكمال الدورة' };
         return s;
       });
-    }).finally(async () => { if (this.onCycleFinished) await this.onCycleFinished(snapshot).catch(() => {}); if (this.job === task) this.job = null; await this.refreshPanels(true).catch(() => {}); });
+    }).finally(async () => {
+      if (this.onCycleFinished) await this.onCycleFinished(snapshot).catch(() => {});
+      if (this.job === task) {
+        this.job = null;
+        this.activeRun = null;
+      }
+      await this.refreshPanels(true).catch(() => {});
+    });
     this.job = task; return true;
   }
   async resume(snapshot) {
@@ -821,11 +829,22 @@ class TelegramUi {
             a.checkGeneration = crypto.randomUUID();
           }
         }
+        if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
+          s.telegramUi.run.accountIds = [];
+          s.telegramUi.run.cursor = 0;
+        }
+        if (s.vpnSlots) {
+          s.vpnSlots = {};
+        }
         return s;
       });
+      if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
+        this.activeRun.accountIds.length = 0;
+        this.activeRun.cursor = 0;
+      }
       const state = await this.bot.store.load();
       for (const a of (state.accounts || [])) {
-        this.bot.vpnManager?.rotate(a.id).catch(() => {});
+        this.bot.vpnManager?.release?.(a.id).catch(() => {});
       }
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
@@ -853,7 +872,7 @@ class TelegramUi {
         await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
         return { banned: true };
       }
-      const isCurrentlyActive = account.enabled !== false && account.status !== 'محظور' && account.status !== 'كابتشا' && account.status !== 'غير مفعل';
+      const isCurrentlyActive = account.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(account.status);
       if (isCurrentlyActive) {
         await this.bot.store.update(s => {
           const a = (s.accounts || []).find(acc => acc.id === targetId);
@@ -862,9 +881,25 @@ class TelegramUi {
             a.status = 'غير مفعل';
             a.checkGeneration = crypto.randomUUID();
           }
+          if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
+            s.telegramUi.run.accountIds = s.telegramUi.run.accountIds.filter(id => id !== targetId);
+            if (s.telegramUi.run.accountIds.length === 0 || (typeof s.telegramUi.run.cursor === 'number' && s.telegramUi.run.cursor >= s.telegramUi.run.accountIds.length)) {
+              s.telegramUi.run.cursor = 0;
+            }
+          }
+          if (s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
+            delete s.vpnSlots[targetId];
+          }
           return s;
         });
-        this.bot.vpnManager?.rotate(targetId).catch(() => {});
+        if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
+          const idx = this.activeRun.accountIds.indexOf(targetId);
+          if (idx !== -1) this.activeRun.accountIds.splice(idx, 1);
+          if (typeof this.activeRun.cursor === 'number' && this.activeRun.cursor >= this.activeRun.accountIds.length) {
+            this.activeRun.cursor = 0;
+          }
+        }
+        this.bot.vpnManager?.release?.(targetId).catch(() => {});
         this.bot.forensicLogger?.record({
           eventType: 'manual_toggle',
           accountId: targetId,
@@ -879,7 +914,7 @@ class TelegramUi {
         await acknowledge(`تم تعطيل الحساب @${account.username || account.label}`);
         return { toggled: false };
       } else {
-        const activeCount = (state.accounts || []).filter(a => a.enabled !== false && a.status !== 'محظور' && a.status !== 'غير مفعل').length;
+        const activeCount = (state.accounts || []).filter(a => a.id !== targetId && a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status)).length;
         if (activeCount >= 5) {
           await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
           return { limitExceeded: true };
@@ -890,12 +925,26 @@ class TelegramUi {
             a.enabled = true;
             a.status = 'مفعل';
             a.checkGeneration = crypto.randomUUID();
+            a.failures = 0;
           }
           if (s.telegramUi?.accountChecks?.[targetId]) {
             delete s.telegramUi.accountChecks[targetId];
           }
+          if (s.posting?.cooling?.[targetId]) {
+            delete s.posting.cooling[targetId];
+          }
+          if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
+            if (!s.telegramUi.run.accountIds.includes(targetId)) {
+              s.telegramUi.run.accountIds.push(targetId);
+            }
+          }
           return s;
         });
+        if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
+          if (!this.activeRun.accountIds.includes(targetId)) {
+            this.activeRun.accountIds.push(targetId);
+          }
+        }
         this.bot.vpnManager?.rotate(targetId).catch(() => {});
         this.bot.forensicLogger?.record({
           eventType: 'manual_toggle',
@@ -1033,7 +1082,7 @@ class TelegramUi {
         await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
         return { banned: true };
       }
-      const activeCount = (state.accounts || []).filter(a => a.enabled !== false && a.status !== 'محظور' && a.status !== 'غير مفعل').length;
+      const activeCount = (state.accounts || []).filter(a => a.id !== targetId && a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status)).length;
       if (activeCount >= 5) {
         await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
         return { limitExceeded: true };
@@ -1044,12 +1093,26 @@ class TelegramUi {
           a.enabled = true;
           a.status = 'مفعل';
           a.checkGeneration = crypto.randomUUID();
+          a.failures = 0;
         }
         if (s.telegramUi?.accountChecks?.[targetId]) {
           delete s.telegramUi.accountChecks[targetId];
         }
+        if (s.posting?.cooling?.[targetId]) {
+          delete s.posting.cooling[targetId];
+        }
+        if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
+          if (!s.telegramUi.run.accountIds.includes(targetId)) {
+            s.telegramUi.run.accountIds.push(targetId);
+          }
+        }
         return s;
       });
+      if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
+        if (!this.activeRun.accountIds.includes(targetId)) {
+          this.activeRun.accountIds.push(targetId);
+        }
+      }
       this.bot.vpnManager?.rotate(targetId).catch(() => {});
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
@@ -1081,9 +1144,25 @@ class TelegramUi {
           a.status = 'غير مفعل';
           a.checkGeneration = crypto.randomUUID();
         }
+        if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
+          s.telegramUi.run.accountIds = s.telegramUi.run.accountIds.filter(id => id !== targetId);
+          if (s.telegramUi.run.accountIds.length === 0 || (typeof s.telegramUi.run.cursor === 'number' && s.telegramUi.run.cursor >= s.telegramUi.run.accountIds.length)) {
+            s.telegramUi.run.cursor = 0;
+          }
+        }
+        if (s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
+          delete s.vpnSlots[targetId];
+        }
         return s;
       });
-      this.bot.vpnManager?.rotate(targetId).catch(() => {});
+      if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
+        const idx = this.activeRun.accountIds.indexOf(targetId);
+        if (idx !== -1) this.activeRun.accountIds.splice(idx, 1);
+        if (typeof this.activeRun.cursor === 'number' && this.activeRun.cursor >= this.activeRun.accountIds.length) {
+          this.activeRun.cursor = 0;
+        }
+      }
+      this.bot.vpnManager?.release?.(targetId).catch(() => {});
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
@@ -1141,7 +1220,14 @@ class TelegramUi {
 
     if (parsed.action === 'delete_confirm' && parsed.value) {
       const targetId = parsed.value;
-      this.bot.vpnManager?.rotate(targetId).catch(() => {});
+      if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
+        const idx = this.activeRun.accountIds.indexOf(targetId);
+        if (idx !== -1) this.activeRun.accountIds.splice(idx, 1);
+        if (typeof this.activeRun.cursor === 'number' && this.activeRun.cursor >= this.activeRun.accountIds.length) {
+          this.activeRun.cursor = 0;
+        }
+      }
+      this.bot.vpnManager?.release?.(targetId).catch(() => {});
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
@@ -1155,6 +1241,18 @@ class TelegramUi {
           return s;
         });
       }
+      await this.bot.store.update(s => {
+        if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
+          s.telegramUi.run.accountIds = s.telegramUi.run.accountIds.filter(id => id !== targetId);
+          if (s.telegramUi.run.accountIds.length === 0 || (typeof s.telegramUi.run.cursor === 'number' && s.telegramUi.run.cursor >= s.telegramUi.run.accountIds.length)) {
+            s.telegramUi.run.cursor = 0;
+          }
+        }
+        if (s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
+          delete s.vpnSlots[targetId];
+        }
+        return s;
+      });
       const state = await this.bot.store.load();
       const accounts = state.accounts || [];
       const text = accounts.length ? 'اختر الحساب لعرض إعداداته:' : 'لا توجد حسابات مسجلة في النظام.';

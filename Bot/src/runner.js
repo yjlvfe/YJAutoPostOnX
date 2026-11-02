@@ -18,12 +18,13 @@ const { normalizeSubnet } = require('./forensicLogger');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 class SingleInstanceLock {
-  constructor(lockPath, { timeoutMs = 1_000, retryMs = 50, staleMs = 120_000 } = {}) {
+  constructor(lockPath, { timeoutMs = 15_000, retryMs = 50, staleMs = 120_000 } = {}) {
     this.lockPath = path.resolve(lockPath);
     this.timeoutMs = timeoutMs;
     this.retryMs = retryMs;
     this.staleMs = staleMs;
     this.token = null;
+    this.lastHolderPid = null;
   }
 
   get locked() { return Boolean(this.token); }
@@ -43,8 +44,17 @@ class SingleInstanceLock {
         if (error.code !== 'EEXIST') throw error;
         if (await this.recoverStale()) continue;
         if (Date.now() >= deadline) {
-          const locked = new Error(`Telegram runner lock is held: ${this.lockPath}`);
+          let holderPid = this.lastHolderPid;
+          try {
+            const current = JSON.parse(await fs.readFile(this.lockPath, 'utf8'));
+            if (Number.isInteger(current?.pid) && current.pid > 0) holderPid = current.pid;
+          } catch {}
+          const msg = holderPid
+            ? `Telegram runner lock is held by PID ${holderPid}: ${this.lockPath}`
+            : `Telegram runner lock is held: ${this.lockPath}`;
+          const locked = new Error(msg);
           locked.code = 'INSTANCE_LOCKED';
+          if (holderPid) locked.pid = holderPid;
           throw locked;
         }
         await sleep(Math.min(this.retryMs, Math.max(1, deadline - Date.now())));
@@ -62,10 +72,8 @@ class SingleInstanceLock {
       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
       // A long-lived polling service is not stale just because its lock is old.
       if (!dead) {
-        const locked = new Error(`Telegram runner lock is held by PID ${record.pid}: ${this.lockPath}`);
-        locked.code = 'INSTANCE_LOCKED';
-        locked.pid = record.pid;
-        throw locked;
+        this.lastHolderPid = record.pid;
+        return false;
       }
     }
     if (!(dead || (!record && Date.now() - stat.mtimeMs >= this.staleMs))) return false;
@@ -163,6 +171,7 @@ function selectAccount(state, run, item, now = new Date(), excluded = new Set())
   const available = id => {
     const account = (state.accounts || []).find(a => a.id === id && a.enabled !== false);
     if (!account || excluded.has(id)) return false;
+    if (['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(account.status) || (account.failures || 0) >= 3) return false;
     return accountCapacity(state, account, now).remaining > 0;
   };
   if (item.payload?.account) return ids.includes(item.payload.account) && available(item.payload.account) ? item.payload.account : null;
@@ -225,7 +234,9 @@ async function run({
   maxPolls = Infinity,
   sleepFn = sleep,
   lockPath = path.join(dataDir, 'telegram-runner.lock'),
-  lockTimeoutMs = 1_000,
+  lockTimeoutMs = 15_000,
+  conflictBackoffMs = 2_000,
+  maxConflictRetries = 1,
   logger = console,
   clock = () => new Date(),
   randomInt = (min, max) => min + Math.floor(Math.random() * (max - min)),
@@ -275,6 +286,7 @@ async function run({
         answerCallback: payload => api.answerCallbackQuery(payload)
       }
     });
+    await bot.queue.recoverProcessing({ state: 'ambiguous', reason: 'startup_crash_recovery' });
     const state = await bot.store.load();
     let offset = Number.isSafeInteger(state.telegram?.offset) ? state.telegram.offset : 0;
     const processed = new Set(Array.isArray(state.telegram?.processedUpdates) ? state.telegram.processedUpdates : []);
@@ -298,7 +310,7 @@ async function run({
       try {
         const current = await bot.store.load();
         // Drafts own reservations until onboarding completes; they are not stale.
-        const accountIds = [...new Set([...(current.accounts || []).map(a => a.id),
+        const accountIds = [...new Set([...(current.accounts || []).filter(a => a.enabled !== false).map(a => a.id),
           ...Object.values(current.telegramUi?.users || {}).map(u => u.draft?.id).filter(Boolean)])];
         const plan = await vpnSlots.reconcile({ accountIds, dryRun: true });
         if (plan.conflicts?.length) throw Object.assign(new Error('Unsafe VPN mappings'), { code: 'VPN_MAPPING_CONFLICT' });
@@ -440,9 +452,153 @@ async function run({
         const set = new Set([...cooling].filter(([, value]) => value.until > clock().getTime()).map(([id]) => id));
         return set;
       };
+
+      const handleAccountFailure = async ({
+        accountId,
+        account,
+        item,
+        claim,
+        session,
+        failure,
+        reason,
+        retryAfterSeconds
+      }) => {
+        const isPermanent = ['banned', 'captcha'].includes(failure);
+        const isRateLimit = failure === 'rate_limit' || Boolean(retryAfterSeconds) || reason === 'rate_limit';
+        let accountResult = {
+          failures: 0,
+          isolated: false,
+          status: null
+        };
+
+        const currentSubnet = session?.exitIp ? normalizeSubnet(session.exitIp) : null;
+
+        await bot.store.update(s => {
+          const acc = s.accounts?.find(a => a.id === accountId);
+          if (acc) {
+            if (isPermanent) {
+              acc.enabled = false;
+              acc.status = failure === 'captcha' ? 'كابتشا' : 'محظور';
+              acc.checkGeneration = crypto.randomUUID();
+              accountResult.isolated = true;
+              accountResult.status = acc.status;
+              if (currentSubnet) {
+                s.burnedSubnets ||= [];
+                const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
+                if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
+              }
+            } else if (isRateLimit) {
+              // Rate limit: cooling only, no strike increment
+            } else {
+              // Increment persistent failure strike in SQLite
+              acc.failures = (acc.failures || 0) + 1;
+              accountResult.failures = acc.failures;
+              if (acc.failures >= 3) {
+                acc.enabled = false;
+                acc.status = 'معزول (3 إخفاقات)';
+                acc.checkGeneration = crypto.randomUUID();
+                accountResult.isolated = true;
+                accountResult.status = acc.status;
+              }
+            }
+          }
+
+          // Pre-dispatch post transfer: revert to pending, remove attempt, unpin payload
+          const i = s.items?.find(x => x.id === item.id);
+          if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+            i.state = 'pending';
+            delete i.attempt;
+            if (i.payload?.account === accountId) {
+              delete i.payload.account;
+            }
+          }
+          if (s.posting) s.posting.publishingAt = null;
+          return s;
+        });
+
+        if (accountResult.isolated) {
+          cooling.delete(accountId);
+          vpnSlots?.rotate(accountId).catch(() => {});
+        } else if (isRateLimit) {
+          const delayMs = Math.min(900000, Math.max(60000, (retryAfterSeconds || 60) * 1000));
+          const entry = {
+            failures: cooling.get(accountId)?.failures || 0,
+            until: clock().getTime() + delayMs,
+            revision: accountRevision(account),
+            retryAfterMs: delayMs
+          };
+          cooling.set(accountId, entry);
+          await bot.store.update(s => {
+            s.posting ||= {};
+            s.posting.cooling ||= {};
+            s.posting.cooling[accountId] = entry;
+            return s;
+          });
+        } else {
+          // Non-isolated failure: skip this account for the remainder of this pass (60s cooling)
+          const delayMs = 60000;
+          const entry = {
+            failures: accountResult.failures,
+            until: clock().getTime() + delayMs,
+            revision: accountRevision(account)
+          };
+          cooling.set(accountId, entry);
+          await bot.store.update(s => {
+            s.posting ||= {};
+            s.posting.cooling ||= {};
+            s.posting.cooling[accountId] = entry;
+            return s;
+          });
+        }
+
+        bot.forensicLogger?.record({
+          eventType: accountResult.isolated
+            ? (accountResult.status === 'كابتشا' ? 'account_captcha' : accountResult.status === 'محظور' ? 'account_banned' : 'account_isolated_3_failures')
+            : isRateLimit ? 'account_rate_limited' : 'account_failure_strike',
+          accountId,
+          username: account?.username,
+          slot: session?.slot,
+          port: session?.port,
+          exitIp: session?.exitIp,
+          subnet: currentSubnet,
+          xErrorMessage: reason,
+          details: { itemId: item.id, failure, failures: accountResult.failures, isolated: accountResult.isolated }
+        }).catch(() => {});
+
+        const sNow = await bot.store.load();
+        const otherActive = (sNow.accounts || []).filter(a =>
+          a.id !== accountId &&
+          a.enabled !== false &&
+          !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
+          (a.failures || 0) < 3 &&
+          (run.accountIds || []).includes(a.id) &&
+          accountCapacity(sNow, a, clock()).remaining > 0
+        );
+
+        if (accountResult.isolated) {
+          if (otherActive.length > 0) {
+            await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}) ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
+            return { halt: false, skipDelay: true };
+          } else {
+            await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}). لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`);
+            return { halt: true, skipDelay: true };
+          }
+        }
+
+        if (otherActive.length > 0) {
+          return { halt: false, skipDelay: true };
+        } else {
+          await notify('جميع الحسابات غير مؤهلة أو في فترة انتظار؛ توقفت الدورة وبقيت المنشورات في الانتظار.');
+          return { halt: true, skipDelay: true };
+        }
+      };
+
       cycleLoop: while (!signal.aborted) {
       let claimedInPass = false;
       const passSnapshot = await bot.store.load();
+      if (passSnapshot.telegramUi?.run?.accountIds) {
+        run.accountIds = [...passSnapshot.telegramUi.run.accountIds];
+      }
       const hints = new Map((passSnapshot.items || []).map(i => [i.id, i]));
       const passExcluded = excluded(passSnapshot);
       for (const itemId of itemIds) {
@@ -538,43 +694,19 @@ async function run({
           }
           if (!session.identity?.authenticated) {
             const failure = session.identity?.accountFailure;
-            const isPermanentFailure = ['banned', 'captcha'].includes(failure);
-            if (isPermanentFailure) {
-              const isCaptcha = failure === 'captcha';
-              await bot.store.update(s => {
-                const acc = s.accounts?.find(a => a.id === accountId);
-                if (acc) {
-                  acc.enabled = false;
-                  acc.status = isCaptcha ? 'كابتشا' : 'محظور';
-                  acc.checkGeneration = crypto.randomUUID();
-                }
-                const i = s.items.find(x => x.id === item.id);
-                if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-                  i.state = 'pending';
-                  delete i.attempt;
-                }
-                return s;
-              });
-              const sNow = await bot.store.load();
-              const otherActive = (sNow.accounts || []).filter(a => a.id !== accountId && a.enabled !== false && !['محظور', 'كابتشا'].includes(a.status) && (run.accountIds || []).includes(a.id) && accountCapacity(sNow, a, clock()).remaining > 0);
-              if (otherActive.length > 0) {
-                cooling.delete(accountId);
-                await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${failure === 'captcha' ? 'كابتشا' : 'محظور'}) ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
-                skipDelay = true;
-                retry = false;
-                break;
-              }
-            }
-            await bot.store.update(s => {
-              const i = s.items.find(x => x.id === item.id);
-              if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-                i.state = 'pending';
-                delete i.attempt;
-              }
-              return s;
+            const outcome = await handleAccountFailure({
+              accountId,
+              account,
+              item,
+              claim,
+              session,
+              failure,
+              reason: session.identity?.reason || 'unauthenticated',
+              retryAfterSeconds: session.identity?.readDiagnostic?.retryAfterSeconds
             });
-            await notify('تعذر تسجيل الدخول: ملف جلسة الحساب غير صالح أو الحساب مقيد. يرجى فحص الحساب والكوكيز.');
-            halt = true;
+            if (outcome.halt) { halt = true; }
+            skipDelay = outcome.skipDelay;
+            retry = false;
             break;
           } else {
           let dispatchCalled = false;
@@ -608,7 +740,15 @@ async function run({
           if (result.accountFailure) await ui.recordAccountCheck(accountId, { accountFailure: result.accountFailure }, { session: true, expectedAccount: account });
           if (result.published && !dispatchEntered) throw Object.assign(new Error('Missing dispatch fence'), { code: 'DISPATCH_FENCE_MISSING' });
           const callbackAdapter = adapter instanceof DirectXAdapter || adapter.supportsDispatchCallback === true;
-          const newState = result.published && result.url ? 'published' : (result.published || result.ambiguous || dispatchEntered) ? 'ambiguous' : ['text_too_long', 'tweet_too_long'].includes(result.reason) ? 'cancelled' : 'pending';
+          const newState = result.published && result.url
+            ? 'published'
+            : (result.rateLimit || result.accountFailure === 'rate_limit')
+            ? 'pending'
+            : (result.published || result.ambiguous || dispatchEntered)
+            ? 'ambiguous'
+            : ['text_too_long', 'tweet_too_long'].includes(result.reason)
+            ? 'cancelled'
+            : 'pending';
           const publishedAt = new Date(clock()).toISOString();
           let transitioned = false;
           await bot.store.update(s => {
@@ -622,6 +762,10 @@ async function run({
             i.state = newState; i.reason = result.reason || null;
               if (newState === 'published') {
                 i.publishedAt = publishedAt; i.url = result.url; i.accountId = accountId; i.accountUsername = account.username;
+                const acc = s.accounts?.find(a => a.id === accountId);
+                if (acc) {
+                  acc.failures = 0;
+                }
                 if (wasProcessing) {
                   s.posting.quota ||= {};
                   const day = riyadhDay(new Date(publishedAt));
@@ -653,6 +797,8 @@ async function run({
             cooling.delete(accountId);
             await bot.store.update(s => {
               if (s.posting?.cooling) delete s.posting.cooling[accountId];
+              const acc = (s.accounts || []).find(a => a.id === accountId);
+              if (acc) acc.failures = 0;
               return s;
             });
             ui.refreshPanels(true);
@@ -677,62 +823,22 @@ async function run({
             retry = true; safeTransient = true;
             if (result.readDiagnostic?.httpStatus === 429) retryAfterMs = Math.min(900000, Math.max(60000, (result.readDiagnostic.retryAfterSeconds || 60) * 1000));
           }
-          else if (result.blocked || /challenge|blocked|restrict|auth|login|cookie|vpn|rate.?limit/i.test(String(result.reason || '') + ' ' + String(result.status || ''))) {
-            const failure = result.accountFailure;
-            const isPermanentFailure = ['banned', 'captcha'].includes(failure);
-            if (isPermanentFailure) {
-              const isCaptcha = failure === 'captcha';
-              const currentSubnet = session?.exitIp ? normalizeSubnet(session.exitIp) : null;
-              await bot.store.update(s => {
-                const acc = s.accounts?.find(a => a.id === accountId);
-                if (acc) {
-                  acc.enabled = false;
-                  acc.status = isCaptcha ? 'كابتشا' : 'محظور';
-                  acc.checkGeneration = crypto.randomUUID();
-                }
-                if (currentSubnet) {
-                  s.burnedSubnets ||= [];
-                  const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
-                  if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
-                }
-                const i = s.items.find(x => x.id === item.id);
-                if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-                  if (dispatchEntered || i.attempt?.phase === 'dispatching') {
-                    i.state = 'ambiguous';
-                    i.reason = result.reason || failure || 'account_blocked_after_dispatch';
-                  } else if (i.attempt?.phase === 'claimed') {
-                    i.state = 'pending';
-                    delete i.attempt;
-                  }
-                  if (s.posting) s.posting.publishingAt = null;
-                }
-                return s;
-              });
-              if (dispatchEntered) skipDelay = true;
-              vpnSlots?.rotate(accountId).catch(() => {});
-              bot.forensicLogger?.record({
-                eventType: isCaptcha ? 'account_captcha' : 'account_banned',
-                accountId,
-                username: account?.username,
-                slot: session?.slot,
-                port: session?.port,
-                exitIp: session?.exitIp,
-                subnet: currentSubnet,
-                xErrorMessage: result.reason,
-                details: { itemId: item.id, failure }
-              }).catch(() => {});
-              const sNow = await bot.store.load();
-              const otherActive = (sNow.accounts || []).filter(a => a.id !== accountId && a.enabled !== false && !['محظور', 'كابتشا'].includes(a.status) && (run.accountIds || []).includes(a.id) && accountCapacity(sNow, a, clock()).remaining > 0);
-              if (otherActive.length > 0) {
-                cooling.delete(accountId);
-                await notify(`الحساب @${account.username || account.label} مقيد؛ تم عزله ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
-                skipDelay = true;
-                retry = false;
-                break;
-              }
-            }
-            await notify('الحساب مقيد أو يتطلب تحققاً أمنياً؛ توقفت الدورة، يرجى فحص الحساب وملف الجلسة.');
-            halt = true;
+          else if (result.blocked || result.rateLimit || /challenge|blocked|restrict|auth|login|cookie|vpn|rate.?limit/i.test(String(result.reason || '') + ' ' + String(result.status || ''))) {
+            const failure = result.accountFailure || (result.rateLimit ? 'rate_limit' : null);
+            const outcome = await handleAccountFailure({
+              accountId,
+              account,
+              item,
+              claim,
+              session,
+              failure,
+              reason: result.reason,
+              retryAfterSeconds: result.retryAfterSeconds || result.readDiagnostic?.retryAfterSeconds
+            });
+            if (outcome.halt) { halt = true; }
+            skipDelay = outcome.skipDelay;
+            retry = false;
+            break;
           } else if (newState === 'pending') { retry = true; }
           else if (newState === 'cancelled') { skipDelay = true; }
           }
@@ -783,90 +889,20 @@ async function run({
           else if (!dispatchEntered && ['DIRECT_X_IDENTITY_READ_UNAVAILABLE', 'VPN_TRANSIENT_UNAVAILABLE'].includes(err.code)) { retry = true; safeTransient = err.code === 'DIRECT_X_IDENTITY_READ_UNAVAILABLE' || err.recoverySafe === true; } else if (err.code === 'ACCOUNT_CHECK_PERSIST_FAILED') halt = true;
           else if (/auth|login|cookie|challenge|restrict|vpn/i.test(String(err.code || '') + ' ' + String(err.message || ''))) {
             const failure = session?.identity?.accountFailure || result?.accountFailure || err.accountFailure;
-            const isPermanentFailure = ['banned', 'captcha'].includes(failure);
-            if (isPermanentFailure) {
-              const isCaptcha = failure === 'captcha';
-              const currentSubnet = session?.exitIp ? normalizeSubnet(session.exitIp) : null;
-              await bot.store.update(s => {
-                const acc = s.accounts?.find(a => a.id === accountId);
-                if (acc) {
-                  acc.enabled = false;
-                  acc.status = isCaptcha ? 'كابتشا' : 'محظور';
-                  acc.checkGeneration = crypto.randomUUID();
-                }
-                if (currentSubnet) {
-                  s.burnedSubnets ||= [];
-                  const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
-                  if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
-                }
-                const i = s.items.find(x => x.id === item.id);
-                if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-                  if (dispatchEntered || i.attempt?.phase === 'dispatching') {
-                    i.state = 'ambiguous';
-                    i.reason ||= 'exception_after_dispatch';
-                  } else if (i.attempt?.phase === 'claimed') {
-                    i.state = 'pending';
-                    delete i.attempt;
-                  }
-                  if (s.posting) s.posting.publishingAt = null;
-                }
-                return s;
-              });
-              vpnSlots?.rotate(accountId).catch(() => {});
-              bot.forensicLogger?.record({
-                eventType: isCaptcha ? 'account_captcha' : 'account_banned',
-                accountId,
-                username: account?.username,
-                slot: session?.slot,
-                port: session?.port,
-                exitIp: session?.exitIp,
-                subnet: currentSubnet,
-                httpStatus: err.readDiagnostic?.httpStatus || err.httpStatus,
-                xErrorCode: err.code || err.xErrorCode,
-                xErrorMessage: err.message,
-                details: { itemId: item.id, failure }
-              }).catch(() => {});
-              const sNow = await bot.store.load();
-              const otherActive = (sNow.accounts || []).filter(a => a.id !== accountId && a.enabled !== false && !['محظور', 'كابتشا'].includes(a.status) && (run.accountIds || []).includes(a.id) && accountCapacity(sNow, a, clock()).remaining > 0);
-              if (otherActive.length > 0) {
-                cooling.delete(accountId);
-                await notify(`تعذر تسجيل الدخول أو الاتصال للحساب @${account.username || account.label}؛ تم عزله ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
-                retry = false;
-                skipDelay = true;
-                break;
-              }
-            }
-            // Single Account Safeguard: when this is the LAST active account and
-            // the failure is a transient network/VPN error (NOT permanent ban/captcha or auth identity failure),
-            // use smart retry with exponential backoff and verify VPN channel health before deciding any terminal failure.
-            const isTransientNetwork = (/vpn|timeout|network|econnrefused|econnreset|socket|temporary/i.test(String(err.code || '') + ' ' + String(err.message || '')) ||
-              ['VPN_TRANSIENT_UNAVAILABLE', 'DIRECT_X_IDENTITY_READ_UNAVAILABLE'].includes(err.code)) &&
-              err.code !== 'DIRECT_X_AUTH_IDENTITY_UNVERIFIED' && err.code !== 'VPN_MAPPING_CONFLICT' && err.code !== 'ACCOUNT_CHECK_PERSIST_FAILED';
-            if (!isPermanentFailure && isTransientNetwork) {
-              retry = true;
-              safeTransient = true;
-              const failures = (cooling.get(accountId)?.failures || 0) + 1;
-              if (failures <= 4) {
-                let vpnHealth = null;
-                try {
-                  const check = await vpnSlots?.health(accountId);
-                  if (check && !check.healthy) {
-                    await vpnSlots?.ensure(accountId, { signal: attempt.signal });
-                    vpnHealth = await vpnSlots?.health(accountId);
-                  } else {
-                    vpnHealth = check;
-                  }
-                } catch {}
-                const exitIpStr = vpnHealth?.exitIp ? ` (VPN IP: ${vpnHealth.exitIp})` : '';
-                await notify(`⚠️ خطأ شبكة مؤقت للحساب الأخير @${account.username || account.label}${exitIpStr}؛ إعادة محاولة (${failures}/4) بعد تأخير تصاعدي.`);
-                break;
-              }
-              // Exhausted retries — fall through to halt.
-              retry = false;
-              safeTransient = false;
-            }
-            await notify('تعذر تسجيل الدخول أو الاتصال الآمن؛ توقفت الدورة وبقي المنشور في الانتظار.');
-            halt = true;
+            const outcome = await handleAccountFailure({
+              accountId,
+              account,
+              item,
+              claim,
+              session,
+              failure,
+              reason: err.code || err.message,
+              retryAfterSeconds: err.readDiagnostic?.retryAfterSeconds
+            });
+            if (outcome.halt) { halt = true; }
+            skipDelay = outcome.skipDelay;
+            retry = false;
+            break;
           }
           else if (['ATTEMPT_TIMEOUT', 'ATTEMPT_ABORTED', 'DISPATCH_REJECTED', 'DISPATCH_FENCE_MISSING'].includes(err.code)) halt = true;
           else retry = true;
@@ -896,7 +932,6 @@ async function run({
           });
         }
         if (halt || signal.aborted) break;
-        if (retry && !retryAfterMs && retryCount < 3) { await sleepFn(1000 * 2 ** retryCount++); continue; }
         if (retry && safeTransient) {
           const failures = (cooling.get(accountId)?.failures || 0) + 1;
           const delayMs = Math.max(retryAfterMs, Math.min(300000, 30000 * 2 ** Math.min(failures - 1, 4)));
@@ -911,7 +946,23 @@ async function run({
           logger.log(JSON.stringify({ event: 'account_retry_deferred', account: accountId, delayMs }));
           // No terminal report/notification: this is a temporary account pause,
           // not a stopped session. Pending items remain in the same run.
-        } else if (retry) { await notify('تعذر نشر المنشور بعد المحاولات؛ بقي في الانتظار.'); halt = true; }
+        } else if (retry) {
+          const sNow = await bot.store.load();
+          const otherActive = (sNow.accounts || []).filter(a =>
+            a.id !== accountId &&
+            a.enabled !== false &&
+            !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
+            (a.failures || 0) < 3 &&
+            (run.accountIds || []).includes(a.id) &&
+            accountCapacity(sNow, a, clock()).remaining > 0
+          );
+          if (otherActive.length > 0) {
+            skipDelay = true;
+          } else {
+            await notify('تعذر نشر المنشور بعد المحاولات؛ بقي في الانتظار.');
+            halt = true;
+          }
+        }
         if (skipDelay || retry) break;
         const remaining = await bot.store.load();
         const hasEligible = [...itemIds].some(id => {
@@ -991,6 +1042,7 @@ async function run({
       state: () => bot.store.load()
     });
     let polls = 0;
+    let conflictRetries = 0;
     while (!stopping && polls < maxPolls) {
       polls += 1;
       try {
@@ -1010,6 +1062,7 @@ async function run({
           if (due) await ui.startScheduled();
         }
         const updates = await api.getUpdates({ offset, timeout: pollTimeout, allowed_updates: ['message', 'callback_query'] }) || [];
+        conflictRetries = 0;
         watchdog?.poll();
         let retryFromAmbiguous = false;
         for (const update of updates) {
@@ -1132,6 +1185,18 @@ async function run({
         }
       } catch (error) {
         if (error.telegramCode === 409 || error.statusCode === 409 || /conflict/i.test(error.message || '')) {
+          if (conflictRetries < maxConflictRetries && !stopping) {
+            conflictRetries += 1;
+            logger.error(JSON.stringify({
+              event: 'telegram_conflict_transient',
+              code: 'TELEGRAM_CONFLICT_RETRY',
+              message: error.message,
+              retry: conflictRetries,
+              backoffMs: conflictBackoffMs
+            }));
+            await sleepFn(conflictBackoffMs);
+            continue;
+          }
           logger.error(JSON.stringify({ event: 'telegram_conflict', code: 'TELEGRAM_CONFLICT', message: error.message }));
           const conflictErr = Object.assign(new Error(`Telegram polling conflict: another instance is running (${error.message})`), { code: 'TELEGRAM_CONFLICT', cause: error });
           throw conflictErr;

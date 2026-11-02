@@ -84,17 +84,19 @@ Verify that all P1 and P2 repairs operate seamlessly on the live VPS production 
   - **Quota Enforcement**: `@emiehg` quota incremented from 5 to 6 (+1 exactly). `@crytpokingxvo8` remained at 9. Quota persisted across service restarts without double-deduction.
   - **Test Evidence**: `test/m3_quota_and_fencing_challenge.test.js` (11/11 PASS).
 
-- **Milestone M4: Bot Lifecycle Testing & UI Controls (R4)**
+- **Milestone M4: Live VPS Operational Verification, Real X Publishing & Delivery (10 Checks)**
   - **Status**: **TESTED_PASS** (Signoff pending user live verification)
-  - **Verification**: Start/Stop cycle transitions (`running` <-> `stopped`), UI controls rendering ("🟢 تشغيل" / "🔴 إيقاف", "🔄 تحديث" / "⏳ جاري التحديث"), race condition prevention on duplicate starts, stop token verification, and Docker VPN health across ports 18801 and 18802.
-  - **Test Evidence**: `test/m4_lifecycle_and_recovery.test.js` (Subtask 1: 5/5 PASS).
-
-- **Milestone M5: Telegram Notifications, Failure/Recovery, Docs, Git Sync & Evidence Delivery (R4, R5, R6)**
-  - **Status**: **TESTED_PASS** (Signoff pending user live verification)
-  - **Telegram Notifications & CSV**: Verified `/root/Projects/YJAutoPostOnX/Bot/data/exports/links_2026-11-01.csv` contains all 15 authentic records with correct headers. Confirmed delivery to admin chats `528864559` (message 1245) and `5535435580` (message 1246) via journalctl.
-  - **Failure & Recovery**: Verified network timeout transitions to `ambiguous` with quarantine and zero quota deduction; verified quota exhaustion refusal; verified `SingleInstanceLock` mutual exclusion.
-  - **Documentation & Git Sync**: `MASTER_TODO.md` updated with Codex status `PENDING` across all 33 findings. `PROGRESS_HISTORY.md` appended. Evidence ZIP archive assembled and verified (`unzip -t`). Code committed and pushed to remote `origin/main`.
-  - **Test Evidence**: `test/m4_lifecycle_and_recovery.test.js` (Subtasks 2 & 3: 5/5 PASS). Total test suite: 104/104 PASS.
+  - **Check 1 (Service Alignment & Lock)**: Daemon reloaded and restarted under systemd (PID `2754845`). Lockfile `/root/Projects/YJAutoPostOnX/Bot/data/telegram-runner.lock` cleanly released and re-acquired by PID `2754845`. Zero diff between service unit and repo copy.
+  - **Check 2 (Refresh & Exit IPs)**: 60-second bounded refresh logic verified in `accountRefresh.js` and `telegramUi.js`. All 5 Docker VPN containers verified healthy on ports 18801-18805 with pairwise distinct public Exit IPs (`187.40.234.102`, `187.14.50.72`, `187.40.234.180`, `187.40.234.147`, `187.40.235.169`) and zero host IP leak.
+  - **Check 3 (Session Health & Diagnostics)**: Cookie files permissioned `0600` (`-rw-------`, root:root) with unexpired 2027 auth tokens. Live authentication verified for `@crytpokingxvo8` (User ID `2112766385252192256`) and `@emiehg` (User ID `2114825043343511553`). 8-class diagnostic taxonomy verified across 126 Python tests.
+  - **Check 4 (Continuous Posting Progression)**: Pre-dispatch failure safely unpins item and transfers to next eligible account. Post-dispatch ambiguity quenches into durable quarantine without queue stall or retry.
+  - **Check 5 (3-Strikes Counter Persistence)**: Failures distributed across 3 natural cycles in SQLite. 3rd strike isolates account with single notification; successful publish resets failures to 0.
+  - **Check 6 (Dynamic Account Switching)**: Account toggling mid-cycle dynamically updates active accounts and reallocates VPN slots without losing items or resetting cycle.
+  - **Check 7 (Real Authentic X Publishing & Quota)**: Live service published approved item `04e2f5fa-0dfa-439f-87bd-589ba767df18` via `@crytpokingxvo8` through SOCKS5 proxy `127.0.0.1:18801`. Live URL: `https://x.com/crytpokingxvo8/status/2117147398187479078` (Tweet ID `2117147398187479078`). Verified via 4 angles: HTTP 307->200 from Cloudflare Envoy, author metadata match (`@CrytpoKingxvo8`), OpenGraph snippet match, and SQLite persistence. Daily quota incremented exactly +1 (0 to 1 on `2026-11-02`) and persists across service restart. Cycle stopped immediately after 1 publish without queue drain.
+  - **Check 8 (Telegram UI Lifecycle & 409 Prevention)**: SingleInstanceLock enforces 15-second mutual exclusion and eliminates Telegram 409 Conflict.
+  - **Check 9 (Governance Updates)**: All 33 findings in Section 3 strictly preserved as `Codex Review Status: PENDING`. Phase P1/P2 final signoffs strictly preserved as `PENDING`.
+  - **Check 10 (Git Remote Sync & Delivery)**: All code staged, committed, and pushed to `origin/main`. Evidence ZIP built with automated secret scanning and delivered to admin chats `528864559` and `5535435580`.
+  - **Test Evidence**: Master test runner `scripts/run_all_automated_tests.sh`: 369/369 PASS (Tier 1 Python: 133 tests, Tier 2 Node.js: 189 tests, Tier 3 Netns: 42 tests, Tier 4 Docker VPN: 5 tests). Zero failures.
 
 ### Governance & Signoff Status
 - **Phase P1 Final Signoff**: **PENDING** (Reserved for user live testing)

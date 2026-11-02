@@ -16,6 +16,7 @@ StandardError=journal
 SyslogIdentifier=yj-telegram-bot
 Environment=NODE_ENV=production
 Environment=DIRECT_X_PYTHON=/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python
+Environment=NORDVPN_TOKEN_FILE=/root/Projects/YJAutoPostOnX/Bot/data/secrets/nordvpn_token
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30

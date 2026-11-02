@@ -67,8 +67,14 @@ class TestFinding010ClassifyAccountFailure(unittest.TestCase):
     def test_captcha_and_auth_codes_preserved(self):
         self.assertEqual(classify_x_account_failure(errors=[{'code': 326}]), 'captcha')
         self.assertEqual(classify_x_account_failure(text='login_verification required'), 'captcha')
-        self.assertEqual(classify_x_account_failure(errors=[{'code': 32}]), 'auth')
-        self.assertEqual(classify_x_account_failure(errors=[{'code': 89}]), 'auth')
+        self.assertEqual(classify_x_account_failure(errors=[{'code': 32}]), 'auth_rejected')
+        self.assertEqual(classify_x_account_failure(errors=[{'code': 89}]), 'cookie_expired')
+        self.assertEqual(classify_x_account_failure(errors=[{'code': 88}]), 'rate_limit')
+        self.assertEqual(classify_x_account_failure(errors=[{'code': 185}]), 'rate_limit')
+        self.assertEqual(classify_x_account_failure(http_status=429), 'rate_limit')
+        self.assertEqual(classify_x_account_failure(text='connection reset by peer'), 'network_proxy_error')
+        self.assertEqual(classify_x_account_failure(text='publish_confirmation_missing'), 'ambiguous')
+        self.assertEqual(classify_x_account_failure(text='unknown account error'), 'unknown')
 
 
 class TestFinding008CompatUserData(unittest.TestCase):

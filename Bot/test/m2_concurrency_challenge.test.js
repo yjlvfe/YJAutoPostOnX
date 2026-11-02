@@ -27,7 +27,7 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
       const lockDataBefore = JSON.parse(lockRawBefore);
       assert.ok(lockDataBefore.pid > 0, 'Live lock must record active PID');
 
-      const secondaryLock = new SingleInstanceLock(LIVE_LOCK_PATH, { timeoutMs: 3000 });
+      const secondaryLock = new SingleInstanceLock(LIVE_LOCK_PATH, { timeoutMs: 0 });
       const t0 = Date.now();
 
       let caughtError = null;

@@ -92,9 +92,10 @@ class Queue {
   async recoverProcessing({ state = 'ambiguous', reason = 'restart' } = {}) {
     return this.store.update(current => {
       for (const item of current.items || []) {
-        if (item.state === 'processing') {
+        if (item.state === 'processing' || item.state === 'dispatch_started') {
           item.state = state;
           item.outcome = state;
+          item.reason = reason;
           item.result = { ...(item.result || {}), reason };
           item.completedAt = new Date().toISOString();
         }

@@ -7,7 +7,7 @@ const { randomUUID } = require('node:crypto');
 const { parseCsv } = require('./csv');
 const { parseCookies, detectFormat } = require('./cookieFormat');
 
-const MAX_ACCOUNTS = 1000;
+const MAX_ACCOUNTS = Infinity;
 const MAX_ACTIVE_ACCOUNTS = 5;
 const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MAX_COOKIE_BYTES = 10 * 1024 * 1024;
@@ -33,15 +33,17 @@ function accountRecord(input = {}) {
         normStatus = 'محظور';
       } else if (['كابتشا', 'captcha', 'challenge', 'verification_required'].includes(rawStatus.toLowerCase()) || rawStatus === 'كابتشا') {
         normStatus = 'كابتشا';
+      } else if (rawStatus === 'معزول (3 إخفاقات)') {
+        normStatus = 'معزول (3 إخفاقات)';
       } else if (['غير مفعل', 'خامل', 'disabled', 'inactive'].includes(rawStatus.toLowerCase()) || rawStatus === 'غير مفعل') {
         normStatus = 'غير مفعل';
-      } else if (input.enabled === false && !['كابتشا', 'محظور'].includes(normStatus)) {
+      } else if (input.enabled === false && !['كابتشا', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
         normStatus = 'غير مفعل';
-      } else if (input.enabled !== false && !['كابتشا', 'محظور'].includes(normStatus)) {
+      } else if (input.enabled !== false && !['كابتشا', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
         normStatus = 'مفعل';
       }
       return {
-        enabled: input.enabled !== false && !['محظور', 'كابتشا', 'غير مفعل'].includes(normStatus),
+        enabled: input.enabled !== false && !['محظور', 'كابتشا', 'غير مفعل', 'معزول (3 إخفاقات)'].includes(normStatus),
         status: normStatus
       };
     })(),
@@ -50,6 +52,7 @@ function accountRecord(input = {}) {
     ...(input.verifiedAt ? { verifiedAt: String(input.verifiedAt) } : {}),
     ...(input.checkGeneration ? { checkGeneration: String(input.checkGeneration) } : {}),
     ...(input.vpnResource ? { vpnResource: String(input.vpnResource) } : {}),
+    failures: input.failures == null || input.failures === '' ? 0 : nonNegativeInteger(input.failures, 'failures'),
     quota: input.quota == null || input.quota === '' ? null : positiveInteger(input.quota, 'quota'),
     delayMs: input.delayMs == null || input.delayMs === '' ? null : nonNegativeInteger(input.delayMs, 'delayMs')
   };
@@ -68,7 +71,7 @@ function nonNegativeInteger(value, name) {
 }
 
 class AccountManager {
-  constructor(store, { maxAccounts = MAX_ACCOUNTS, maxActiveAccounts = MAX_ACTIVE_ACCOUNTS, beforeMutation, onChange } = {}) {
+  constructor(store, { maxAccounts = Infinity, maxActiveAccounts = MAX_ACTIVE_ACCOUNTS, beforeMutation, onChange } = {}) {
     if (!store) throw new TypeError('AccountManager requires a store');
     this.store = store;
     this.maxAccounts = maxAccounts;
@@ -108,8 +111,8 @@ class AccountManager {
       state.accounts ||= [];
       if (confirmation && state.accounts.some(a => a.username?.toLowerCase() === record.username?.toLowerCase())) throw new Error('Account already exists');
       if (state.accounts.some(item => item.id === record.id)) throw new Error('Account already exists');
-      if (state.accounts.length >= this.maxAccounts) throw new Error(`At most ${this.maxAccounts} accounts are supported`);
-      const activeCount = state.accounts.filter(a => a.enabled !== false && !['محظور', 'كابتشا'].includes(a.status)).length;
+      if (Number.isFinite(this.maxAccounts) && state.accounts.length >= this.maxAccounts) throw new Error(`At most ${this.maxAccounts} accounts are supported`);
+      const activeCount = state.accounts.filter(a => a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status)).length;
       if (activeCount >= this.maxActiveAccounts) {
         record.enabled = false;
         record.status = 'غير مفعل';
@@ -127,6 +130,12 @@ class AccountManager {
     return this._mutate('update', state => {
       const current = (state.accounts || []).find(item => item.id === accountId);
       if (!current) throw new Error('Account not found');
+      if (patch.enabled === true && current.enabled === false) {
+        const activeCount = (state.accounts || []).filter(a => a.id !== accountId && a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status)).length;
+        if (activeCount >= this.maxActiveAccounts) {
+          throw new Error(`At most ${this.maxActiveAccounts} active accounts are supported`);
+        }
+      }
       const input = { ...current, ...patch, ...(Object.hasOwn(patch, 'enabled') ? { status: patch.enabled === false ? 'غير مفعل' : 'مفعل' } : {}), id: accountId };
       const identityChanged = ['username', 'cookieFile'].some(key => Object.hasOwn(patch, key) && patch[key] !== current[key]);
       if (identityChanged) for (const key of ['userId', 'verifiedAt']) if (!Object.hasOwn(patch, key)) delete input[key];
@@ -157,13 +166,24 @@ class AccountManager {
 
   /** Replace is atomic: malformed input never removes the current account set. */
   async replace(records) {
-    if (!Array.isArray(records) || records.length > this.maxAccounts) {
+    if (!Array.isArray(records) || (Number.isFinite(this.maxAccounts) && records.length > this.maxAccounts)) {
       throw new Error(`At most ${this.maxAccounts} accounts are supported`);
     }
     const normalized = records.map(accountRecord);
     if (new Set(normalized.map(item => item.id)).size !== normalized.length) throw new Error('Duplicate account id');
+    let activeCount = 0;
+    const capped = normalized.map(account => {
+      const isActive = account.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(account.status);
+      if (isActive) {
+        activeCount++;
+        if (activeCount > this.maxActiveAccounts) {
+          return { ...account, enabled: false, status: 'غير مفعل' };
+        }
+      }
+      return account;
+    });
     return this._mutate('replace', state => {
-      state.accounts = normalized.map(account => ({ ...account, checkGeneration: randomUUID() }));
+      state.accounts = capped.map(account => ({ ...account, checkGeneration: randomUUID() }));
       if (state.telegramUi) state.telegramUi.accountChecks = {};
       return state;
     })
@@ -181,6 +201,14 @@ class AccountManager {
       delayMs: row.delay_ms || row.delayMs || null,
       enabled: row.enabled !== 'false'
     })));
+  }
+
+  async resetFailures(id) {
+    return resetAccountFailures(this.store, id);
+  }
+
+  async incrementFailures(id) {
+    return incrementAccountFailures(this.store, id);
   }
 }
 
@@ -258,4 +286,47 @@ function validateCookieContent(content) {
   return { content: text, format: parsed.format };
 }
 
-module.exports = { AccountManager, CookieStore, validateCookieFile, detectCookieFormat: detectFormat, normalizeAccountId, accountRecord, MAX_ACCOUNTS };
+async function resetAccountFailures(store, accountId) {
+  const id = normalizeAccountId(accountId);
+  return store.update(state => {
+    const acc = (state.accounts || []).find(item => item.id === id);
+    if (acc) {
+      acc.failures = 0;
+    }
+    return state;
+  });
+}
+
+async function incrementAccountFailures(store, accountId) {
+  const id = normalizeAccountId(accountId);
+  let failures = 0;
+  let isolated = false;
+  await store.update(state => {
+    const acc = (state.accounts || []).find(item => item.id === id);
+    if (acc) {
+      acc.failures = (acc.failures || 0) + 1;
+      failures = acc.failures;
+      if (acc.failures >= 3) {
+        acc.enabled = false;
+        acc.status = 'معزول (3 إخفاقات)';
+        acc.checkGeneration = randomUUID();
+        isolated = true;
+      }
+    }
+    return state;
+  });
+  return { failures, isolated };
+}
+
+module.exports = {
+  AccountManager,
+  CookieStore,
+  validateCookieFile,
+  detectCookieFormat: detectFormat,
+  normalizeAccountId,
+  accountRecord,
+  resetAccountFailures,
+  incrementAccountFailures,
+  MAX_ACCOUNTS,
+  MAX_ACTIVE_ACCOUNTS
+};

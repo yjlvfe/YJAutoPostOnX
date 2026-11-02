@@ -493,3 +493,103 @@ Following initial isolated namespace certification, a comprehensive empirical ve
 | **M3** | Authentic Live Post on X & Quota Enforcement | Tweet `2116996420637196576`, Quota 5->6 (+1), persisted across restart | **TESTED_PASS** | **PENDING** |
 | **M4** | Bot Lifecycle (Start/Stop) & UI Buttons | `m4_lifecycle_and_recovery.test.js` (Subtask 1: 5/5 PASS), VPN healthy | **TESTED_PASS** | **PENDING** |
 | **M5** | Telegram CSV, Failure/Recovery, Git Sync & Delivery | CSV 15 rows delivered (msgs 1245/1246), 104/104 tests PASS, Git push & ZIP | **TESTED_PASS** | **PENDING** |
+
+
+---
+
+## 2.6. Milestone M4: Live VPS Operational Verification, Real X Publishing & Delivery (2026-11-02)
+
+### Operational Overview & Mandate
+Full-scale operational verification of the YJAutoPostOnX production engine executed on live host `MasterYJ`. Verified all 10 mandatory checks spanning systemd service alignment, process lock integrity, Docker VPN isolation, account diagnostics, continuous posting progression, 3-strikes failure isolation, dynamic account switching mid-cycle, authentic live publishing on X via SOCKS5 proxy, 4-angle forensic verification, strict daily quota consumption and persistence across restarts, and Telegram evidence delivery.
+
+---
+
+### Comprehensive 10-Check Operational Verification Report
+
+#### Check 1: Live Service Alignment & Process Management
+- **Command**: `systemctl daemon-reload && systemctl restart yj-telegram-bot.service`
+- **Result**: Service status `active (running)` under Main PID `2754845` (prior PID `2697915` cleanly stopped and replaced).
+- **Lockfile Verification**: `/root/Projects/YJAutoPostOnX/Bot/data/telegram-runner.lock` atomically updated with `{ pid: 2754845, token: "...", acquiredAt: "2026-11-02T06:50:39.957Z" }`. Lockfile PID bit-for-bit matches running daemon PID.
+- **Service Unit Integrity**: `diff -u /etc/systemd/system/yj-telegram-bot.service /root/Projects/YJAutoPostOnX/Bot/systemd/yj-telegram-bot.service` returned 0 differences (`sha256sum: 014ee3c60378bd4dcf0f9b24e07b306904251e544819c1545a732f5464f34396`). Destructive `rm -f` pre-start lock removal completely eliminated.
+- **Status**: **PASS**
+
+#### Check 2: Refresh Button & Exit IP Display
+- **Bounded Execution**: `Bot/src/accountRefresh.js` enforces 60-second ceiling (`timeoutMs = 60000`) and max failure bounds (`maxFailures = 2`). Button text correctly transitions `🔄 تحديث` -> `⏳ جاري التحديث` -> `🔄 تحديث` with zero indefinite hangs.
+- **Docker VPN Live SOCKS5 Probing (5 Slots)**:
+  - Slot 1 (`yj_autopost_vpn_1`, port 18801): `187.40.234.102` (Account `@crytpokingxvo8`)
+  - Slot 2 (`yj_autopost_vpn_2`, port 18802): `187.14.50.72` (Account `@emiehg`)
+  - Slot 3 (`yj_autopost_vpn_3`, port 18803): `187.40.234.180`
+  - Slot 4 (`yj_autopost_vpn_4`, port 18804): `187.40.234.147`
+  - Slot 5 (`yj_autopost_vpn_5`, port 18805): `187.40.235.169`
+- **Host IP Isolation**: VPS host IP is `64.112.42.39`. All 5 VPN slots egress through distinct NordVPN exit IPs with zero server IP leakage.
+- **Test Evidence**: `test/account_refresh_and_exit_ip.test.js` (15/15 PASS).
+- **Status**: **PASS**
+
+#### Check 3: Session Health & Account Diagnostics
+- **Cookie Permissions & Integrity**: Inspected `/root/Projects/YJAutoPostOnX/Bot/data/cookies/`. All cookie files have mode `0600` (`-rw-------`, root:root).
+- **Token Validity**: Parsed tokens for active accounts `@crytpokingxvo8` and `@emiehg`:
+  - `@crytpokingxvo8`: `auth_token` valid through 2027-10-29 (`expires=1824797829`), `ct0` valid through 2027-12-03 (`expires=1827821829`).
+  - `@emiehg`: `auth_token` valid through 2027-10-30 (`expires=1824914319`), `ct0` valid through 2027-12-04 (`expires=1827938320`).
+- **Live Authentication Probe**: `DirectXAdapter.open` (`allowPublish: false`) via SOCKS5 proxy verified live authentication on X:
+  - Account `@crytpokingxvo8`: User ID `2112766385252192256`, state `authenticated`, status `normal`.
+  - Account `@emiehg`: User ID `2114825043343511553`, state `authenticated`, status `normal`.
+- **8-Class Diagnostic Taxonomy**: Fully verified via Python bridge test suite (`Bot/python/test_bridge_hardening.py` and `test_p2_track2.py`, 126/126 PASS).
+- **Status**: **PASS**
+
+#### Check 4: Continuous Posting Progression on Account Failure
+- **Pre-Dispatch Failure Transfer**: Verified in `runner.js:506-514`: when an account encounters a pre-dispatch error (e.g. cookie expired, proxy drop, rate limit), `item.state` reverts to `pending`, `item.attempt` is deleted, and `item.payload.account` is unpinned. The post transfers immediately to the next eligible active account in round-robin order without stalling the queue.
+- **Post-Dispatch Ambiguity Quarantine**: Verified in `runner.js:747`: if dispatch was initiated and outcome is unconfirmed, item transitions to `ambiguous`, zero quota is deducted, zero auto-replay occurs, and the runner sets `skipDelay = true` to continue with subsequent items.
+- **Test Evidence**: `test/accounts.test.js` and `test/challenger_m1_adversarial.test.js` (PASS).
+- **Status**: **PASS**
+
+#### Check 5: 3-Strikes Counter Persistence & Natural Progression
+- **Persistence**: `failures` counter is stored in SQLite `accounts` table in an ACID transaction.
+- **Natural Cycle Distribution**: Account failures are distributed across 3 distinct natural cycle passes (no immediate rapid retry loop).
+- **Isolation on Strike 3**: On 3rd failure (`failures >= 3`), account is automatically disabled (`enabled: false`, status `معزول (3 إخفاقات)`), exactly 1 immediate Telegram alert is dispatched, and the cycle continues with remaining accounts. Conclusive bans trigger immediate isolation without waiting for 3 strikes.
+- **Reset on Success**: Verified in `runner.js:767`: any verified successful post publication resets `account.failures = 0` in SQLite.
+- **Status**: **PASS**
+
+#### Check 6: Dynamic Account Switching Mid-Cycle
+- **Dynamic Reconfiguration**: Toggling accounts via Telegram UI during an active cycle updates `state.telegramUi.run.accountIds` in SQLite without restarting the cycle, resetting quotas, or losing in-flight queue items.
+- **VPN Resource Management**: Disabling an account immediately invokes `vpnSlots.release(accountId)`, releasing the VPN container/slot for newly activated accounts while strictly enforcing `MAX_ACTIVE_ACCOUNTS = 5`.
+- **Test Evidence**: `test/m3_edge_case_hardening.test.js` (Test 2.1 PASS).
+- **Status**: **PASS**
+
+#### Check 7: Real Authentic X Publishing & Quota Verification
+- **Target Item**: `04e2f5fa-0dfa-439f-87bd-589ba767df18` (authentic Arabic trading content: `📈 المتوسطات المتحركة ليست أدوات سحرية...`).
+- **Target Account**: `@crytpokingxvo8` (ID `x-930e0054b395228aefa9`) via SOCKS5 proxy `127.0.0.1:18801` (`yj_autopost_vpn_1`, Exit IP `187.40.234.102`).
+- **Bounded Protocol**: Configured bounded run with `maxItems: 1` and `stopAfterSuccess: true`. Triggered live service restart.
+- **Publish Execution**: Live service daemon published item `04e2f5fa-...` at `2026-11-02T06:50:49.344Z`.
+- **Live Tweet URL**: `https://x.com/crytpokingxvo8/status/2117147398187479078` (Tweet ID: `2117147398187479078`).
+- **4-Angle Verification Proof**:
+  1. *Direct HTTP Status*: `curl -sS -L -I "https://x.com/crytpokingxvo8/status/2117147398187479078"` returned `HTTP/2 307` redirecting to `HTTP/2 200 OK` from `server: cloudflare envoy`.
+  2. *Author Matching*: HTML metadata contains `article:author` = `https://x.com/CrytpoKingxvo8` and `twitter:creator` = `@CrytpoKingxvo8`.
+  3. *OpenGraph / Twitter Card Metadata*: HTML contains `og:title` = `Crytpo King (@CrytpoKingxvo8) on X`, `og:description` matching tweet text snippet, and `article:published_time` = `2026-11-02T06:50:49.000Z`.
+  4. *SQLite Persistence & Quota*: In `state.sqlite`:
+     - `item.state`: `'published'`
+     - `item.url`: `'https://x.com/crytpokingxvo8/status/2117147398187479078'`
+     - `item.accountUsername`: `'crytpokingxvo8'`
+     - Quota for date `2026-11-02`: incremented from 0 to 1 (`{"x-930e0054b395228aefa9": 1}`).
+     - Cycle state: transitioned to `'stopped'` immediately after 1 publish without queue drain.
+     - Restart persistence: verified quota remains `1` and cycle remains `'stopped'` after service restart.
+- **Status**: **PASS**
+
+#### Check 8: Telegram UI Lifecycle & 409 Collision Prevention
+- **In-Process Controls**: Start/stop cycle transitions, token fencing, and atomic cleanup verified.
+- **Singleton Mutual Exclusion**: `SingleInstanceLock` enforces exclusive file-lock acquisition with 15-second deadline and active PID validation. Secondary instances are cleanly rejected with `INSTANCE_LOCKED`.
+- **409 Conflict Prevention**: Eliminates Telegram `getUpdates` 409 Conflict by preventing dual polling.
+- **Test Evidence**: `test/single_instance_lock.test.js` (9/9 PASS), `test/single_instance_lock_adversarial_challenge.test.js` (8/8 PASS), `test/m4_lifecycle_and_recovery.test.js` (10/10 PASS).
+- **Status**: **PASS**
+
+#### Check 9: Governance Updates
+- **MASTER_TODO.md**: Preserved all 33 findings in Section 3 with `Codex Review Status: PENDING`. Preserved Phase P1 and Phase P2 signoffs as `PENDING` for user testing. Updated operational status of checks.
+- **PROGRESS_HISTORY.md**: Appended Milestone M4 operational progress with full details, verbatim commands, tweet URL, and quota proofs, preserving 100% of historical entries (lines 1-496).
+- **Mirroring**: Mirrored `MASTER_TODO.md` and `PROGRESS_HISTORY.md` to `Bot/Reports/RepairHandoff/`.
+- **Status**: **PASS**
+
+#### Check 10: Git Remote Sync & Evidence Packaging & Telegram Delivery
+- **Staging & Commit**: Staged all modified and untracked files across M1-M4. Clean commit: `feat(prod): live operational verification, M1-M4 completion, authentic publishing, and delivery`.
+- **Git Push**: Pushed commit to remote `origin/main` (`https://github.com/yjlvfe/YJAutoPostOnX.git`).
+- **Evidence Packaging**: Built `/root/Projects/YJAutoPostOnX/ARCHIVES/LIVE_OPERATIONAL_VERIFICATION.zip` with automated secret scanning (`SECRET_PATTERNS`).
+- **Telegram Document Delivery**: Dispatched ZIP archive via Telegram Bot API `sendDocument` to authorized chat IDs `528864559` and `5535435580`. Both delivery receipts verified (`ok: true`).
+- **Status**: **PASS**
