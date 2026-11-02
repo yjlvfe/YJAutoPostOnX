@@ -720,3 +720,39 @@ Following previous test passes (369/369), production stability encountered post-
   - Docker VPNs: 5/5 healthy on ports 18801-18805 with pairwise distinct public IPs and zero host IP leak.
   - Safety Invariants: 0 live tweets published during testing; quota completely isolated from stop/report events; ambiguous post quarantine 100% preserved.
 - **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
+
+#### Milestone M8 (Round 6): Long-Run Live Production Verification & Account Rotation Testing
+- **Date**: 2026-11-02 / 2026-11-03 (Riyadh Time: UTC+03:00)
+- **Task Mandate**:
+  - Eliminate all silent catches, unhandled error paths, and unstandardized logging (Task 1).
+  - Execute long-run verification under live systemd daemon (`yj-telegram-bot.service`, PID 941694).
+  - Authentic scheduler trigger, $\ge 10$ successful live posts on X, natural delays (180s-300s), balanced rotation ($\ge 2$ posts per eligible account), exhausted quota preservation, zero OOM / zero VPN thrashing, safe cycle stop, and authentic Telegram CSV delivery to chat `528864559`.
+- **Implementation & Deliverables (D05 & D06 Delegates)**:
+  - Task 1: Introduced `Bot/src/structuredLogger.js` (15 closed schema fields, secret sanitization, fail-safe stderr fallback). Replaced all empty catch blocks and unhandled rejections across `runner.js`, `telegramUi.js`, `telegramFlows.js`, `linkExports.js`, `forensicLogger.js`, `telegramApi.js`, and `singleInstance.js`. Added `test/m8_silent_failures_elimination.test.js` (12/12 PASS). Produced `D05_SILENT_FAILURE_AUDIT_REPORT.md`.
+  - Task 2: Executed live scheduled run (`runId: 76ac31e51232d24cb9aa5c46`). Completed 10 authentic successful publishing turns on X:
+    - Turn 1 (`@emiehg`, tweet `2117350650023714987`, quota 3->4, IP `37.19.196.26`)
+    - Turn 2 (`@kaniabq`, tweet `2117351796972957924`, quota 1->2, IP `66.179.142.36`)
+    - Turn 3 (`@marcosvhv`, tweet `2117353041699696813`, quota 0->1, IP `187.40.234.72`)
+    - Turn 4 (`@emiehg`, tweet `2117355013190439132`, quota 4->5, IP `37.19.196.26`)
+    - Turn 5 (`@kaniabq`, tweet `2117356201214140477`, quota 2->3, IP `66.179.142.36`)
+    - Turn 6 (`@marcosvhv`, tweet `2117357280371044425`, quota 1->2, IP `187.40.234.72`)
+    - Turn 7 (`@menalobq`, tweet `2117358236236190105`, quota 0->1, IP `66.179.142.23`)
+    - Turn 8 (`@emiehg`, tweet `2117359234790649927`, quota 5->6, IP `37.19.196.26`)
+    - Turn 9 (`@kaniabq`, tweet `2117360394050187611`, quota 3->4, IP `66.179.142.36`)
+    - Turn 10 (`@menalobq`, tweet `2117362765526446141`, quota 0->1 rollover, IP `66.179.142.23`)
+  - Account distribution: `@emiehg` (3), `@kaniabq` (3), `@marcosvhv` (2), `@menalobq` (2). All 4 eligible accounts achieved $\ge 2$ posts.
+  - Quota preservation: `@crytpokingxvo8` (10/10 exhausted at start, 0 posts attempted, remaining 0 preserved).
+  - Ambiguity quarantine & Anti-stall: Two ambiguous events (`5ebeb53f` at 23:31:53 and `99eb4ba0` at 00:02:13) quarantined with 0 quota deduction; `skipDelay = true` prevented queue stalls.
+  - Telegram CSV Delivery: Safe cycle stop executed, schedule restored (`enabled: false`). Daily cumulative CSV export `links_2026-11-03.csv` delivered to admin chat `528864559` (Message ID `1538`, Content Hash `80953beb14b01ca2427a93fd59540868bc5e00456f3238c7bcc33bd8db980948`).
+  - Resource & VPN Health: 117 snapshots collected over 54 minutes. Service Node.js RSS stable at 293-469 MB (avg 342.7 MB). Zero OOM kills. 5/5 Docker VPN containers healthy with 0 restarts. Zero host IP leaks.
+  - Automated Tests: 572/572 checks passed across Python, Node.js, netns, and VPN gates (100% pass rate in 104s).
+- **Deliverables Created**:
+  - `Bot/Reports/RepairHandoff/Round6_M8/LIVE_PRODUCTION_10_TURNS.jsonl`
+  - `Bot/Reports/RepairHandoff/Round6_M8/ACCOUNT_ROTATION_MATRIX.md`
+  - `Bot/Reports/RepairHandoff/Round6_M8/LIVE_RUNTIME_TIMELINE.md`
+  - `Bot/Reports/RepairHandoff/Round6_M8/SILENT_FAILURE_AUDIT.md`
+  - `Bot/Reports/RepairHandoff/Round6_M8/VPN_AND_RESOURCE_MONITORING.md`
+  - `Bot/Reports/RepairHandoff/Round6_M8/TELEGRAM_CSV_DELIVERY.md`
+  - `Bot/Reports/RepairHandoff/Round6_M8/TEST_EXECUTION_RESULTS.md`
+  - `Bot/Reports/RepairHandoff/Round6_M8/FINAL_PRODUCTION_VERDICT.md`
+- **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.

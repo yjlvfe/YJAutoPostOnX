@@ -181,6 +181,30 @@ Resolve the operational defect where stopping the bot from Telegram suppressed t
 
 ---
 
+## 2.9. Round 6: Long-Run Live Production Verification & Account Rotation (Milestone M8)
+
+### Objective
+Execute full long-run production verification of the automated posting engine on live VPS under systemd (`yj-telegram-bot.service`, PID 941694). Eliminate silent error swallowing across the codebase (Task 1). Trigger start authentically via the scheduler polling loop, complete at least 10 authentic successful publishing turns with natural rotation and delays (180s-300s), verify $\ge 2$ successful posts across all 4 eligible accounts (`emiehg`, `kaniabq`, `marcosvhv`, `menalobq`), preserve exhausted account quota (`crytpokingxvo8`), maintain zero OOM / zero VPN thrashing across 117 snapshots, execute safe cycle stop, and verify authentic Telegram CSV delivery to chat `528864559` (Message ID 1538).
+
+### Round 6 Task Matrix
+
+| Task / Feature ID | Module / Component | Task Description | Acceptance Criteria | Antigravity Status | Codex Status | Evidence / Verification |
+|---|---|---|---|:---:|:---:|---|
+| **M8-SILENT-FAILURES** | `Bot/src/structuredLogger.js`, `runner.js`, `telegramUi.js`, `linkExports.js`, `forensicLogger.js`, `telegramApi.js` | Eliminate all silent error swallowing, empty catch blocks, and unstandardized stderr writes. Enforce secret-safe closed schema (15 fields). | • 12/12 dedicated tests PASS<br>• Zero unhandled rejections<br>• Closed schema emission | **TESTED_PASS** | **PENDING** | `m8_silent_failures_elimination.test.js`<br>`D05_SILENT_FAILURE_AUDIT_REPORT.md` |
+| **M8-SCHEDULER-TRIGGER** | `Bot/src/runner.js`, `settings.js` | Trigger start authentically via the bot's scheduling loop (`isDue()` at 23:18 Riyadh) without spawning competing instances or mocking. | • Authentic scheduled start<br>• `source: "scheduled"` recorded in runId `76ac31e51232d24cb9aa5c46` | **TESTED_PASS** | **PENDING** | `live_timeline_events.json`<br>`journalctl` evidence |
+| **M8-10-TURNS-ROTATION** | `Bot/src/runner.js`, `dockerVpn.js` | Complete $\ge 10$ authentic publishing turns with natural round-robin rotation, natural delays (180-300s), and $\ge 2$ posts per eligible account. | • 10 successful live posts on X<br>• `@emiehg`: 3 posts<br>• `@kaniabq`: 3 posts<br>• `@marcosvhv`: 2 posts<br>• `@menalobq`: 2 posts | **TESTED_PASS** | **PENDING** | `LIVE_PRODUCTION_10_TURNS.jsonl`<br>`ACCOUNT_ROTATION_MATRIX.md` |
+| **M8-QUOTA-PRESERVATION** | `Bot/src/quota.js`, `runner.js` | Accurately preserve exhausted quota (`crytpokingxvo8` 10/10 used); increment quota strictly upon proven published tweet URLs; handle midnight calendar rollover. | • `crytpokingxvo8` 0 dispatch attempts<br>• 0 quota on ambiguous events<br>• 2026-11-03 rollover persisted | **TESTED_PASS** | **PENDING** | `ACCOUNT_ROTATION_MATRIX.md`<br>SQLite state inspection |
+| **M8-RESOURCE-STABILITY** | System VPS, Docker NordVPN | Monitor RAM, CPU, Swap, and 5 Docker VPN containers across 117 snapshots. Ensure zero OOM and zero host IP leaks. | • 0 OOM kills (RSS 293-469 MB)<br>• 0 Docker container restarts<br>• 5/5 distinct exit IPs (0 host leak) | **TESTED_PASS** | **PENDING** | `VPN_AND_RESOURCE_MONITORING.md`<br>`resource_snapshots.json` |
+| **M8-STOP-AND-CSV-DELIVERY** | `Bot/src/telegramUi.js`, `linkExports.js` | Execute authentic safe cycle stop, restore original schedule, and confirm Telegram CSV delivery receipt. | • Full 6-phase stop sequence<br>• Delivery confirmed in SQLite<br>• Telegram API Message ID 1538 | **TESTED_PASS** | **PENDING** | `TELEGRAM_CSV_DELIVERY.md`<br>`journalctl` evidence |
+| **M8-FULL-REGRESSION** | Master Test Runner | Execute all test suites across Python, Node.js, network namespaces, and Docker VPNs. | • 572/572 checks PASS (0 fail)<br>• 100% pass rate in 104s | **TESTED_PASS** | **PENDING** | `TEST_EXECUTION_RESULTS.md`<br>`run_all_automated_tests.sh` |
+
+### Governance & Signoff Status (Round 6)
+- **Phase P1 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Phase P2 Final Signoff**: **PENDING** (Reserved for user live testing)
+- **Codex Review Status**: Strictly **PENDING** across all findings and Round 6 tasks.
+
+---
+
 ## 3. Comprehensive Master Finding Registry (All 33 Findings)
 
 | Finding ID | Severity | Phase | Finding Title / Description | Affected Module | Antigravity Status | Codex Status |
