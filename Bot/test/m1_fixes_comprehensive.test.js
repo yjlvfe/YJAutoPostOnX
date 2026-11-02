@@ -103,6 +103,8 @@ describe('Milestone M1 Core Runner & Queue Fixes Verification', () => {
       const acc = state.accounts.find(a => a.id === 'acc-test');
       assert.strictEqual(acc.failures, 1, 'Account failure strike must increment to 1 on ambiguous outcome');
       assert.strictEqual(acc.enabled, true, 'Account must still be enabled on first failure');
+      assert.strictEqual(notifications.filter(n => n.includes('نتيجة نشر غامضة')).length, 0,
+        'Ambiguous item must produce a forensic event, not a per-item Telegram message');
 
       // Quota must NOT be deducted
       assert.strictEqual(state.posting?.quota?.[Object.keys(state.posting?.quota || {})[0]]?.['acc-test'] || 0, 0, 'No quota deducted for ambiguous');
@@ -164,6 +166,8 @@ describe('Milestone M1 Core Runner & Queue Fixes Verification', () => {
       // Check single isolation alert was sent
       const isolationAlerts = notifications.filter(n => n.includes('تم عزل الحساب') && n.includes('معزول (3 إخفاقات)'));
       assert.strictEqual(isolationAlerts.length, 1, 'Exactly one isolation alert must be sent');
+      assert.strictEqual(notifications.filter(n => n.includes('نتيجة نشر غامضة')).length, 0,
+        'Account isolation should produce one alert, not an additional ambiguous item alert');
     });
 
     test('1.3 Successful post resets failure strikes to 0', async () => {
