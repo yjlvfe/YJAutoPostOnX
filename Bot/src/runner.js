@@ -510,16 +510,22 @@ async function run({
             }
           }
 
-          // Pre-dispatch post transfer: revert to pending, remove attempt, unpin payload
+          // Only the owning claim may be released. Never return a dispatching
+          // attempt to pending: X could already have accepted the post.
           const i = s.items?.find(x => x.id === item?.id);
           if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
-            i.state = 'pending';
-            delete i.attempt;
-            if (i.payload?.account === accountId) {
-              delete i.payload.account;
+            if (i.attempt?.phase === 'claimed') {
+              i.state = 'pending';
+              delete i.attempt;
+              if (i.payload?.account === accountId) delete i.payload.account;
+            } else {
+              i.state = 'ambiguous';
+              i.reason ||= 'account_failure_after_dispatch';
+              i.accountId = accountId;
+              i.accountUsername = account?.username;
             }
+            if (s.posting) s.posting.publishingAt = null;
           }
-          if (s.posting) s.posting.publishingAt = null;
           return s;
         });
 
@@ -659,7 +665,7 @@ async function run({
         if (signal.aborted || current.cycle?.state !== 'running' || current.cycle.runId !== run.runId) break;
         const account = (current.accounts || []).find(a => a.id === accountId && a.enabled !== false);
         if (!account) continue;
-        let retryCount = 0, halt = false, retryAfterMs = 0, preDispatchTransfer = false;
+        let halt = false, retryAfterMs = 0, preDispatchTransfer = false;
         let result;
         while (!signal.aborted) {
         let retry = false, skipDelay = false, safeTransient = false;
@@ -776,7 +782,6 @@ async function run({
           const result = await attempt.wait(() => adapter.publish({ session, payload: adapter instanceof DirectXAdapter ? directPayload : item.payload, confirmPublish: true, signal: attempt.signal, onDispatch }));
           if (result.accountFailure) await ui.recordAccountCheck(accountId, { accountFailure: result.accountFailure }, { session: true, expectedAccount: account });
           if (result.published && !dispatchEntered) throw Object.assign(new Error('Missing dispatch fence'), { code: 'DISPATCH_FENCE_MISSING' });
-          const callbackAdapter = adapter instanceof DirectXAdapter || adapter.supportsDispatchCallback === true;
           const newState = result.published && result.url
             ? 'published'
             : (result.rateLimit || result.accountFailure === 'rate_limit')
@@ -795,7 +800,6 @@ async function run({
             s.posting.publishingAt = null;
             transitioned = true;
             delete i.attempt;
-            const wasProcessing = true;
             i.state = newState; i.reason = result.reason || null;
             if (['published', 'ambiguous'].includes(newState)) {
               i.accountId = accountId; i.accountUsername = account?.username;
@@ -810,12 +814,11 @@ async function run({
               if (acc) {
                 acc.failures = 0;
               }
-              if (wasProcessing) {
-                s.posting.quota ||= {};
-                const day = riyadhDay(new Date(publishedAt));
-                s.posting.quota[day] ||= {};
-                s.posting.quota[day][accountId] = (s.posting.quota[day][accountId] || 0) + 1;
-              }
+              // Claim token fencing above makes this a single durable transition.
+              s.posting.quota ||= {};
+              const day = riyadhDay(new Date(publishedAt));
+              s.posting.quota[day] ||= {};
+              s.posting.quota[day][accountId] = (s.posting.quota[day][accountId] || 0) + 1;
             }
             return s;
           });
@@ -852,9 +855,8 @@ async function run({
               xErrorMessage: result.reason,
               details: { itemId: item.id, reason: result.reason }
             }).catch(() => {});
-            // Notify but do NOT halt — isolate this one item and let the cycle
-            // continue with remaining pending items via other accounts/slots.
-            await notify(`⚠️ نتيجة نشر غامضة للمنشور (${item.id.slice(0,8)}…)؛ تم عزله ولن يُعاد إرساله. الدورة مستمرة مع بقية المنشورات.`);
+            // Preserve the per-item forensic event without spamming Telegram.
+            // A single alert is emitted only when the account is isolated.
             const outcome = await handleAccountFailure({
               accountId,
               account,
@@ -862,8 +864,7 @@ async function run({
               claim,
               session,
               failure: 'ambiguous',
-              reason: result.reason || 'publish_confirmation_missing',
-              details: { itemId: item.id }
+              reason: result.reason || 'publish_confirmation_missing'
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
@@ -942,7 +943,7 @@ async function run({
             // Dispatch crossed the irreversible boundary — the post may have
             // been published. Isolate it as ambiguous but let the cycle continue
             // with remaining items instead of freezing the entire run.
-            await notify(`⚠️ نتيجة نشر غامضة للمنشور (${item.id.slice(0,8)}…)؛ تم عزله. الدورة مستمرة.`);
+            // No per-item alert: forensicLogger already recorded the ambiguity.
             const outcome = await handleAccountFailure({
               accountId,
               account,
@@ -950,8 +951,7 @@ async function run({
               claim,
               session,
               failure: 'ambiguous',
-              reason: err.code || err.message || 'exception_after_dispatch',
-              details: { itemId: item.id }
+              reason: err.code || err.message || 'exception_after_dispatch'
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
