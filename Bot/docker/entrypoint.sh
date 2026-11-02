@@ -5,7 +5,7 @@ umask 077
 export LC_ALL=C
 unset TOKEN NORDVPN_TOKEN
 DAEMON_PID='' PROXY_PID='' BOOT_GUARD_PID=''
-fail() { printf '%s\n' "VPN startup failed: $1" >&2; exit 1; }
+fail() { printf '%s\n' "VPN startup failed: $1" >&2; sleep 60; exit 1; }
 cleanup() {
   trap - EXIT TERM INT
   rm -f /run/nordvpn/ready
@@ -119,7 +119,15 @@ if [[ -s /var/lib/nordvpn/yj-server ]]; then
   target=$(</var/lib/nordvpn/yj-server)
   [[ "$target" =~ ^[a-z]{2}[0-9]{2,6}\.nordvpn\.com$ ]] || fail 'pinned server invalid'
 fi
-nordvpn connect "$target" >/dev/null 2>&1 || fail 'connection rejected'
+if ! nordvpn connect "$target" >/dev/null 2>&1; then
+  if [[ "$target" != "$country" ]]; then
+    rm -f /var/lib/nordvpn/yj-server
+    target=$country
+    nordvpn connect "$target" >/dev/null 2>&1 || fail 'connection rejected'
+  else
+    fail 'connection rejected'
+  fi
+fi
 server=$(nordvpn status | sed -n 's/^Hostname: //p')
 [[ "$server" =~ ^[a-z]{2}[0-9]{2,6}\.nordvpn\.com$ ]] || fail 'connected server unknown'
 if [[ -s /var/lib/nordvpn/yj-server ]]; then

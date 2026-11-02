@@ -29,8 +29,19 @@ printf '%s\n' "$now" > /run/nordvpn/yj-reconnect-at
 status=$(nordvpn status 2>/dev/null) || exit 0
 grep -qx 'Status: Disconnected' <<< "$status" || exit 0
 target=$(cat /var/lib/nordvpn/yj-server 2>/dev/null || true)
-[[ "$target" =~ ^[a-z]{2}[0-9]{2,6}\.nordvpn\.com$ ]] || exit 0
-printf '%s\n' 'Confirmed disconnected tunnel: reconnecting pinned server' >&2
-nordvpn connect "$target" >/dev/null 2>&1 || true
+if [[ ! "$target" =~ ^[a-z]{2}[0-9]{2,6}\.nordvpn\.com$ ]]; then
+  target=${VPN_COUNTRY:-United_States}
+fi
+printf '%s\n' "Confirmed disconnected tunnel: reconnecting $target" >&2
+if ! nordvpn connect "$target" >/dev/null 2>&1; then
+  if [[ "$target" != "${VPN_COUNTRY:-United_States}" ]]; then
+    rm -f /var/lib/nordvpn/yj-server
+    nordvpn connect "${VPN_COUNTRY:-United_States}" >/dev/null 2>&1 || true
+  fi
+fi
+server=$(nordvpn status 2>/dev/null | sed -n 's/^Hostname: //p')
+if [[ "$server" =~ ^[a-z]{2}[0-9]{2,6}\.nordvpn\.com$ ]]; then
+  printf '%s\n' "$server" > /var/lib/nordvpn/yj-server
+fi
 # Remain alive even when the provider cannot recover. Real health remains false.
 exit 0

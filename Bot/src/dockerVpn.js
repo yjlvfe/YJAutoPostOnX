@@ -270,9 +270,20 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
         };
       } catch (err) {
         lastError = err.message || 'docker_exec_failed';
+        if (typeof lastError === 'string' && (lastError.includes('Too many connection attempts') || lastError.includes('Session Limit Reached'))) {
+          logger(`Rate limit detected from VPN provider (${lastError}); halting rotation early`);
+          break;
+        }
         await wait(1000);
       }
     }
+    try {
+      const exitCheck = await getExitIp(port);
+      if (!exitCheck) {
+        await docker(['exec', name, 'nordvpn', 'connect', 'United_States'], 25_000).catch(() => {});
+      }
+    } catch {}
+
     return {
       success: false,
       reason: lastError || 'rotation_exhausted',
