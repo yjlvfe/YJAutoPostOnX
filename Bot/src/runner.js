@@ -523,6 +523,7 @@ async function run({
               i.reason ||= 'account_failure_after_dispatch';
               i.accountId = accountId;
               i.accountUsername = account?.username;
+              delete i.attempt;
             }
             if (s.posting) s.posting.publishingAt = null;
           }
