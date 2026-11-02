@@ -901,8 +901,9 @@ async function run({
               slot: session?.slot,
               port: session?.port,
               exitIp: session?.exitIp,
-              xErrorMessage: result.reason,
-              details: { itemId: item.id, reason: result.reason }
+              xErrorCode: result.xErrorCode,
+              xErrorMessage: result.rawError || result.reason,
+              details: { itemId: item.id, reason: result.reason, rawError: result.rawError, fetchError: result.fetchError }
             }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
             // Preserve the per-item forensic event without spamming Telegram.
             // A single alert is emitted only when the account is isolated.

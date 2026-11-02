@@ -666,9 +666,30 @@ class TelegramUi {
       // Repeated refresh reconciliation must not consume Telegram flood quota.
       if (!fresh && current?.signature === signature) return;
       if (!fresh && current?.messageId) {
+        const startEditTime = Date.now();
+        logStructured(this.bot.logger, {
+          level: 'info',
+          component: 'telegram_ui',
+          event: 'panel_edit_attempt',
+          runId: s.cycle?.runId || null,
+          chatId: String(id.chat),
+          operation: 'editMessageText',
+          details: { messageId: current.messageId, forced: force, cycleState: s.cycle?.state || 'stopped' }
+        });
         try {
           await this.bot.transport.editMessageText(id.chat, current.messageId, text, extra);
           this.panelLastEdit.set(lockKey, now);
+          logStructured(this.bot.logger, {
+            level: 'info',
+            component: 'telegram_ui',
+            event: 'panel_edit_success',
+            runId: s.cycle?.runId || null,
+            chatId: String(id.chat),
+            operation: 'editMessageText',
+            result: 'success',
+            durationMs: Date.now() - startEditTime,
+            details: { messageId: current.messageId, cycleState: s.cycle?.state || 'stopped' }
+          });
           await this.bot.store.update(next => {
             next.telegramUi ||= {};
             next.telegramUi.dashboards ||= {};
@@ -687,6 +708,19 @@ class TelegramUi {
           return;
         }
         catch (error) {
+          logStructured(this.bot.logger, {
+            level: error.telegramCode === 429 ? 'warn' : 'error',
+            component: 'telegram_ui',
+            event: 'panel_edit_failed',
+            runId: s.cycle?.runId || null,
+            chatId: String(id.chat),
+            operation: 'editMessageText',
+            result: 'failed',
+            durationMs: Date.now() - startEditTime,
+            errorCode: String(error.telegramCode || error.code || 'UNKNOWN'),
+            sanitizedError: sanitizeError(error),
+            details: { messageId: current.messageId, cycleState: s.cycle?.state || 'stopped' }
+          });
           if (error.telegramCode === 429) this.panelBlockedUntil.set(lockKey, new Date(this.clock()).getTime() + (Number.isFinite(error.retryAfter) && error.retryAfter > 0 ? error.retryAfter : 30) * 1000);
           if (/message is not modified/i.test(error.message || '')) {
             await this.bot.store.update(next => {
@@ -786,7 +820,12 @@ class TelegramUi {
         tasks.push(this.panel({ key, chat: u.chatId, user: u.userId }, force));
       }
     }
-    await Promise.all(tasks);
+    const outcomes = await Promise.allSettled(tasks);
+    for (const o of outcomes) {
+      if (o.status === 'rejected') {
+        this._logWarn('panel_refresh_task_rejected', 'refreshPanels', o.reason);
+      }
+    }
   }
   async recordAccountCheck(accountId, result = {}, { session = false, source = 'x-session', expectedAccount, refresh = false, signal, onApplied } = {}) {
     if (!['x-session', 'vpn-health'].includes(source)) throw new TypeError('Unknown account check source');

@@ -756,3 +756,31 @@ Following previous test passes (369/369), production stability encountered post-
   - `Bot/Reports/RepairHandoff/Round6_M8/TEST_EXECUTION_RESULTS.md`
   - `Bot/Reports/RepairHandoff/Round6_M8/FINAL_PRODUCTION_VERDICT.md`
 - **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
+
+#### Milestone M8 (Post-Merge): Live Production Investigation of Account Rotation Failure & Multi-Chat Panel Synchronization
+- **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
+- **Problem Statement**:
+  - During live operator run from Telegram (00:35 - 00:42 Riyadh time), 3 accounts published successfully while 2 active accounts (`@emiehg` and `@marcosvhv`) failed to publish and triggered ambiguous quarantines (`publish_confirmation_missing`).
+  - Telegram control panel synchronization across authorized admin chats (`528864559` - Owner, and `5535435580` - Brother/Admin) required resilient concurrent `editMessageText` delivery without dropping updates or leaving one panel stale.
+- **Forensic Root Cause Analysis**:
+  1. **Account Rotation Failure (`@emiehg` & `@marcosvhv`)**:
+     - Direct investigation revealed that `twikit` library's `User.__init__` accessed `legacy['entities']['description']['urls']` directly without `.get()`. For profiles where X omitted or left `entities.description` empty (`{"description": {}}`), `twikit` crashed with `KeyError: 'urls'`.
+     - When `create_tweet()` or `verify_timeline()` parsed the GraphQL user representation inside tweet results, this unhandled `KeyError` crashed the worker. The exception fell into `publish_confirmation_missing` and was quarantined as `ambiguous`.
+     - `@crytpokingxvo8`, `@kaniabq`, and `@menalobq` succeeded because their profile entity schemas contained the `'urls'` key, creating the appearance of selective account publication.
+  2. **Telegram Panel Multi-Chat Resilience**:
+     - `_executeRefreshPanels` used `Promise.all(tasks)`, causing a transient delay or timeout in one chat to abort panel updates across all chats.
+     - Lacked structured logging for `editMessageText` lifecycle (`panel_edit_attempt`, `panel_edit_success`, `panel_edit_failed`).
+- **Remediation Applied**:
+  1. **Twikit User Normalization (`Bot/python/direct_x_compat.py`)**:
+     - Monkeypatched `twikit.user.User.__init__` with `_compat_user_data(data)` so that all `User` instantiations across `twikit` safely default missing entity fields (`description.urls`, `url.urls`, `pinned_tweet_ids_str`, `withheld_in_countries`), completely eliminating `KeyError: 'urls'`.
+  2. **Raw Diagnostic Preservation (`Bot/src/directX.js` & `Bot/src/runner.js`)**:
+     - Preserved `rawError`, `xErrorCode`, and `fetchError` through the DirectX adapter and recorded them in `forensicLogger.record()`.
+  3. **Multi-Chat Panel Resilience & Structured Logging (`Bot/src/telegramUi.js`)**:
+     - Upgraded `_executeRefreshPanels` from `Promise.all` to `Promise.allSettled`, isolating chat update pipelines so one chat's transport delay never blocks another.
+     - Implemented closed-schema structured JSON logging for `panel_edit_attempt`, `panel_edit_success`, and `panel_edit_failed` tracking `chatId`, `messageId`, `runId`, and `cycleState`.
+- **Verification & Evidence**:
+  - Live API probes through SOCKS5 verified all 5 accounts authenticated successfully (`state: authenticated`).
+  - Added Node.js test `test/telegram_panel_and_compat_user_fix.test.js` (PASS).
+  - Added Python test `python/test_compat_user_patch.py` (PASS).
+  - All 583 automated master tests passed (100% pass rate in 103s).
+  - Restarted `yj-telegram-bot.service` (PID 1374303) and verified live journalctl logs confirming simultaneous `panel_edit_success` for both Chat `528864559` (Message 1572) and Chat `5535435580` (Message 1291).

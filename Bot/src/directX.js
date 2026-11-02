@@ -175,10 +175,21 @@ class DirectXAdapter {
             reason: result.reason || 'rate_limit',
           };
         }
-        if (state.used || result.ambiguous) return { ...ambiguous(result.reason || 'publish_unverified'), accountFailure: result.accountFailure };
+        if (state.used || result.ambiguous) {
+          return {
+            ...ambiguous(result.reason || 'publish_unverified'),
+            accountFailure: result.accountFailure,
+            rawError: result.rawError,
+            xErrorCode: result.xErrorCode,
+            fetchError: result.fetchError
+          };
+        }
         return {
           ...unsent(result.reason || (result.rateLimit ? 'rate_limit' : 'auth_pre_dispatch_failed')),
           accountFailure: result.accountFailure || (result.rateLimit ? 'rate_limit' : undefined),
+          rawError: result.rawError,
+          xErrorCode: result.xErrorCode,
+          fetchError: result.fetchError,
           rateLimit: Boolean(result.rateLimit),
           retryAfterSeconds: result.retryAfterSeconds,
           readDiagnostic: readDiagnostic(result.readDiagnostic),
@@ -193,8 +204,8 @@ class DirectXAdapter {
         url: result.tweetUrl || `https://x.com/${state.identity.username}/status/${result.tweetId}`,
         recoveredFromTimeline: result.recoveredFromTimeline === true || result.recovered_from_timeline === true,
         ok: true };
-    } catch {
-      return state.used ? ambiguous('publish_confirmation_missing') : signal?.aborted ? unsent('stopped') : { ...unsent('identity_read_unavailable'), retryable: true };
+    } catch (err) {
+      return state.used ? { ...ambiguous('publish_confirmation_missing'), rawError: err?.message } : signal?.aborted ? unsent('stopped') : { ...unsent('identity_read_unavailable'), retryable: true, rawError: err?.message };
     } finally { state.busy = false; }
   }
 

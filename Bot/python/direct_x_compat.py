@@ -226,6 +226,16 @@ def compatibility_client():
     from twikit.x_client_transaction.transaction import ClientTransaction  # type: ignore
     from twikit.utils import find_dict  # type: ignore
 
+    # Monkeypatch twikit.user.User.__init__ so any User instantiated anywhere in twikit
+    # (e.g. inside twikit.tweet.tweet_from_data, get_user_tweets, search_tweet, etc.)
+    # automatically normalizes data through _compat_user_data to prevent KeyError: 'urls'.
+    _orig_user_init = User.__init__
+    if not getattr(User, '_compat_patched', False):
+        def _safe_user_init(self, client, data):
+            _orig_user_init(self, client, _compat_user_data(data))
+        User.__init__ = _safe_user_init
+        User._compat_patched = True
+
     class DirectUser(User):
         def __init__(self, client, data):
             super().__init__(client, _compat_user_data(data))
