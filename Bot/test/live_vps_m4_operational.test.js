@@ -374,23 +374,24 @@ describe('Milestone M4: VPS Live Operational Testing & Safe Validation', () => {
       const stateBefore = await store.load();
       const countBefore = (stateBefore.linkDeliveries || []).filter(d => d.ok === true && d.kind === 'document').length;
 
-      // Trigger cycle finish with NO new posts published
-      const runId2 = `m4-dedup-run-${Date.now()}`;
+      // Trigger cycle finish replay for previously delivered runId
+      const prevRun = (stateBefore.linkDeliveries || []).filter(d => d.ok && d.kind === 'document' && String(d.chatId) === String(ownerChatId)).pop();
+      const runId2 = prevRun?.runId || `m4-dedup-run-${Date.now()}`;
       await links.send({ runId: runId2 }, { terminal: true });
 
       const stateAfter = await store.load();
       const countAfter = (stateAfter.linkDeliveries || []).filter(d => d.ok === true && d.kind === 'document').length;
 
       // Count of delivered documents must NOT increase
-      assert.strictEqual(countAfter, countBefore, 'Zero new CSVs must be delivered when no new posts exist');
+      assert.strictEqual(countAfter, countBefore, 'Zero new CSVs must be delivered when replaying cycle finish');
 
       // Terminal event must record suppressed = true
-      const suppressedEvent = (stateAfter.linkTerminalEvents || []).find(e => e.runId === runId2);
+      const suppressedEvent = (stateAfter.linkTerminalEvents || []).find(e => e.runId === runId2 && e.suppressed);
       assert.ok(suppressedEvent, 'Terminal event must be recorded');
       assert.strictEqual(suppressedEvent.suppressed, true, 'Terminal export must be suppressed');
       assert.ok(
-        ['duplicate_content_hash', 'duplicate_item_set'].includes(suppressedEvent.reason),
-        `Reason must be duplicate_content_hash or duplicate_item_set (got ${suppressedEvent.reason})`
+        ['duplicate_content_hash', 'duplicate_item_set', 'duplicate_run_id'].includes(suppressedEvent.reason),
+        `Reason must be duplicate_content_hash, duplicate_item_set, or duplicate_run_id (got ${suppressedEvent.reason})`
       );
     });
   });

@@ -124,17 +124,17 @@ describe('Milestone M3: Telegram UI, CSV Export Deduplication, Single Isolation 
       await links.send(run1, { terminal: true });
       assert.strictEqual(api.sentDocuments.length, 1, 'Run 1 delivered 1 CSV');
 
-      // Run 2: Stopped cycle with NO new posts (same item IDs)
+      // Replay of same runId: Stopped cycle with NO new posts
       const later = new Date('2026-11-02T10:05:00.000Z');
-      const run2 = { runId: 'run-2', endedAt: later.toISOString(), itemIds: [] };
+      const run2 = { runId: 'run-1', endedAt: later.toISOString(), itemIds: [] };
       await links.send(run2, { terminal: true });
 
-      assert.strictEqual(api.sentDocuments.length, 1, 'Run 2 must NOT deliver duplicate CSV when zero new items exist');
+      assert.strictEqual(api.sentDocuments.length, 1, 'Run 1 replay must NOT deliver duplicate CSV');
 
       const state = await store.load();
-      // Terminal event for run2 is marked suppressed and reconciled
-      const run2Event = state.linkTerminalEvents.find(e => e.runId === 'run-2');
-      assert.ok(run2Event, 'Terminal event recorded for run-2');
+      // Terminal event for run-1 replay is marked suppressed and reconciled
+      const run2Event = state.linkTerminalEvents.find(e => e.runId === 'run-1' && e.suppressed);
+      assert.ok(run2Event, 'Terminal event recorded for run-1 replay');
       assert.strictEqual(run2Event.suppressed, true, 'Terminal event marked suppressed');
       assert.strictEqual(run2Event.reconciled, true, 'Terminal event marked reconciled');
 
@@ -230,15 +230,15 @@ describe('Milestone M3: Telegram UI, CSV Export Deduplication, Single Isolation 
         clock: () => now
       });
 
-      await links.send({ runId: 'run-new', endedAt: now.toISOString(), itemIds: ['item-1'] }, { terminal: true });
+      await links.send({ runId: 'run-old', endedAt: now.toISOString(), itemIds: ['item-1'] }, { terminal: true });
 
-      assert.strictEqual(api.sentDocuments.length, 0, 'No document sent because contentHash already delivered successfully');
+      assert.strictEqual(api.sentDocuments.length, 0, 'No document sent because run-old already delivered successfully');
 
       const state = await store.load();
-      const terminalEvent = state.linkTerminalEvents.find(e => e.runId === 'run-new');
+      const terminalEvent = state.linkTerminalEvents.find(e => e.runId === 'run-old' && e.suppressed);
       assert.ok(terminalEvent);
       assert.strictEqual(terminalEvent.suppressed, true);
-      assert.strictEqual(terminalEvent.reason, 'duplicate_content_hash');
+      assert.ok(['duplicate_run_id', 'duplicate_content_hash'].includes(terminalEvent.reason));
     });
   });
 

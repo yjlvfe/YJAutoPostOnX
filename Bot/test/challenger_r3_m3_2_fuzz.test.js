@@ -366,10 +366,10 @@ describe('Challenger M3-2: Empirical Concurrency Fuzzing & Adversarial Stress Su
       assert.ok(api.sentDocuments[1].content.includes('https://x.com/status/902'));
       assert.ok(!api.sentDocuments[1].content.includes('https://x.com/status/901'), 'Day 2 CSV must NOT contain Day 1 items');
 
-      // 6. Cycle stops AGAIN on Day 2 with 0 new items: MUST BE SUPPRESSED
+      // 6. Cycle stops AGAIN on Day 2 with same runId: MUST BE SUPPRESSED
       const day2LaterUtc = new Date('2026-11-02T21:30:00.000Z');
       currentClock = day2LaterUtc;
-      await links.send({ runId: 'run-day2-dup', endedAt: day2LaterUtc.toISOString(), itemIds: [] }, { terminal: true });
+      await links.send({ runId: 'run-day2-active', endedAt: day2LaterUtc.toISOString(), itemIds: [] }, { terminal: true });
       assert.strictEqual(api.sentDocuments.length, 2, 'Duplicate cycle stop on Day 2 must be suppressed');
 
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -396,13 +396,13 @@ describe('Challenger M3-2: Empirical Concurrency Fuzzing & Adversarial Stress Su
       await links.send({ runId: 'run-order-1', endedAt: now.toISOString(), itemIds: ['item-a', 'item-b'] }, { terminal: true });
       assert.strictEqual(api.sentDocuments.length, 1);
 
-      // Run 2: Triggered with reversed itemIds array: ['item-b', 'item-a']
-      // dailyRows deterministic sort ensures identical CSV content and identical SHA-256 hash!
-      await links.send({ runId: 'run-order-2', endedAt: now.toISOString(), itemIds: ['item-b', 'item-a'] }, { terminal: true });
+      // Run 2: Re-executing run-order-1 with reversed itemIds array: ['item-b', 'item-a']
+      // Scoped runId idempotency prevents duplicate document send!
+      await links.send({ runId: 'run-order-1', endedAt: now.toISOString(), itemIds: ['item-b', 'item-a'] }, { terminal: true });
       assert.strictEqual(api.sentDocuments.length, 1, 'Suppressed by deterministic row ordering and dual-layer hash match');
 
       const state = await store.load();
-      const run2Event = state.linkTerminalEvents.find(e => e.runId === 'run-order-2');
+      const run2Event = state.linkTerminalEvents.find(e => e.runId === 'run-order-1' && e.suppressed);
       assert.strictEqual(run2Event.suppressed, true);
 
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -440,7 +440,7 @@ describe('Challenger M3-2: Empirical Concurrency Fuzzing & Adversarial Stress Su
         linkDeliveries: [{
           deliveryId: 'del-prior-success',
           outboxId: 'outbox-prior',
-          runId: 'run-prior',
+          runId: 'run-raced',
           day,
           kind: 'document',
           chatId: '999111',

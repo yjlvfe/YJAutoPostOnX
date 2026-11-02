@@ -1400,7 +1400,10 @@ class TelegramUi {
       return s;
     });
     // Cancellation precedes panel teardown; Telegram I/O cannot hold dispatch.
-    if (accepted) this.onCycleStop?.(snapshot);
+    if (accepted) {
+      if (this.notify) this.notify('⏹️ تم استقبال طلب إيقاف دورة النشر وجاري إنهاء الدورة وإرسال التقرير...').catch(() => {});
+      this.onCycleStop?.(snapshot);
+    }
     if (!id) {
       if (this.ticker) { clearInterval(this.ticker); this.ticker = null; }
       this.stopTicker().catch(() => {});

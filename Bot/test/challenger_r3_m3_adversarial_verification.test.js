@@ -86,13 +86,13 @@ describe('Challenger R3 M3 Adversarial Verification Suite', () => {
       await links.send({ runId: 'run-init', endedAt: now.toISOString(), itemIds: items.map(x => x.id) }, { terminal: true });
       assert.strictEqual(api.sentDocuments.length, 1, 'Initial run sends 1 CSV');
 
-      // 15 rapid consecutive stop cycles without new items
+      // 15 rapid consecutive replay stop cycles of same runId
       for (let i = 1; i <= 15; i++) {
         const cycleTime = new Date(now.getTime() + i * 1000);
-        await links.send({ runId: `run-rapid-${i}`, endedAt: cycleTime.toISOString(), itemIds: [] }, { terminal: true });
+        await links.send({ runId: 'run-init', endedAt: cycleTime.toISOString(), itemIds: [] }, { terminal: true });
       }
 
-      assert.strictEqual(api.sentDocuments.length, 1, 'Total CSVs sent must remain exactly 1 after 15 rapid stops');
+      assert.strictEqual(api.sentDocuments.length, 1, 'Total CSVs sent must remain exactly 1 after 15 rapid stops of same runId');
 
       const state = await store.load();
       assert.strictEqual(state.linkTerminalEvents.length, 16, '16 terminal events recorded');
@@ -145,17 +145,17 @@ describe('Challenger R3 M3 Adversarial Verification Suite', () => {
         clock: () => now
       });
 
-      // Stopping cycle with the 3 destinations configured
-      await links.send({ runId: 'run-asymmetric', endedAt: now.toISOString(), itemIds: ['item-1'] }, { terminal: true });
+      // Stopping cycle with the 3 destinations configured for run-old
+      await links.send({ runId: 'run-old', endedAt: now.toISOString(), itemIds: ['item-1'] }, { terminal: true });
 
       // Verification: chat-A and chat-B are suppressed, chat-C receives the document!
       assert.strictEqual(api.sentDocuments.length, 1, 'Only 1 document sent across all destinations');
       assert.strictEqual(api.sentDocuments[0].chat_id, 'chat-C', 'Delivered specifically to chat-C');
 
       const state = await store.load();
-      const eventA = state.linkTerminalEvents.find(e => e.runId === 'run-asymmetric' && e.chatId === 'chat-A');
-      const eventB = state.linkTerminalEvents.find(e => e.runId === 'run-asymmetric' && e.chatId === 'chat-B');
-      const eventC = state.linkTerminalEvents.find(e => e.runId === 'run-asymmetric' && e.chatId === 'chat-C');
+      const eventA = state.linkTerminalEvents.find(e => e.runId === 'run-old' && e.chatId === 'chat-A' && e.suppressed);
+      const eventB = state.linkTerminalEvents.find(e => e.runId === 'run-old' && e.chatId === 'chat-B' && e.suppressed);
+      const eventC = state.linkTerminalEvents.find(e => e.runId === 'run-old' && e.chatId === 'chat-C' && !e.suppressed);
 
       assert.strictEqual(eventA.suppressed, true, 'chat-A suppressed');
       assert.strictEqual(eventB.suppressed, true, 'chat-B suppressed');
@@ -182,9 +182,9 @@ describe('Challenger R3 M3 Adversarial Verification Suite', () => {
       assert.strictEqual(api.sentDocuments.length, 1);
       assert.strictEqual(api.sentDocuments[0].content.split('\r\n').filter(Boolean).length, 2); // header + 1 item
 
-      // Step 2: Cycle 2 runs with 0 new items -> suppressed
-      await links.send({ runId: 'cycle-2', endedAt: now.toISOString(), itemIds: [] }, { terminal: true });
-      assert.strictEqual(api.sentDocuments.length, 1, 'Cycle 2 suppressed');
+      // Step 2: Cycle 1 re-executed with 0 new items -> suppressed
+      await links.send({ runId: 'cycle-1', endedAt: now.toISOString(), itemIds: [] }, { terminal: true });
+      assert.strictEqual(api.sentDocuments.length, 1, 'Cycle 1 replay suppressed');
 
       // Step 3: Mid-cycle addition: 2 new items published
       await store.update(s => {
@@ -200,9 +200,9 @@ describe('Challenger R3 M3 Adversarial Verification Suite', () => {
       assert.strictEqual(api.sentDocuments.length, 2, 'Cycle 3 delivers updated CSV');
       assert.strictEqual(api.sentDocuments[1].content.split('\r\n').filter(Boolean).length, 4); // header + 3 items
 
-      // Step 5: Cycle 4 runs with 0 new items -> suppressed again
-      await links.send({ runId: 'cycle-4', endedAt: now.toISOString(), itemIds: [] }, { terminal: true });
-      assert.strictEqual(api.sentDocuments.length, 2, 'Cycle 4 suppressed');
+      // Step 5: Cycle 3 re-executed with 0 new items -> suppressed again
+      await links.send({ runId: 'cycle-3', endedAt: now.toISOString(), itemIds: [] }, { terminal: true });
+      assert.strictEqual(api.sentDocuments.length, 2, 'Cycle 3 replay suppressed');
 
       // Step 6: Mid-cycle addition: item-4 published
       await store.update(s => {

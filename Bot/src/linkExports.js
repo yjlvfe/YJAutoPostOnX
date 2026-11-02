@@ -102,54 +102,67 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       if (['running', 'stopping'].includes(state.cycle?.state) && state.cycle.runId === run.runId) return state;
       if (state.telegramUi?.pendingReport?.runId === run.runId) delete state.telegramUi.pendingReport;
       for (const destination of destinations) {
-        if (state.linkTerminalEvents.some(event => event.runId === run.runId && event.chatId === destination)) continue;
-        const rows = dailyRows({ items: [
-          ...(state.items || []),
-          ...state.linkOutbox.filter(entry => entry.kind === 'document' && entry.day === day).flatMap(entry => entry.rows || [])
-        ] }, day);
-        if (!rows.length) {
-          state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day, reconciled: true, reason: 'empty_rows' });
-          continue;
-        }
-
-        const successfulDeliveries = (state.linkDeliveries || []).filter(entry =>
-          entry.ok === true && entry.kind === 'document' && entry.day === day && String(entry.chatId) === destination
+        // Idempotency per (destination, runId): prevent duplicate sends on replay of same runId
+        const existingEvent = (state.linkTerminalEvents || []).find(event => event.runId === run.runId && event.chatId === destination);
+        const alreadyDelivered = (state.linkDeliveries || []).some(entry =>
+          entry.runId === run.runId && String(entry.chatId) === destination && entry.ok
         );
-        const lastDelivery = successfulDeliveries[successfulDeliveries.length - 1];
-        const content = csv(rows);
-        const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+        const alreadyOutbox = (state.linkOutbox || []).some(entry =>
+          entry.runId === run.runId && String(entry.chatId) === destination
+        );
 
-        // Check if all item IDs are already present in the last successful delivery:
-        let isDuplicateItemSet = false;
-        if (lastDelivery && Array.isArray(lastDelivery.itemIds)) {
-          const lastDeliveredItemIds = new Set(lastDelivery.itemIds);
-          isDuplicateItemSet = rows.length === lastDeliveredItemIds.size && rows.every(r => lastDeliveredItemIds.has(r.id));
-        }
-
-        // Check if content hash matches any successful delivery for this day and destination:
-        const isDuplicateHash = successfulDeliveries.some(entry => entry.contentHash === contentHash);
-
-        if (isDuplicateItemSet || isDuplicateHash) {
+        if (existingEvent || alreadyDelivered || alreadyOutbox) {
           state.linkTerminalEvents.push({
             runId: run.runId,
             chatId: destination,
             day,
             reconciled: true,
             suppressed: true,
-            reason: isDuplicateHash ? 'duplicate_content_hash' : 'duplicate_item_set',
-            contentHash,
-            itemIds: rows.map(r => r.id)
+            reason: 'duplicate_run_id',
+            contentHash: null,
+            itemIds: []
           });
           logger.log(JSON.stringify({
             event: 'link_export_terminal_suppressed',
             runId: run.runId,
             chatId: destination,
             day,
-            reason: isDuplicateHash ? 'duplicate_content_hash' : 'duplicate_item_set',
-            itemCount: rows.length
+            reason: 'duplicate_run_id'
           }));
           continue;
         }
+
+        const rows = dailyRows({ items: [
+          ...(state.items || []),
+          ...state.linkOutbox.filter(entry => entry.kind === 'document' && entry.day === day).flatMap(entry => entry.rows || [])
+        ] }, day);
+
+        if (!rows.length) {
+          state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day, reconciled: true, reason: 'empty_rows' });
+          const hasEmptyOutbox = (state.linkOutbox || []).some(entry =>
+            entry.runId === run.runId && String(entry.chatId) === destination && entry.kind === 'empty'
+          );
+          if (!hasEmptyOutbox) {
+            state.linkOutbox.push({
+              outboxId: randomUUID(),
+              runId: run.runId,
+              terminalId: run.runId,
+              day,
+              kind: 'empty',
+              chatId: destination,
+              itemIds: [],
+              rows: [],
+              status: 'pending',
+              attempts: 0,
+              text: 'لا توجد روابط منشورات مؤكدة لهذا اليوم.',
+              createdAt: new Date(clock()).toISOString()
+            });
+          }
+          continue;
+        }
+
+        const content = csv(rows);
+        const contentHash = crypto.createHash('sha256').update(content).digest('hex');
 
         state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day, reconciled: false, contentHash });
         state.linkOutbox.push({ outboxId: randomUUID(), runId: run.runId, terminalId: run.runId, day,
@@ -185,22 +198,43 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       return state;
     });
     if (!entry) return;
-    // Fast deduplication check: if identical contentHash has already been successfully delivered for this destination & day
+    // Fast deduplication check: if identical document has already been successfully delivered for this destination & runId
     if (entry.kind === 'document' && contentHash) {
       const state = await store.load();
       const alreadyDelivered = (state.linkDeliveries || []).some(d =>
         d.ok === true && d.kind === 'document' && d.day === entry.day &&
-        String(d.chatId) === String(entry.chatId) && d.contentHash === contentHash && d.deliveryId !== deliveryId
+        String(d.chatId) === String(entry.chatId) &&
+        (d.runId === entry.runId || d.outboxId === entry.outboxId) &&
+        d.deliveryId !== deliveryId
       );
       if (alreadyDelivered) {
         await store.update(s => {
           const cur = (s.linkOutbox || []).find(r => r.outboxId === outboxId);
           const att = (s.linkDeliveries || []).find(r => r.deliveryId === deliveryId);
           if (cur) { cur.status = 'delivered'; cur.deliveredAt = new Date().toISOString(); }
-          if (att) { att.ok = true; att.suppressed = true; att.reason = 'duplicate_hash_in_deliver'; }
+          if (att) { att.ok = true; att.suppressed = true; att.reason = 'duplicate_run_in_deliver'; }
           return s;
         });
-        logger.log(JSON.stringify({ event: 'telegram_document_delivery_suppressed', outboxId, chatId: entry.chatId, day: entry.day, reason: 'already_delivered_identical_hash' }));
+        logger.log(JSON.stringify({ event: 'telegram_document_delivery_suppressed', outboxId, chatId: entry.chatId, day: entry.day, reason: 'already_delivered_for_run' }));
+        return;
+      }
+    }
+    if (entry.kind === 'empty') {
+      const state = await store.load();
+      const alreadyDelivered = (state.linkDeliveries || []).some(d =>
+        d.ok === true && d.kind === 'empty' &&
+        String(d.chatId) === String(entry.chatId) &&
+        (d.runId === entry.runId || d.outboxId === entry.outboxId) &&
+        d.deliveryId !== deliveryId
+      );
+      if (alreadyDelivered) {
+        await store.update(s => {
+          const cur = (s.linkOutbox || []).find(r => r.outboxId === outboxId);
+          const att = (s.linkDeliveries || []).find(r => r.deliveryId === deliveryId);
+          if (cur) { cur.status = 'delivered'; cur.deliveredAt = new Date().toISOString(); }
+          if (att) { att.ok = true; att.suppressed = true; att.reason = 'duplicate_empty_in_deliver'; }
+          return s;
+        });
         return;
       }
     }
@@ -209,7 +243,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
     let response;
     try {
       response = entry.kind === 'empty'
-        ? await api.sendMessage({ chat_id: entry.chatId, text: 'لا توجد روابط منشورات مؤكدة لإرسالها حالياً.' })
+        ? await api.sendMessage({ chat_id: entry.chatId, text: entry.text || 'لا توجد روابط منشورات مؤكدة لهذا اليوم.' })
         : await api.sendDocument({ chat_id: entry.chatId, filename: `links_${entry.day}.csv`, content: csv(entry.rows) });
       if ((response?.message_id ?? response?.result?.message_id) == null) throw new Error('Telegram delivery receipt missing');
     } catch (error) {
@@ -236,6 +270,8 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       const deliveredAt = new Date().toISOString();
       if (current) { current.status = 'delivered'; current.messageId = messageId; current.deliveredAt = deliveredAt; }
       if (attempt) { attempt.ok = true; attempt.messageId = messageId; attempt.deliveredAt = deliveredAt; if (contentHash) attempt.contentHash = contentHash; }
+      const terminalEvent = (state.linkTerminalEvents || []).find(event => event.runId === current?.runId && String(event.chatId) === String(current?.chatId));
+      if (terminalEvent) terminalEvent.reconciled = true;
       return state;
     });
     logger.log(JSON.stringify({ event: entry.kind === 'empty' ? 'telegram_empty_notice_sent' : 'telegram_document_sent', ok: true, chat_id: entry.chatId, message_id: messageId }));

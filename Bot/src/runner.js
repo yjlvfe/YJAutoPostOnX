@@ -1099,7 +1099,10 @@ async function run({
       // Stop only fences dispatch. Export after the job settles so a confirmed
       // in-flight success cannot create a second report from final cleanup.
       onCycleStop: () => { abortController?.abort(); },
-      onCycleFinished: run => sendExport(run, { emptyMessage: false, terminal: true }) });
+      onCycleFinished: async run => {
+        await sendExport(run, { emptyMessage: false, terminal: true });
+        await links.flush().catch(() => {});
+      } });
     // One reconciliation in flight bounds polling work; the tracked task is
     // drained before store close. Transport errors must not stop admission.
     let reconciliation;
