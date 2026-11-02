@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execSync } = require('node:child_process');
+const { execSync, execFileSync } = require('node:child_process');
 const { SqliteStore } = require('../src/sqliteStore');
 const { SettingsManager } = require('../src/settings');
 const { riyadhDateParts } = require('../src/scheduling');
@@ -36,12 +36,13 @@ function getSystemMetrics() {
 
   let totalRamMb = 0, freeRamMb = 0, swapUsedMb = 0;
   try {
-    const freeOut = execSync('free -m', { encoding: 'utf8' });
+    const freeOut = execSync('free -m', { encoding: 'utf8', timeout: 4000, maxBuffer: 65536 });
     for (const line of freeOut.split('\n')) {
       if (line.startsWith('Mem:')) {
         const p = line.split(/\s+/);
         totalRamMb = parseInt(p[1], 10);
-        freeRamMb = parseInt(p[3], 10);
+        // 'available' accounts for reclaimable cache; 'free' alone is misleading.
+        freeRamMb = parseInt(p[6], 10);
       } else if (line.startsWith('Swap:')) {
         const p = line.split(/\s+/);
         swapUsedMb = parseInt(p[2], 10);
@@ -52,7 +53,7 @@ function getSystemMetrics() {
   // Check docker VPN containers health
   let vpnHealth = {};
   try {
-    const dockerOut = execSync('docker ps --format "{{.Names}}: {{.Status}}"', { encoding: 'utf8' });
+    const dockerOut = execSync('docker ps --format "{{.Names}}: {{.Status}}"', { encoding: 'utf8', timeout: 4000, maxBuffer: 65536 });
     for (const line of dockerOut.split('\n')) {
       const match = line.match(/(yj_autopost_vpn_\d+):\s*(.*)/);
       if (match) {
@@ -75,11 +76,13 @@ function getSystemMetrics() {
 
 function getItemLogLine(itemId) {
   try {
-    const out = execSync(`journalctl -u yj-telegram-bot.service --grep="${itemId}" --no-pager`, { encoding: 'utf8' });
+    if (!/^[a-f\d-]{16,64}$/i.test(itemId)) throw new Error('Unsafe item ID for journal query');
+    const out = execFileSync('journalctl', ['-u', 'yj-telegram-bot.service', '--grep=' + itemId, '--no-pager'],
+      { encoding: 'utf8', timeout: 8000, maxBuffer: 256 * 1024 });
     const lines = out.trim().split('\n').filter(l => l.includes(itemId) && l.includes('post_result'));
-    return lines.length ? lines[lines.length - 1] : `published itemId: ${itemId}`;
+    return lines.length ? lines[lines.length - 1] : null;
   } catch {
-    return `published itemId: ${itemId}`;
+    return null;
   }
 }
 
@@ -93,6 +96,9 @@ async function main() {
   const accounts = initialState.accounts || [];
   const initialQuotas = structuredClone(initialState.posting?.quota?.['2026-11-02'] || {});
   const origSchedule = structuredClone(initialState.settings?.schedule || { enabled: false, hour: 10, minute: 0 });
+  const expectedChatId = process.env.BOT_OWNER_CHAT_ID;
+  if (!/^\d{1,20}$/.test(expectedChatId || '')) throw new Error('BOT_OWNER_CHAT_ID must be set for verifiable Telegram receipt');
+  if (['running', 'stopping'].includes(initialState.cycle?.state)) throw new Error('Refusing to reconfigure scheduler while a production cycle is active');
   let scheduleModified = false;
 
   const currentTrackedQuota = {};
@@ -257,6 +263,7 @@ async function main() {
 
       // Raw log reference from journalctl
       const rawLog = getItemLogLine(item.id);
+      if (!rawLog) throw new Error('Live journal post_result evidence missing for item ' + item.id);
 
       const turnRecord = {
         turnNumber: turnNum,
@@ -366,7 +373,8 @@ async function main() {
     const cycleState = s.cycle?.state;
 
     // Check linkDeliveries for this runId
-    const deliveries = (s.linkDeliveries || []).filter(d => d.runId === runId && d.kind === 'document');
+    const deliveries = (s.linkDeliveries || []).filter(d =>
+      d.runId === runId && d.kind === 'document' && String(d.chatId) === expectedChatId);
     if (deliveries.length > 0 && deliveries.some(d => d.ok)) {
       deliveryConfirmed = true;
       deliveryReceipt = deliveries.find(d => d.ok);
