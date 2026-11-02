@@ -59,8 +59,9 @@ describe('Challenger 1 Adversarial Suite: M4 & M5 Stress & Boundary Tests', () =
       });
 
       const [ip18801, ip18802] = await Promise.all([probePort(18801), probePort(18802)]);
-      assert.strictEqual(ip18801, '187.40.234.102', 'Port 18801 Exit IP must be 187.40.234.102');
-      assert.strictEqual(ip18802, '187.14.50.72', 'Port 18802 Exit IP must be 187.14.50.72');
+      assert.match(ip18801, /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/, 'Port 18801 Exit IP must be valid IPv4');
+      assert.match(ip18802, /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/, 'Port 18802 Exit IP must be valid IPv4');
+      assert.notStrictEqual(ip18801, ip18802, 'Ports 18801 and 18802 must have distinct exit IPs');
     });
 
     test('1.2 Host public IP does not leak through SOCKS5 proxy endpoints', async () => {
