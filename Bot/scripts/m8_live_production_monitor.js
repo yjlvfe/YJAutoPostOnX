@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execSync } = require('node:child_process');
+const { execSync, execFileSync } = require('node:child_process');
 const { SqliteStore } = require('../src/sqliteStore');
 const { SettingsManager } = require('../src/settings');
 const { riyadhDateParts } = require('../src/scheduling');
@@ -24,7 +24,9 @@ function getSystemMetrics() {
   let memRssMb = 0;
   let cpuPercent = 0;
   try {
-    const psOut = execSync('ps -p 941694 -o %cpu,rss --no-headers', { encoding: 'utf8' }).trim();
+    const livePid = Number(execSync('systemctl show --property=MainPID --value yj-telegram-bot.service', { encoding: 'utf8', timeout: 4000 }).trim());
+    if (!Number.isSafeInteger(livePid) || livePid <= 1) throw new Error('Production service MainPID not available');
+    const psOut = execSync('ps -p ' + livePid + ' -o %cpu,rss --no-headers', { encoding: 'utf8', timeout: 4000 }).trim();
     if (psOut) {
       const parts = psOut.split(/\s+/);
       cpuPercent = parseFloat(parts[0]) || 0;
@@ -34,12 +36,13 @@ function getSystemMetrics() {
 
   let totalRamMb = 0, freeRamMb = 0, swapUsedMb = 0;
   try {
-    const freeOut = execSync('free -m', { encoding: 'utf8' });
+    const freeOut = execSync('free -m', { encoding: 'utf8', timeout: 4000, maxBuffer: 65536 });
     for (const line of freeOut.split('\n')) {
       if (line.startsWith('Mem:')) {
         const p = line.split(/\s+/);
         totalRamMb = parseInt(p[1], 10);
-        freeRamMb = parseInt(p[3], 10);
+        // 'available' accounts for reclaimable cache; 'free' alone is misleading.
+        freeRamMb = parseInt(p[6], 10);
       } else if (line.startsWith('Swap:')) {
         const p = line.split(/\s+/);
         swapUsedMb = parseInt(p[2], 10);
@@ -50,7 +53,7 @@ function getSystemMetrics() {
   // Check docker VPN containers health
   let vpnHealth = {};
   try {
-    const dockerOut = execSync('docker ps --format "{{.Names}}: {{.Status}}"', { encoding: 'utf8' });
+    const dockerOut = execSync('docker ps --format "{{.Names}}: {{.Status}}"', { encoding: 'utf8', timeout: 4000, maxBuffer: 65536 });
     for (const line of dockerOut.split('\n')) {
       const match = line.match(/(yj_autopost_vpn_\d+):\s*(.*)/);
       if (match) {
@@ -61,7 +64,7 @@ function getSystemMetrics() {
 
   return {
     timestamp: new Date().toISOString(),
-    servicePid: 941694,
+    servicePid: Number(execSync('systemctl show --property=MainPID --value yj-telegram-bot.service', { encoding: 'utf8', timeout: 4000 }).trim()) || null,
     serviceCpuPercent: cpuPercent,
     serviceRssMb: Math.round(memRssMb * 10) / 10,
     totalRamMb,
@@ -73,11 +76,13 @@ function getSystemMetrics() {
 
 function getItemLogLine(itemId) {
   try {
-    const out = execSync(`journalctl -u yj-telegram-bot.service --grep="${itemId}" --no-pager`, { encoding: 'utf8' });
+    if (!/^[a-f\d-]{16,64}$/i.test(itemId)) throw new Error('Unsafe item ID for journal query');
+    const out = execFileSync('journalctl', ['-u', 'yj-telegram-bot.service', '--grep=' + itemId, '--no-pager'],
+      { encoding: 'utf8', timeout: 8000, maxBuffer: 256 * 1024 });
     const lines = out.trim().split('\n').filter(l => l.includes(itemId) && l.includes('post_result'));
-    return lines.length ? lines[lines.length - 1] : `published itemId: ${itemId}`;
+    return lines.length ? lines[lines.length - 1] : null;
   } catch {
-    return `published itemId: ${itemId}`;
+    return null;
   }
 }
 
@@ -91,6 +96,10 @@ async function main() {
   const accounts = initialState.accounts || [];
   const initialQuotas = structuredClone(initialState.posting?.quota?.['2026-11-02'] || {});
   const origSchedule = structuredClone(initialState.settings?.schedule || { enabled: false, hour: 10, minute: 0 });
+  const expectedChatId = process.env.BOT_OWNER_CHAT_ID;
+  if (!/^\d{1,20}$/.test(expectedChatId || '')) throw new Error('BOT_OWNER_CHAT_ID must be set for verifiable Telegram receipt');
+  if (['running', 'stopping'].includes(initialState.cycle?.state)) throw new Error('Refusing to reconfigure scheduler while a production cycle is active');
+  let scheduleModified = false;
 
   const currentTrackedQuota = {};
   console.log('\n[INITIAL STATUS] Accounts & Quota on 2026-11-02:');
@@ -133,11 +142,11 @@ async function main() {
   recordTimeline('SCHEDULE_CONFIGURING', { targetHour, targetMinute });
 
   // Update schedule via authentic settings interface and ensure uiScheduleDay allows triggering
-  await settings.setSchedule({ enabled: true, hour: targetHour, minute: targetMinute });
-  await store.update(s => {
-    s.uiScheduleDay = '2026-11-1'; // Ensure it differs from today's '2026-11-2'
-    return s;
-  });
+  try {
+    await settings.setSchedule({ enabled: true, hour: targetHour, minute: targetMinute });
+    scheduleModified = true;
+  // Do not forge the scheduler's last-run marker. A second schedule on the
+  // same day must be rejected by the genuine production scheduler.
 
   console.log('Schedule enabled in store. Awaiting systemd polling trigger...');
   recordTimeline('SCHEDULE_ENABLED', { targetHour, targetMinute });
@@ -145,6 +154,7 @@ async function main() {
   // 3. Wait for Service to Start Scheduled Cycle
   let runId = null;
   let cycleStartedAt = null;
+  let allowedRunItemIds = new Set();
   const startWaitDeadline = Date.now() + 180000; // 3 min deadline
 
   while (Date.now() < startWaitDeadline) {
@@ -152,6 +162,8 @@ async function main() {
     if (s.cycle?.state === 'running' && s.cycle.runId) {
       runId = s.cycle.runId;
       cycleStartedAt = s.cycle.startedAt;
+      allowedRunItemIds = new Set(s.telegramUi?.run?.itemIds || []);
+      if (s.telegramUi?.run?.runId !== runId || !allowedRunItemIds.size) throw new Error('Run identity/scope not verified');
       recordTimeline('CYCLE_STARTED_AUTHENTICALLY', { runId, startedAt: cycleStartedAt, source: s.telegramUi?.run?.source });
       console.log(`\n============================================================`);
       console.log(`>>> AUTHENTIC CYCLE STARTED VIA SCHEDULER!`);
@@ -164,9 +176,7 @@ async function main() {
 
   if (!runId) {
     console.error('ERROR: Service did not start scheduled cycle within timeout.');
-    await settings.setSchedule(origSchedule);
-    await store.close();
-    process.exit(1);
+    throw new Error('Scheduler did not start a new run before deadline');
   }
 
   // Published item tracking
@@ -212,7 +222,7 @@ async function main() {
 
     // Check newly published items for this runId
     const allPublished = (currentState.items || []).filter(i =>
-      i.state === 'published' &&
+      allowedRunItemIds.has(i.id) && i.state === 'published' &&
       i.publishedAt &&
       new Date(i.publishedAt) >= new Date(cycleStartedAt)
     );
@@ -232,9 +242,10 @@ async function main() {
       const exitIp = account.exitIp || 'unknown';
 
       // Quotas (exact monotonic tracking)
-      const quotaBefore = currentTrackedQuota[item.accountId] || 0;
-      const quotaAfter = quotaBefore + 1;
-      currentTrackedQuota[item.accountId] = quotaAfter;
+      // Snapshot quota for the actual Riyadh day; no synthetic per-post deltas.
+      const quotaDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(item.publishedAt));
+      const quotaAtObservation = currentState.posting?.quota?.[quotaDay]?.[item.accountId] ?? null;
+      const quotaBefore = null, quotaAfter = null;
 
       // Tweet info
       const tweetUrl = item.url || '';
@@ -252,6 +263,7 @@ async function main() {
 
       // Raw log reference from journalctl
       const rawLog = getItemLogLine(item.id);
+      if (!rawLog) throw new Error('Live journal post_result evidence missing for item ' + item.id);
 
       const turnRecord = {
         turnNumber: turnNum,
@@ -267,6 +279,8 @@ async function main() {
         tweetUrl,
         quotaBefore,
         quotaAfter,
+        quotaDay,
+        quotaAtObservation,
         vpnSlot,
         exitIp,
         result: 'published',
@@ -293,7 +307,7 @@ async function main() {
       console.log(`    Tweet ID: ${tweetId}`);
       console.log(`    Tweet URL: ${tweetUrl}`);
       console.log(`    VPN Slot: ${vpnSlot} | Exit IP: ${exitIp}`);
-      console.log(`    Quota: ${quotaBefore} -> ${quotaAfter}`);
+      console.log(`    SQLite quota for ${quotaDay}: ${quotaAtObservation} (not a per-item before/after claim)`);
       console.log(`    Eligible Totals: emiehg=${perAccountCount.emiehg}, kaniabq=${perAccountCount.kaniabq}, marcosvhv=${perAccountCount.marcosvhv}, menalobq=${perAccountCount.menalobq}`);
       console.log(`    System: Mem RSS=${metrics.serviceRssMb}MB, CPU=${metrics.serviceCpuPercent}%, Free RAM=${metrics.freeRamMb}MB`);
       console.log(`------------------------------------------------------------\n`);
@@ -334,17 +348,17 @@ async function main() {
   console.log('\n=== Step 5: Final Safe Stop & Authentic CSV Delivery Verification ===');
   recordTimeline('INITIATING_SAFE_STOP');
 
-  // Trigger authentic stop via store update
-  await store.update(s => {
-    if (s.cycle?.state === 'running') {
-      console.log('Setting cycle.state = "stopping" to trigger runner graceful exit...');
-      s.cycle.state = 'stopping';
-    }
-    return s;
-  });
+  // Read-only control boundary: never impersonate Telegram Stop by editing
+  // SQLite. Only the real bot's accepted stop or natural completion counts.
+  const beforeStop = await store.load();
+  if (beforeStop.cycle?.state === 'running') {
+    recordTimeline('WAITING_FOR_AUTHENTIC_STOP', { runId });
+    console.warn('Awaiting native Telegram Stop or natural completion; the monitor will not alter cycle.state.');
+  }
 
   // Restore original schedule
   await settings.setSchedule(origSchedule);
+  scheduleModified = false;
   console.log('Original schedule restored to:', JSON.stringify(origSchedule));
   recordTimeline('SCHEDULE_RESTORED', origSchedule);
 
@@ -359,7 +373,8 @@ async function main() {
     const cycleState = s.cycle?.state;
 
     // Check linkDeliveries for this runId
-    const deliveries = (s.linkDeliveries || []).filter(d => d.runId === runId && d.kind === 'document');
+    const deliveries = (s.linkDeliveries || []).filter(d =>
+      d.runId === runId && d.kind === 'document' && String(d.chatId) === expectedChatId);
     if (deliveries.length > 0 && deliveries.some(d => d.ok)) {
       deliveryConfirmed = true;
       deliveryReceipt = deliveries.find(d => d.ok);
@@ -380,8 +395,17 @@ async function main() {
     await sleep(5000);
   }
 
-  await store.close();
-  console.log('\n=== Live Production Verification Monitor Run Completed Successfully ===\n');
+  const endState = await store.load();
+  const stopped = endState.cycle?.state === 'stopped';
+  const receipt = deliveryConfirmed && deliveryReceipt?.runId === runId && deliveryReceipt?.messageId != null && deliveryReceipt?.ok === true;
+  if (!stopped || !receipt || totalPublishedTurns < 10 || !Object.values(perAccountCount).every(n => n >= 2)) {
+    throw new Error('M8 verification INCOMPLETE: authentic stop, quota coverage, or Telegram CSV receipt was not proven');
+  }
+  console.log('\n=== M8 VERIFICATION COMPLETE (receipt recorded) ===\n');
+  } finally {
+    if (scheduleModified) await settings.setSchedule(origSchedule).catch(error => console.error('Failed to restore schedule:', error.message));
+    await store.close();
+  }
 }
 
 main().catch(err => {
