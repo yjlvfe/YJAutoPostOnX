@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -63,7 +64,9 @@ class SingleInstanceLock {
           try {
             const current = JSON.parse(await fs.readFile(this.lockPath, 'utf8'));
             if (Number.isInteger(current?.pid) && current.pid > 0) holderPid = current.pid;
-          } catch {}
+          } catch (err) {
+            logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'lock_read_parse_failed', operation: 'readFile', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err), suppressionReason: 'corrupt_lock_payload' });
+          }
           const msg = holderPid
             ? `Telegram runner lock is held by PID ${holderPid}: ${this.lockPath}`
             : `Telegram runner lock is held: ${this.lockPath}`;
@@ -81,7 +84,10 @@ class SingleInstanceLock {
     let stat;
     try { stat = await fs.stat(this.lockPath); } catch (error) { return error.code === 'ENOENT'; }
     let record;
-    try { record = JSON.parse(await fs.readFile(this.lockPath, 'utf8')); } catch (_) { record = null; }
+    try { record = JSON.parse(await fs.readFile(this.lockPath, 'utf8')); } catch (err) {
+      logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'stale_lock_parse_failed', operation: 'recoverStale.parse', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
+      record = null;
+    }
     let dead = false;
     if (Number.isInteger(record?.pid) && record.pid > 0) {
       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
@@ -104,10 +110,14 @@ class SingleInstanceLock {
         try {
           const moved = JSON.parse(await fs.readFile(stalePath, 'utf8'));
           if (moved.token !== record.token) {
-            await fs.rename(stalePath, this.lockPath).catch(() => {});
+            await fs.rename(stalePath, this.lockPath).catch(err => {
+              logStructured(null, { level: 'error', component: 'single_instance_lock', event: 'stale_lock_restore_failed', operation: 'recoverStale.restore', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
+            });
             return false;
           }
-        } catch {}
+        } catch (err) {
+          logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'stale_lock_token_read_failed', operation: 'recoverStale.verifyToken', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
+        }
       }
       await fs.unlink(stalePath);
       return true;
@@ -168,7 +178,17 @@ class SingleInstanceLock {
     }));
 
     // Check if the conflicting instance has died or released its lock
-    await this.recoverStale().catch(() => {});
+    await this.recoverStale().catch(err => {
+      logStructured(logger, {
+        level: 'warn',
+        component: 'single_instance_lock',
+        event: 'recover_stale_failed',
+        operation: 'handleConflict409.recoverStale',
+        result: 'failed',
+        errorCode: extractErrorCode(err),
+        sanitizedError: sanitizeError(err)
+      });
+    });
 
     await sleepFn(backoffMs);
 
@@ -216,7 +236,17 @@ class SingleInstanceLock {
           backoffMs
         }));
 
-        await this.recoverStale().catch(() => {});
+        await this.recoverStale().catch(err => {
+          logStructured(logger, {
+            level: 'warn',
+            component: 'single_instance_lock',
+            event: 'recover_stale_failed',
+            operation: 'executeWithConflictBackoff.recoverStale',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        });
         await sleepFn(backoffMs);
         retryCount += 1;
       }

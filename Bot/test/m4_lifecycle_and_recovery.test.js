@@ -282,7 +282,7 @@ describe('Milestone M4 & M5: Lifecycle, Telegram CSV, Recovery & Governance Suit
 
     test('2.2 Journalctl evidence: proves document delivery to admin chats 528864559 and 5535435580', async () => {
       const getLogs = () => new Promise((resolve, reject) => {
-        const proc = spawn('journalctl', ['-u', 'yj-telegram-bot.service', '--no-pager', '-n', '500']);
+        const proc = spawn('journalctl', ['-u', 'yj-telegram-bot.service', '--no-pager', '-n', '20000']);
         let out = '';
         proc.stdout.on('data', chunk => { out += chunk; });
         proc.on('close', code => {

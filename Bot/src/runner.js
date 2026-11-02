@@ -14,6 +14,7 @@ const { DirectXAdapter } = require('./directX');
 const { VpnSlotManager } = require('./dockerVpn');
 const { riyadhDay, accountCapacity, quotaAdmission } = require('./quota');
 const { normalizeSubnet } = require('./forensicLogger');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -48,7 +49,9 @@ class SingleInstanceLock {
           try {
             const current = JSON.parse(await fs.readFile(this.lockPath, 'utf8'));
             if (Number.isInteger(current?.pid) && current.pid > 0) holderPid = current.pid;
-          } catch {}
+          } catch (err) {
+            logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'lock_read_parse_failed', operation: 'readFile', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err), suppressionReason: 'corrupt_lock_payload' });
+          }
           const msg = holderPid
             ? `Telegram runner lock is held by PID ${holderPid}: ${this.lockPath}`
             : `Telegram runner lock is held: ${this.lockPath}`;
@@ -66,7 +69,10 @@ class SingleInstanceLock {
     let stat;
     try { stat = await fs.stat(this.lockPath); } catch (error) { return error.code === 'ENOENT'; }
     let record;
-    try { record = JSON.parse(await fs.readFile(this.lockPath, 'utf8')); } catch (_) { record = null; }
+    try { record = JSON.parse(await fs.readFile(this.lockPath, 'utf8')); } catch (err) {
+      logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'stale_lock_parse_failed', operation: 'recoverStale.parse', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
+      record = null;
+    }
     let dead = false;
     if (Number.isInteger(record?.pid) && record.pid > 0) {
       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
@@ -89,10 +95,14 @@ class SingleInstanceLock {
         try {
           const moved = JSON.parse(await fs.readFile(stalePath, 'utf8'));
           if (moved.token !== record.token) {
-            await fs.rename(stalePath, this.lockPath).catch(() => {});
+            await fs.rename(stalePath, this.lockPath).catch(err => {
+              logStructured(null, { level: 'error', component: 'single_instance_lock', event: 'stale_lock_restore_failed', operation: 'recoverStale.restore', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
+            });
             return false;
           }
-        } catch {}
+        } catch (err) {
+          logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'stale_lock_token_read_failed', operation: 'recoverStale.verifyToken', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
+        }
       }
       await fs.unlink(stalePath);
       return true;
@@ -299,10 +309,32 @@ async function run({
     // VPN slot manager — per-account Docker containers
     const vpnSlots = vpnManager || new VpnSlotManager({ store: bot.store, logger: msg => logger.log(JSON.stringify({ event: 'vpn', message: msg })) });
     bot.vpnManager = vpnSlots;
-    bot.forensicLogger?.prune().catch(() => {});
-    bot.forensicLogger?.pruneBurnedSubnets().catch(() => {});
+    bot.forensicLogger?.prune().catch(error => {
+      logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_prune_failed', operation: 'prune', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
+    });
+    bot.forensicLogger?.pruneBurnedSubnets().catch(error => {
+      logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_prune_subnets_failed', operation: 'pruneBurnedSubnets', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
+    });
     const links = createLinkExports({ store: bot.store, dataDir, api, chatIds: effectiveChatIds, logger, clock });
-    const notify = text => Promise.allSettled(effectiveChatIds.map(chat_id => Promise.resolve().then(() => api.sendMessage({ chat_id, text }))));
+    const notify = async text => {
+      const results = await Promise.allSettled(effectiveChatIds.map(chat_id => Promise.resolve().then(() => api.sendMessage({ chat_id, text }))));
+      for (let i = 0; i < results.length; i++) {
+        const res = results[i];
+        if (res.status === 'rejected') {
+          logStructured(logger, {
+            level: 'error',
+            component: 'runner',
+            event: 'notify_send_failed',
+            operation: 'sendMessage',
+            result: 'failed',
+            errorCode: extractErrorCode(res.reason),
+            sanitizedError: sanitizeError(res.reason),
+            details: { chatId: effectiveChatIds[i] }
+          });
+        }
+      }
+      return results;
+    };
 
     let mappingsSafe = true;
     const reconcileResources = async () => {
@@ -356,7 +388,7 @@ async function run({
           if (!persistResult && (!vpn.healthy || !vpn.proxy || !vpn.exitIp)) throw Object.assign(new Error('VPN route not ready'), { code: 'VPN_NOT_READY' });
           if (attempt.signal.aborted) throw Object.assign(new Error('Refresh cancelled'), { code: 'ATTEMPT_ABORTED' });
           const opened = Promise.resolve().then(() => adapter.open({ account: { ...account, verifyNetwork: true }, proxy: vpn.proxy, signal: attempt.signal }));
-          if (persistResult) opened.then(late => { if (attempt.signal.aborted) Promise.resolve().then(() => adapter.close({ session: late })).catch(() => {}); }, () => {});
+          if (persistResult) opened.then(late => { if (attempt.signal.aborted) Promise.resolve().then(() => adapter.close({ session: late })).catch(err => logStructured(logger, { level: 'warn', component: 'runner', event: 'adapter_close_failed', operation: 'close', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) })); }, err => logStructured(logger, { level: 'debug', component: 'runner', event: 'adapter_open_aborted', operation: 'open', result: 'aborted', sanitizedError: sanitizeError(err) }));
           session = persistResult ? await attempt.wait(() => opened) : await opened;
           if (attempt.signal.aborted) throw Object.assign(new Error('Refresh cancelled'), { code: 'ATTEMPT_ABORTED' });
           const identity = session.identity;
@@ -378,7 +410,11 @@ async function run({
           const closing = Promise.resolve().then(() => adapter.close({ session, signal: attempt.signal }));
           try { if (persistResult) await attempt.wait(() => closing); else await closing; }
           catch (cleanupError) { if (!primaryError) throw cleanupError; }
-          finally { route?.release(); closing.catch(() => {}); attempt.dispose(); }
+          finally {
+            route?.release();
+            closing.catch(err => logStructured(logger, { level: 'warn', component: 'runner', event: 'adapter_closing_failed', operation: 'closing', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+            attempt.dispose();
+          }
         }
       },
       async health(account) {
@@ -414,7 +450,19 @@ async function run({
               const vpn = await readiness.wait(() => vpnSlots.ensure(a.id, { signal: readiness.signal }));
               check = { healthy: Boolean(vpn.exitIp), exitIp: vpn.exitIp };
             }
-          } catch { check = { healthy: false }; }
+          } catch (err) {
+            logStructured(logger, {
+              level: 'warn',
+              component: 'runner',
+              event: 'vpn_health_probe_failed',
+              accountId: a.id,
+              operation: 'readiness.healthProbe',
+              result: 'failed',
+              errorCode: extractErrorCode(err),
+              sanitizedError: sanitizeError(err)
+            });
+            check = { healthy: false };
+          }
           await ui?.recordAccountCheck(a.id, { isolated: check.healthy === true && Boolean(check.exitIp), vpnHealthy: check.healthy === true && Boolean(check.exitIp), exitIp: check.exitIp }, { source: 'vpn-health', expectedAccount: a });
           if (check.healthy) { anyVpnHealthy = true; break; }
           if (readiness.signal.aborted) break;
@@ -547,7 +595,7 @@ async function run({
 
         if (accountResult.isolated) {
           cooling.delete(accountId);
-          vpnSlots?.rotate(accountId).catch(() => {});
+          vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
         } else if (isRateLimit) {
           const delayMs = Math.min(900000, Math.max(60000, (retryAfterSeconds || 60) * 1000));
           const entry = {
@@ -564,7 +612,7 @@ async function run({
             return s;
           });
         } else if (isTransportOrVpn) {
-          vpnSlots?.rotate(accountId).catch(() => {});
+          vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.transport.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
           const delayMs = 30000;
           const entry = {
             failures: accountResult.failures,
@@ -608,7 +656,7 @@ async function run({
           subnet: currentSubnet,
           xErrorMessage: reason,
           details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated }
-        }).catch(() => {});
+        }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
 
         if (accountResult.isolated) {
           if (otherActive.length > 0) {
@@ -834,7 +882,7 @@ async function run({
               port: session?.port,
               exitIp: session?.exitIp,
               details: { itemId: item.id, url: result.url }
-            }).catch(() => {});
+            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_success.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
             cooling.delete(accountId);
             await bot.store.update(s => {
               if (s.posting?.cooling) delete s.posting.cooling[accountId];
@@ -855,7 +903,7 @@ async function run({
               exitIp: session?.exitIp,
               xErrorMessage: result.reason,
               details: { itemId: item.id, reason: result.reason }
-            }).catch(() => {});
+            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
             // Preserve the per-item forensic event without spamming Telegram.
             // A single alert is emitted only when the account is isolated.
             const outcome = await handleAccountFailure({
@@ -911,7 +959,7 @@ async function run({
             endpoint: err.readDiagnostic?.phase || 'CreateTweet',
             rawResponseSnippet: err.rawBody || err.readDiagnostic?.snippet,
             details: { itemId: item.id }
-          }).catch(() => {});
+          }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_error.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
           await bot.store.update(s => {
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
@@ -940,7 +988,7 @@ async function run({
               xErrorCode: err.code || err.xErrorCode,
               xErrorMessage: err.message,
               details: { itemId: item.id, reason: 'exception_after_dispatch' }
-            }).catch(() => {});
+            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous_dispatch.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
             // Dispatch crossed the irreversible boundary — the post may have
             // been published. Isolate it as ambiguous but let the cycle continue
             // with remaining items instead of freezing the entire run.
@@ -986,10 +1034,19 @@ async function run({
           if (adapter) {
             // A cancelled open may still own resources; retain this job until
             // it settles and the real teardown joins before new admission.
-            if (!session && openTask) { try { session = await openTask; } catch {} }
+            if (!session && openTask) {
+              try { session = await openTask; }
+              catch (openErr) {
+                logStructured(logger, { level: 'warn', component: 'runner', event: 'adapter_open_task_failed', operation: 'openTask.finally', result: 'failed', errorCode: extractErrorCode(openErr), sanitizedError: sanitizeError(openErr) });
+              }
+            }
             const closing = Promise.resolve().then(() => adapter.close({ session, signal: attempt.signal }));
-            try { await closing; } catch { halt = true; }
-            closing.catch(() => {});
+            try { await closing; }
+            catch (closeErr) {
+              halt = true;
+              logStructured(logger, { level: 'error', component: 'runner', event: 'adapter_close_failed', operation: 'adapter.close', result: 'failed', errorCode: extractErrorCode(closeErr), sanitizedError: sanitizeError(closeErr) });
+            }
+            closing.catch(closeErr => logStructured(logger, { level: 'warn', component: 'runner', event: 'adapter_closing_rejected', operation: 'closing', result: 'failed', errorCode: extractErrorCode(closeErr), sanitizedError: sanitizeError(closeErr) }));
           }
           attempt.dispose();
           await bot.store.update(s => {
@@ -1101,7 +1158,18 @@ async function run({
       onCycleStop: () => { abortController?.abort(); },
       onCycleFinished: async run => {
         await sendExport(run, { emptyMessage: false, terminal: true });
-        await links.flush().catch(() => {});
+        await links.flush().catch(error => {
+          logStructured(logger, {
+            level: 'error',
+            component: 'runner',
+            event: 'link_export_flush_failed',
+            runId: run?.runId || null,
+            operation: 'onCycleFinished.flush',
+            result: 'failed',
+            errorCode: extractErrorCode(error),
+            sanitizedError: sanitizeError(error)
+          });
+        });
       } });
     // One reconciliation in flight bounds polling work; the tracked task is
     // drained before store close. Transport errors must not stop admission.
@@ -1212,6 +1280,16 @@ async function run({
                   return bot.transport.sendMessage(destination, `تم استبدال الحسابات (${accounts.length}).`);
                 } catch (err) {
                   if (err.message && err.message.includes('EMPTY_ACCOUNTS_CSV')) {
+                    logStructured(logger, {
+                      level: 'warn',
+                      component: 'runner',
+                      event: 'empty_accounts_csv_rejected',
+                      operation: 'accounts.replaceFromCsv',
+                      result: 'rejected',
+                      errorCode: 'EMPTY_ACCOUNTS_CSV',
+                      sanitizedError: sanitizeError(err),
+                      suppressionReason: 'empty_accounts_csv_prevented_wipe'
+                    });
                     return bot.transport.sendMessage(destination, '⚠️ تم رفض استبدال الحسابات: ملف CSV فارغ أو لا يحتوي على أي حسابات.');
                   }
                   throw err;
@@ -1241,7 +1319,19 @@ async function run({
                 const task = Promise.resolve().then(async () => {
                   const result = await isolatedVerifier.verify(account);
                   await bot.transport.sendMessage(destination, result.authenticated ? 'جلسة X صالحة.' : 'جلسة X غير صالحة أو لم تثبت هوية الحساب.');
-                }).catch(error => logger.error(JSON.stringify({ event: 'cookie_verify_failed', code: error.code || 'UNKNOWN' })));
+                }).catch(error => {
+                  logStructured(logger, {
+                    level: 'error',
+                    component: 'runner',
+                    event: 'cookie_verify_failed',
+                    accountId,
+                    operation: 'cookieVerify',
+                    result: 'failed',
+                    errorCode: extractErrorCode(error),
+                    sanitizedError: sanitizeError(error),
+                    code: error.code || 'UNKNOWN'
+                  });
+                });
                 exportTasks.add(task);
                 task.finally(() => exportTasks.delete(task));
                 return { verifying: true };
@@ -1311,7 +1401,40 @@ async function run({
     await ui?.destroy();
     process.removeListener('SIGTERM', stop);
     process.removeListener('SIGINT', stop);
-    try { await ui?.stop(); await ui?.job; await Promise.allSettled([...exportTasks]); await Promise.allSettled([...panelTasks, ...(ui?.panelLocks?.values() || [])]); } finally { try { await bot?.store?.close?.(); } finally { await release(); } }
+    try {
+      await ui?.stop();
+      await ui?.job;
+      const exportResults = await Promise.allSettled([...exportTasks]);
+      for (const res of exportResults) {
+        if (res.status === 'rejected') {
+          logStructured(logger, {
+            level: 'error',
+            component: 'runner',
+            event: 'shutdown_export_task_failed',
+            operation: 'shutdown',
+            result: 'failed',
+            errorCode: extractErrorCode(res.reason),
+            sanitizedError: sanitizeError(res.reason)
+          });
+        }
+      }
+      const panelResults = await Promise.allSettled([...panelTasks, ...(ui?.panelLocks?.values() || [])]);
+      for (const res of panelResults) {
+        if (res.status === 'rejected') {
+          logStructured(logger, {
+            level: 'warn',
+            component: 'runner',
+            event: 'shutdown_panel_task_failed',
+            operation: 'shutdown',
+            result: 'failed',
+            errorCode: extractErrorCode(res.reason),
+            sanitizedError: sanitizeError(res.reason)
+          });
+        }
+      }
+    } finally {
+      try { await bot?.store?.close?.(); } finally { await release(); }
+    }
   }
 }
 

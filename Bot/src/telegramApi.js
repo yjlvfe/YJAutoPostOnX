@@ -3,13 +3,25 @@
 const https = require('node:https');
 const http = require('node:http');
 const { URL } = require('node:url');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 
 function parseTelegramEnvelope(data, method, response) {
   const invalid = () => ({ error: Object.assign(new Error('Telegram API returned invalid response'), {
     code: 'TELEGRAM_INVALID_RESPONSE', ambiguous: true, statusCode: response.statusCode
   }) });
   let parsed;
-  try { parsed = JSON.parse(data); } catch (_) { return invalid(); }
+  try { parsed = JSON.parse(data); } catch (parseErr) {
+    logStructured(null, {
+      level: 'warn',
+      component: 'telegram_api',
+      event: 'telegram_api_parse_failed',
+      operation: method,
+      result: 'invalid_json',
+      errorCode: 'JSON_PARSE_ERROR',
+      sanitizedError: sanitizeError(parseErr)
+    });
+    return invalid();
+  }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.ok !== 'boolean'
     || (parsed.ok === true && (!Object.prototype.hasOwnProperty.call(parsed, 'result') || parsed.result === null))) return invalid();
   if (parsed.ok === false) {
@@ -18,7 +30,18 @@ function parseTelegramEnvelope(data, method, response) {
       code: 'TELEGRAM_API_ERROR', statusCode: response.statusCode, telegramCode: parsed.error_code, description, ambiguous: false
     });
     if (parsed.parameters?.retry_after !== undefined) error.retryAfter = parsed.parameters.retry_after;
-    console.error(JSON.stringify({ event: 'telegram_api_rejected', method, error_code: parsed.error_code, description }));
+    logStructured(null, {
+      level: 'error',
+      component: 'telegram_api',
+      event: 'telegram_api_rejected',
+      operation: method,
+      result: 'rejected',
+      errorCode: String(parsed.error_code),
+      sanitizedError: description,
+      method,
+      error_code: parsed.error_code,
+      description
+    });
     return { error };
   }
   return { result: parsed.result };
@@ -116,7 +139,20 @@ function createTelegramApi(token, options = {}) {
       try { return await request(token, method, params, options); }
       catch (error) {
         if (error.telegramCode !== 429 || !Number.isFinite(error.retryAfter) || error.retryAfter < 0 || error.retryAfter > 60 || attempt >= 2) throw error;
-        await wait(Math.max(1, error.retryAfter) * 1000);
+        const delayMs = Math.max(1, error.retryAfter) * 1000;
+        logStructured(options.logger || null, {
+          level: 'warn',
+          component: 'telegram_api',
+          event: 'telegram_api_rate_limit_retry',
+          operation: method,
+          result: 'retried',
+          durationMs: delayMs,
+          retryCount: attempt + 1,
+          errorCode: '429',
+          sanitizedError: sanitizeError(error),
+          suppressionReason: `rate_limited_retry_after_${error.retryAfter}s`
+        });
+        await wait(delayMs);
       }
     }
   };
@@ -145,6 +181,17 @@ function createTelegramApi(token, options = {}) {
       // a generic 400: the first send may otherwise already have landed.
       if (styled && stylesSupported && error.telegramCode === 400 && /style|BUTTON_STYLE|unknown field.*style/i.test(error.message)) {
         stylesSupported = false;
+        logStructured(options.logger || null, {
+          level: 'warn',
+          component: 'telegram_api',
+          event: 'telegram_api_style_unsupported_retry',
+          operation: method,
+          result: 'retried',
+          retryCount: 1,
+          errorCode: '400',
+          sanitizedError: sanitizeError(error),
+          suppressionReason: 'inline_styles_rejected_by_api'
+        });
         return limitedRequest(method, withoutStyles());
       }
       throw error;

@@ -7,6 +7,7 @@ const { DEFAULT_SETTINGS, parseDuration, formatDuration } = require('./settings'
 const { TelegramFlows } = require('./telegramFlows');
 const { richTable, accountStatus, formatAccountTable, clean } = require('./accountTable');
 const { isConflict409 } = require('./singleInstance');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 
 const MAX_ACTIVE_ACCOUNTS = 5;
 
@@ -76,10 +77,28 @@ class TelegramUi {
       if (!this.rawNotify) return;
       if (typeof text === 'string') {
         if (text.includes('جميع الحسابات غير مؤهلة أو في فترة انتظار')) {
-          if (this.stallAlertSent) return;
+          if (this.stallAlertSent) {
+            logStructured(this.bot?.logger, {
+              level: 'info',
+              component: 'telegram_ui',
+              event: 'notification_suppressed',
+              operation: 'notify',
+              result: 'suppressed',
+              suppressionReason: 'stall_alert_already_sent'
+            });
+            return;
+          }
           this.stallAlertSent = true;
         }
         if (/إخفاق مؤقت|محاولة (1|2) من 3|strike [12]\b/i.test(text)) {
+          logStructured(this.bot?.logger, {
+            level: 'info',
+            component: 'telegram_ui',
+            event: 'notification_suppressed',
+            operation: 'notify',
+            result: 'suppressed',
+            suppressionReason: 'transient_strike_suppressed'
+          });
           return;
         }
         if (text.includes('تم عزل الحساب') && !text.includes('(السبب:')) {
@@ -96,9 +115,45 @@ class TelegramUi {
     this.flows = new TelegramFlows(this, { downloadDocument, isolatedVerifier });
     this.startTicker();
   }
+  _logWarn(event, operation, err, extra = {}) {
+    logStructured(this.bot?.logger, {
+      level: 'warn',
+      component: 'telegram_ui',
+      event,
+      operation,
+      result: 'suppressed',
+      errorCode: extractErrorCode(err),
+      sanitizedError: sanitizeError(err),
+      ...extra
+    });
+  }
+  _logError(event, operation, err, extra = {}) {
+    logStructured(this.bot?.logger, {
+      level: 'error',
+      component: 'telegram_ui',
+      event,
+      operation,
+      result: 'failed',
+      errorCode: extractErrorCode(err),
+      sanitizedError: sanitizeError(err),
+      ...extra
+    });
+  }
   startTicker() {
     if (this.ticker) return;
-    this.ticker = setInterval(() => { this.refreshPanels().catch(() => {}); }, 1000);
+    this.ticker = setInterval(() => {
+      this.refreshPanels().catch(error => {
+        logStructured(this.bot?.logger, {
+          level: 'error',
+          component: 'telegram_ui',
+          event: 'panel_refresh_ticker_failed',
+          operation: 'refreshPanels',
+          result: 'failed',
+          errorCode: extractErrorCode(error),
+          sanitizedError: sanitizeError(error)
+        });
+      });
+    }, 1000);
     this.ticker.unref?.();
   }
   actions() {
@@ -192,7 +247,7 @@ class TelegramUi {
       await this.bot.settings.setSchedule({ enabled: enable });
       const s = await this.bot.settings.get();
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, this.scheduleText(s), { parse_mode: 'HTML', reply_markup: this.scheduleKeyboard(s.schedule?.enabled === true) }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, this.scheduleText(s), { parse_mode: 'HTML', reply_markup: this.scheduleKeyboard(s.schedule?.enabled === true) }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'scheduleControl.toggle', err));
       }
       await acknowledge(enable ? 'تم تفعيل الجدولة' : 'تم تعطيل الجدولة');
       return { scheduleToggled: enable };
@@ -201,7 +256,7 @@ class TelegramUi {
     if (parsed.action === 'set_time') {
       await this.flows.set(id, { prompt: 'schedule', promptMessageId: messageId, page: 'schedule' });
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, 'أدخل موعد النشر اليومي بتوقيت مكة بصيغة 24 ساعة (مثال: 09:30 أو 21:00):', { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, 'أدخل موعد النشر اليومي بتوقيت مكة بصيغة 24 ساعة (مثال: 09:30 أو 21:00):', { reply_markup: { inline_keyboard: [] } }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'scheduleControl.set_time', err));
       }
       await acknowledge();
       return { prompt: 'schedule' };
@@ -241,7 +296,7 @@ class TelegramUi {
     if (parsed.action === 'set_min') {
       await this.flows.set(id, { prompt: 'delayMin', promptMessageId: messageId, page: 'delay' });
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, 'أدخل الحد الأدنى للمدة بصيغة دقائق:ثوانٍ (مثال: 0:45 أو 1:30) حتى 60:00:', { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, 'أدخل الحد الأدنى للمدة بصيغة دقائق:ثوانٍ (مثال: 0:45 أو 1:30) حتى 60:00:', { reply_markup: { inline_keyboard: [] } }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'delayControl.set_min', err));
       }
       await acknowledge();
       return { prompt: 'delayMin' };
@@ -250,7 +305,7 @@ class TelegramUi {
     if (parsed.action === 'set_max') {
       await this.flows.set(id, { prompt: 'delayMax', promptMessageId: messageId, page: 'delay' });
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, 'أدخل الحد الأعلى للمدة بصيغة دقائق:ثوانٍ (مثال: 2:00 أو 3:30) حتى 60:00:', { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, 'أدخل الحد الأعلى للمدة بصيغة دقائق:ثوانٍ (مثال: 2:00 أو 3:30) حتى 60:00:', { reply_markup: { inline_keyboard: [] } }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'delayControl.set_max', err));
       }
       await acknowledge();
       return { prompt: 'delayMax' };
@@ -353,7 +408,7 @@ class TelegramUi {
         }
         await this.bot.settings.setDelayRange({ minSeconds: seconds, maxSeconds: s.delayMaxSeconds ?? seconds });
         if (u.promptMessageId) {
-          await this.bot.transport.deleteMessage(id.chat, u.promptMessageId).catch(() => {});
+          await this.bot.transport.deleteMessage(id.chat, u.promptMessageId).catch(err => this._logWarn('telegram_ui_delete_message_suppressed', 'input.delayMin', err));
         }
         await this.flows.set(id, { prompt: null, promptMessageId: null, page: 'delay' });
         return this.bot.transport.sendMessage(id.chat, `✅ تم وضع الحد الأدنى: ${formatDuration(seconds)}`);
@@ -366,7 +421,7 @@ class TelegramUi {
         }
         await this.bot.settings.setDelayRange({ minSeconds: s.delayMinSeconds ?? Math.min(15, seconds), maxSeconds: seconds });
         if (u.promptMessageId) {
-          await this.bot.transport.deleteMessage(id.chat, u.promptMessageId).catch(() => {});
+          await this.bot.transport.deleteMessage(id.chat, u.promptMessageId).catch(err => this._logWarn('telegram_ui_delete_message_suppressed', 'input.delayMax', err));
         }
         await this.flows.set(id, { prompt: null, promptMessageId: null, page: 'delay' });
         return this.bot.transport.sendMessage(id.chat, `✅ تم وضع الحد الأعلى: ${formatDuration(seconds)}`);
@@ -398,7 +453,7 @@ class TelegramUi {
         if (!m || +m[1] > 23 || +m[2] > 59) throw new Error('أدخل موعداً صحيحاً بصيغة 24 ساعة مثل 09:30.');
         await this.bot.settings.setSchedule({ enabled: true, hour: +m[1], minute: +m[2] });
         if (u.promptMessageId) {
-          await this.bot.transport.deleteMessage(id.chat, u.promptMessageId).catch(() => {});
+          await this.bot.transport.deleteMessage(id.chat, u.promptMessageId).catch(err => this._logWarn('telegram_ui_delete_message_suppressed', 'input.schedule', err));
         }
         await this.flows.set(id, { prompt: null, promptMessageId: null, page: 'schedule' });
         const timeStr = `${String(+m[1]).padStart(2, '0')}:${String(+m[2]).padStart(2, '0')}`;
@@ -483,7 +538,7 @@ class TelegramUi {
     }
     return {};
   }
-  async stopTicker() { if (this.ticker) { clearInterval(this.ticker); this.ticker = null; } if (this.refreshTask) await this.refreshTask.catch(() => {}); await Promise.allSettled([...this.panelLocks.values()]); }
+  async stopTicker() { if (this.ticker) { clearInterval(this.ticker); this.ticker = null; } if (this.refreshTask) await this.refreshTask.catch(err => this._logWarn('refresh_task_drain_failed', 'stopTicker', err)); await Promise.allSettled([...this.panelLocks.values()]); }
   async destroy() {
     this.destroyed = true;
     const job = this.accountRefreshJob; job?.controller.abort();
@@ -495,7 +550,7 @@ class TelegramUi {
     if (this.accountRefreshJob) { this.accountRefreshJob.nudge(); return; }
     const job = require('./accountRefresh').createAccountRefresh(this, { retryMs: this.accountRefreshRetryMs });
     this.accountRefreshJob = job;
-    job.task = job.run().catch(() => {});
+    job.task = job.run().catch(err => this._logError('account_refresh_job_failed', 'startAccountRefresh', err));
   }
   controls(state, t) {
     const running = ['running', 'stopping'].includes(state);
@@ -510,7 +565,14 @@ class TelegramUi {
     const reasons = [];
     const accounts = (state.accounts || []).filter(eligible);
     const accessible = [];
-    for (const a of accounts) { try { await fs.access(a.cookieFile); accessible.push(a); } catch {} }
+    for (const a of accounts) {
+      try {
+        await fs.access(a.cookieFile);
+        accessible.push(a);
+      } catch (err) {
+        this._logWarn('cookie_file_inaccessible', 'readiness', err, { accountId: a.id });
+      }
+    }
     if (!accessible.length) reasons.push('لا يوجد حساب مفعل باسم مستخدم وملف جلسة قابل للقراءة');
     const activeAccounts = (state.accounts || []).filter(a => a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status));
     if (activeAccounts.length > MAX_ACTIVE_ACCOUNTS) reasons.push('الحد الأقصى للحسابات المفعلة في نفس الوقت هو 5 حسابات');
@@ -529,7 +591,10 @@ class TelegramUi {
     const quota = quotaAdmission(state, { accounts: accessible, now: this.clock() });
     if (quota.exhausted) return { reasons: [...reasons, quota.message], ids: accessible.map(a => a.id), quota };
     try { const r = await this.runtimeReady(); if (r?.ready !== true) reasons.push(...(Array.isArray(r?.reasons) && r.reasons.length ? r.reasons.filter(x => typeof x === 'string' && /[\u0600-\u06ff]/.test(x)) : ['مكونات النشر الفعلي غير جاهزة'])); if (r?.ready !== true && !reasons.length) reasons.push('مكونات النشر الفعلي غير جاهزة'); }
-    catch { reasons.push('تعذر التحقق من جاهزية التشغيل'); }
+    catch (err) {
+      this._logError('runtime_readiness_check_failed', 'readiness', err);
+      reasons.push('تعذر التحقق من جاهزية التشغيل');
+    }
     return { reasons, ids: accessible.map(a => a.id) };
   }
   async render(state) {
@@ -815,7 +880,7 @@ class TelegramUi {
     if (!started) return { started: false, reasons: ['الدورة جارية أو الزر قديم أو تغيرت البيانات'] };
     this.resetQueueStall();
     this.attach(snapshot);
-    await this.refreshPanels(true).catch(() => {}); return { started: true, runId };
+    await this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_after_begin_failed', 'begin', err)); return { started: true, runId };
   }
   attach(snapshot) {
     if (this.job) return false;
@@ -838,12 +903,12 @@ class TelegramUi {
         return s;
       });
     }).finally(async () => {
-      if (this.onCycleFinished) await this.onCycleFinished(snapshot).catch(() => {});
+      if (this.onCycleFinished) await this.onCycleFinished(snapshot).catch(err => this._logError('cycle_finished_callback_failed', 'attach', err, { runId: snapshot?.runId }));
       if (this.job === task) {
         this.job = null;
         this.activeRun = null;
       }
-      await this.refreshPanels(true).catch(() => {});
+      await this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_after_cycle_failed', 'attach', err, { runId: snapshot?.runId }));
     });
     this.job = task; return true;
   }
@@ -928,16 +993,16 @@ class TelegramUi {
       }
       const state = await this.bot.store.load();
       for (const a of (state.accounts || [])) {
-        this.bot.vpnManager?.release?.(a.id).catch(() => {});
+        this.bot.vpnManager?.release?.(a.id).catch(err => this._logError('vpn_release_failed', 'accountToggle.all_disable', err, { accountId: a.id }));
       }
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
         details: { action: 'all_disable' }
-      }).catch(() => {});
+      }).catch(err => this._logError('forensic_record_failed', 'accountToggle.all_disable', err));
       const updated = await this.bot.store.load();
       const markup = this.accountToggleKeyboard(updated.accounts || []);
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountToggle.all_disable', err));
       }
       await acknowledge('تم إلغاء تفعيل جميع الحسابات', true);
       return { allDisabled: true };
@@ -983,17 +1048,17 @@ class TelegramUi {
             this.activeRun.cursor = 0;
           }
         }
-        this.bot.vpnManager?.release?.(targetId).catch(() => {});
+        this.bot.vpnManager?.release?.(targetId).catch(err => this._logError('vpn_release_failed', 'accountToggle.disable', err, { accountId: targetId }));
         this.bot.forensicLogger?.record({
           eventType: 'manual_toggle',
           accountId: targetId,
           username: account.username,
           details: { action: 'disable' }
-        }).catch(() => {});
+        }).catch(err => this._logError('forensic_record_failed', 'accountToggle.disable', err, { accountId: targetId }));
         const updated = await this.bot.store.load();
         const markup = this.accountToggleKeyboard(updated.accounts || []);
         if (messageId) {
-          await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(() => {});
+          await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountToggle.disable', err));
         }
         await acknowledge(`تم تعطيل الحساب @${account.username || account.label}`);
         return { toggled: false };
@@ -1029,17 +1094,17 @@ class TelegramUi {
             this.activeRun.accountIds.push(targetId);
           }
         }
-        this.bot.vpnManager?.rotate(targetId).catch(() => {});
+        this.bot.vpnManager?.rotate(targetId).catch(err => this._logError('vpn_rotate_failed', 'accountToggle.enable', err, { accountId: targetId }));
         this.bot.forensicLogger?.record({
           eventType: 'manual_toggle',
           accountId: targetId,
           username: account.username,
           details: { action: 'enable' }
-        }).catch(() => {});
+        }).catch(err => this._logError('forensic_record_failed', 'accountToggle.enable', err, { accountId: targetId }));
         const updated = await this.bot.store.load();
         const markup = this.accountToggleKeyboard(updated.accounts || []);
         if (messageId) {
-          await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(() => {});
+          await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountToggle.enable', err));
         }
         await acknowledge(`تم تفعيل الحساب @${account.username || account.label}`);
         return { toggled: true };
@@ -1137,7 +1202,7 @@ class TelegramUi {
       const text = accounts.length ? 'اختر الحساب لعرض إعداداته:' : 'لا توجد حسابات مسجلة في النظام.';
       const markup = this.accountBrowseKeyboard(accounts);
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, text, { reply_markup: markup }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, text, { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountManage.list', err));
       }
       await acknowledge();
       return { view: 'list' };
@@ -1154,7 +1219,7 @@ class TelegramUi {
       const text = this.accountDetailText(account);
       const markup = this.accountDetailKeyboard(account);
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, text, { parse_mode: 'HTML', reply_markup: markup }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, text, { parse_mode: 'HTML', reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountManage.select', err));
       }
       await acknowledge();
       return { view: 'detail', accountId: targetId };
@@ -1204,17 +1269,17 @@ class TelegramUi {
           this.activeRun.accountIds.push(targetId);
         }
       }
-      this.bot.vpnManager?.rotate(targetId).catch(() => {});
+      this.bot.vpnManager?.rotate(targetId).catch(err => this._logError('vpn_rotate_failed', 'accountManage.enable', err, { accountId: targetId }));
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
         username: account.username,
         details: { action: 'enable' }
-      }).catch(() => {});
+      }).catch(err => this._logError('forensic_record_failed', 'accountManage.enable', err, { accountId: targetId }));
       const updated = await this.bot.store.load();
       const updatedAcc = (updated.accounts || []).find(a => a.id === targetId);
       if (messageId && updatedAcc) {
-        await this.bot.transport.editMessageText(id.chat, messageId, this.accountDetailText(updatedAcc), { parse_mode: 'HTML', reply_markup: this.accountDetailKeyboard(updatedAcc) }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, this.accountDetailText(updatedAcc), { parse_mode: 'HTML', reply_markup: this.accountDetailKeyboard(updatedAcc) }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountManage.enable', err));
       }
       await acknowledge(`تم تفعيل الحساب @${account.username || account.label}`);
       return { enabled: true };
@@ -1253,17 +1318,17 @@ class TelegramUi {
           this.activeRun.cursor = 0;
         }
       }
-      this.bot.vpnManager?.release?.(targetId).catch(() => {});
+      this.bot.vpnManager?.release?.(targetId).catch(err => this._logError('vpn_release_failed', 'accountManage.disable', err, { accountId: targetId }));
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
         username: account.username,
         details: { action: 'disable' }
-      }).catch(() => {});
+      }).catch(err => this._logError('forensic_record_failed', 'accountManage.disable', err, { accountId: targetId }));
       const updated = await this.bot.store.load();
       const updatedAcc = (updated.accounts || []).find(a => a.id === targetId);
       if (messageId && updatedAcc) {
-        await this.bot.transport.editMessageText(id.chat, messageId, this.accountDetailText(updatedAcc), { parse_mode: 'HTML', reply_markup: this.accountDetailKeyboard(updatedAcc) }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, this.accountDetailText(updatedAcc), { parse_mode: 'HTML', reply_markup: this.accountDetailKeyboard(updatedAcc) }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountManage.disable', err));
       }
       await acknowledge(`تم تعطيل الحساب @${account.username || account.label}`);
       return { disabled: true };
@@ -1303,7 +1368,7 @@ class TelegramUi {
         ]
       };
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, text, { parse_mode: 'HTML', reply_markup: markup }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, text, { parse_mode: 'HTML', reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountManage.delete_prompt', err));
       }
       await acknowledge();
       return { prompt: 'delete' };
@@ -1318,12 +1383,12 @@ class TelegramUi {
           this.activeRun.cursor = 0;
         }
       }
-      this.bot.vpnManager?.release?.(targetId).catch(() => {});
+      this.bot.vpnManager?.release?.(targetId).catch(err => this._logError('vpn_release_failed', 'accountManage.delete_confirm', err, { accountId: targetId }));
       this.bot.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
         details: { action: 'delete' }
-      }).catch(() => {});
+      }).catch(err => this._logError('forensic_record_failed', 'accountManage.delete_confirm', err, { accountId: targetId }));
       if (this.bot.accounts?.remove) {
         await this.bot.accounts.remove(targetId);
       } else {
@@ -1349,7 +1414,7 @@ class TelegramUi {
       const text = accounts.length ? 'اختر الحساب لعرض إعداداته:' : 'لا توجد حسابات مسجلة في النظام.';
       const markup = this.accountBrowseKeyboard(accounts);
       if (messageId) {
-        await this.bot.transport.editMessageText(id.chat, messageId, text, { reply_markup: markup }).catch(() => {});
+        await this.bot.transport.editMessageText(id.chat, messageId, text, { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountManage.delete_confirm', err));
       }
       await acknowledge('تم حذف الحساب بنجاح', true);
       return { deleted: targetId };
@@ -1371,7 +1436,7 @@ class TelegramUi {
     }
     if (parsed.action === 'refresh') {
       await acknowledge('جاري تحديث الحسابات واللوحة...');
-      this.refreshPanels(true).catch(() => {});
+      this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_failed', 'cycleControl.refresh', err));
       if (!this.isolatedVerifier?.verify) return { refreshing: true };
       this.startAccountRefresh();
       return { refreshing: true };
@@ -1383,7 +1448,7 @@ class TelegramUi {
       if (ready.reasons.length) { await acknowledge('لا يمكن البدء: يرجى إضافة حساب واحد على الأقل ورفع ملف المنشورات أولاً\n' + ready.reasons.join('، '), true); return { started: false }; }
       await acknowledge(); return this.begin('manual', id, parsed.value);
     }
-    if (parsed.action === 'stop') { await this.stop(parsed.value, id); this.refreshPanels(true).catch(() => {}); return; }
+    if (parsed.action === 'stop') { await this.stop(parsed.value, id); this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_failed', 'cycleControl.stop', err)); return; }
   }
   async stop(expectedToken, id) {
     let accepted = false; let snapshot;
@@ -1401,15 +1466,15 @@ class TelegramUi {
     });
     // Cancellation precedes panel teardown; Telegram I/O cannot hold dispatch.
     if (accepted) {
-      if (this.notify) this.notify('⏹️ تم استقبال طلب إيقاف دورة النشر وجاري إنهاء الدورة وإرسال التقرير...').catch(() => {});
+      if (this.notify) this.notify('⏹️ تم استقبال طلب إيقاف دورة النشر وجاري إنهاء الدورة وإرسال التقرير...').catch(err => this._logError('cycle_stop_notify_failed', 'stop', err));
       this.onCycleStop?.(snapshot);
     }
     if (!id) {
       if (this.ticker) { clearInterval(this.ticker); this.ticker = null; }
-      this.stopTicker().catch(() => {});
+      this.stopTicker().catch(err => this._logError('stop_ticker_failed', 'stop', err));
     }
     if (!accepted) return { stopped: false };
-    this.refreshPanels(true).catch(() => {});
+    this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_failed', 'stop', err));
     return { stopped: true };
   }
 

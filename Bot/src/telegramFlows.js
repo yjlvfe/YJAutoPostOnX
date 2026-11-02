@@ -9,6 +9,7 @@ const { parseCookies } = require('./cookieFormat');
 const { Queue, hash } = require('./queue');
 const { normalizeAccountId } = require('./accounts');
 const { formatAccountTable, escapeHtml } = require('./accountTable');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const nonce = () => crypto.randomBytes(10).toString('hex');
 const MAX_FILE = 2 * 1024 * 1024;
 
@@ -76,7 +77,21 @@ class TelegramFlows {
     const u = await this.user(id); const draft = u.draft;
     // Never remove credentials or resources of an adopted account.
     const adopted = draft?.id && (await this.bot.accounts.list()).some(a => a.id === draft.id);
-    if (draft?.cookieFile && !adopted) await fs.unlink(draft.cookieFile).catch(() => {});
+    if (draft?.cookieFile && !adopted) {
+      await fs.unlink(draft.cookieFile).catch(err => {
+        if (err.code !== 'ENOENT') {
+          logStructured(this.bot?.logger, {
+            level: 'warn',
+            component: 'telegram_flows',
+            event: 'draft_cookie_unlink_failed',
+            operation: 'cleanup',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        }
+      });
+    }
     await this.set(id, { draft: null, flowToken: null, prompt: null, confirmMessage: null, confirmAt: null });
     if (draft?.id && !adopted) await this.isolatedVerifier?.releaseDraft?.(draft.id);
   }
@@ -141,7 +156,19 @@ class TelegramFlows {
     if (!this.isolatedVerifier) return this.say(id, 'تم فحص صيغة الملف فقط. تعذر فحص جلسة X: بيئة VPN المعزولة للحساب غير مهيأة. لم تتم إضافة الحساب. يمكنك إعادة المحاولة أو اضغط رجوع.');
     let result;
     try { result = await this.isolatedVerifier.verify({ ...draft, username: expectedUsername }, { discoverIdentity: !expectedUsername }); }
-    catch (error) { console.error(JSON.stringify({ event: 'isolated_verification_failed', code: error.code || error.name || 'UNKNOWN' })); await this.set(id, { prompt: 'username', draft: { ...draft, verificationPending: true } }); return this.say(id, 'تم قبول الكوكيز بنجاح. أرسل اسم المستخدم (Username) لهذا الحساب:'); }
+    catch (error) {
+      logStructured(this.bot?.logger, {
+        level: 'warn',
+        component: 'telegram_flows',
+        event: 'isolated_verification_failed',
+        operation: 'verifyDraft',
+        result: 'failed',
+        errorCode: extractErrorCode(error),
+        sanitizedError: sanitizeError(error)
+      });
+      await this.set(id, { prompt: 'username', draft: { ...draft, verificationPending: true } });
+      return this.say(id, 'تم قبول الكوكيز بنجاح. أرسل اسم المستخدم (Username) لهذا الحساب:');
+    }
     // Drafts are not durable accounts: do not create checks before confirmation.
     if (result?.isolated !== true || result?.vpnHealthy !== true) return this.say(id, 'لم يثبت عزل VPN؛ أُوقفت الإضافة لحماية الجلسة.');
     if (result.state === 'identity_unverified') {
@@ -199,7 +226,18 @@ class TelegramFlows {
         const count = await queue.replacePending(u.draft.payloads, { userKey: id.key, confirmationToken: u.flowToken, queueFingerprint: u.draft.queueFingerprint });
         return this.say(id, `أصبحت ${count} منشورات جاهزة. لم يبدأ النشر.`, 'main');
       }
-      catch { return this.say(id, 'تعذر الاستبدال: الدورة نشطة أو تغير التأكيد. أوقف الدورة ثم أعد الاستيراد.', 'confirm'); }
+      catch (err) {
+        logStructured(this.bot?.logger, {
+          level: 'warn',
+          component: 'telegram_flows',
+          event: 'posts_replace_failed',
+          operation: 'replacePending',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err)
+        });
+        return this.say(id, 'تعذر الاستبدال: الدورة نشطة أو تغير التأكيد. أوقف الدورة ثم أعد الاستيراد.', 'confirm');
+      }
     }
     if (u.prompt === 'cookieConfirm' && text === 'تأكيد') {
       await this.bot.accounts.add({ ...u.draft, enabled: true }, { userKey: id.key, confirmationToken: u.flowToken });
@@ -239,7 +277,20 @@ class TelegramFlows {
       if (text === 'فحص جلسة X' || text === 'فحص VPN وIP') {
         if (!this.isolatedVerifier) return this.say(id, 'تعذر الفحص: بيئة VPN المعزولة للحساب غير مهيأة؛ لم يُستخدم اتصال المضيف.', 'account');
         try { const r = text === 'فحص جلسة X' ? await this.isolatedVerifier.verify(account) : await this.isolatedVerifier.health(account); await this.ui.recordAccountCheck(account.id, r, { session: text === 'فحص جلسة X', expectedAccount: account }); return this.say(id, r?.isolated && r?.vpnHealthy ? (text === 'فحص جلسة X' ? r.authenticated ? 'جلسة X صالحة.' : 'جلسة X غير صالحة.' : `VPN سليم. IP: ${require('./publicIp').isPublicIp(r.exitIp || r.ip) ? (r.exitIp || r.ip) : 'غير متاح'}`) : 'فشل التحقق من الشبكة المعزولة.', 'account'); }
-        catch { await this.ui.recordAccountCheck(account.id, {}, { session: text === 'فحص جلسة X', expectedAccount: account }); return this.say(id, 'تعذر الفحص. حاول لاحقاً.', 'account'); }
+        catch (err) {
+          logStructured(this.bot?.logger, {
+            level: 'error',
+            component: 'telegram_flows',
+            event: 'isolated_account_check_failed',
+            accountId: account.id,
+            operation: text === 'فحص جلسة X' ? 'verify' : 'health',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+          await this.ui.recordAccountCheck(account.id, {}, { session: text === 'فحص جلسة X', expectedAccount: account });
+          return this.say(id, 'تعذر الفحص. حاول لاحقاً.', 'account');
+        }
       }
     }
     if (u.prompt === 'cookies' && text === 'إعادة المحاولة' && u.draft) return this.verifyDraft(id);

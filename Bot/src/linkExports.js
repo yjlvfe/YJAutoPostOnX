@@ -2,6 +2,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const { randomUUID } = crypto;
 
 function dayOf(value) {
@@ -122,13 +123,18 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
             contentHash: null,
             itemIds: []
           });
-          logger.log(JSON.stringify({
+          logStructured(logger, {
+            level: 'info',
+            component: 'link_exports',
             event: 'link_export_terminal_suppressed',
             runId: run.runId,
             chatId: destination,
             day,
-            reason: 'duplicate_run_id'
-          }));
+            operation: 'enqueueTerminal',
+            result: 'suppressed',
+            reason: 'duplicate_run_id',
+            suppressionReason: 'duplicate_run_id'
+          });
           continue;
         }
 
@@ -215,7 +221,19 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
           if (att) { att.ok = true; att.suppressed = true; att.reason = 'duplicate_run_in_deliver'; }
           return s;
         });
-        logger.log(JSON.stringify({ event: 'telegram_document_delivery_suppressed', outboxId, chatId: entry.chatId, day: entry.day, reason: 'already_delivered_for_run' }));
+        logStructured(logger, {
+          level: 'info',
+          component: 'link_exports',
+          event: 'telegram_document_delivery_suppressed',
+          outboxId,
+          runId: entry.runId,
+          chatId: entry.chatId,
+          day: entry.day,
+          operation: 'deliver_document',
+          result: 'suppressed',
+          reason: 'already_delivered_for_run',
+          suppressionReason: 'already_delivered_for_run'
+        });
         return;
       }
     }
@@ -235,6 +253,19 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
           if (att) { att.ok = true; att.suppressed = true; att.reason = 'duplicate_empty_in_deliver'; }
           return s;
         });
+        logStructured(logger, {
+          level: 'info',
+          component: 'link_exports',
+          event: 'telegram_empty_delivery_suppressed',
+          outboxId,
+          runId: entry.runId,
+          chatId: entry.chatId,
+          day: entry.day,
+          operation: 'deliver_empty',
+          result: 'suppressed',
+          reason: 'duplicate_empty_in_deliver',
+          suppressionReason: 'duplicate_empty_in_deliver'
+        });
         return;
       }
     }
@@ -247,6 +278,20 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
         : await api.sendDocument({ chat_id: entry.chatId, filename: `links_${entry.day}.csv`, content: csv(entry.rows) });
       if ((response?.message_id ?? response?.result?.message_id) == null) throw new Error('Telegram delivery receipt missing');
     } catch (error) {
+      logStructured(logger, {
+        level: 'error',
+        component: 'link_exports',
+        event: 'link_export_delivery_failed',
+        outboxId,
+        runId: entry.runId,
+        chatId: entry.chatId,
+        day: entry.day,
+        operation: entry.kind === 'empty' ? 'sendMessage' : 'sendDocument',
+        result: 'failed',
+        errorCode: extractErrorCode(error),
+        sanitizedError: sanitizeError(error),
+        retryCount: entry.attempts
+      });
       await store.update(state => {
         const current = (state.linkOutbox || []).find(record => record.outboxId === outboxId && record.deliveryId === deliveryId);
         const attempt = (state.linkDeliveries || []).find(record => record.deliveryId === deliveryId);
@@ -274,7 +319,19 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       if (terminalEvent) terminalEvent.reconciled = true;
       return state;
     });
-    logger.log(JSON.stringify({ event: entry.kind === 'empty' ? 'telegram_empty_notice_sent' : 'telegram_document_sent', ok: true, chat_id: entry.chatId, message_id: messageId }));
+    logStructured(logger, {
+      level: 'info',
+      component: 'link_exports',
+      event: entry.kind === 'empty' ? 'telegram_empty_notice_sent' : 'telegram_document_sent',
+      operation: entry.kind === 'empty' ? 'sendMessage' : 'sendDocument',
+      result: 'success',
+      ok: true,
+      chat_id: entry.chatId,
+      message_id: messageId,
+      outboxId,
+      runId: entry.runId,
+      day: entry.day
+    });
   }
 
   function summarize(state) {
@@ -298,6 +355,19 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       // Admission stays fenced across asynchronous file preparation and transport.
       for (const day of new Set(pending.filter(entry => entry.kind === 'document').map(entry => entry.day))) await writeDay(day, state);
       const results = await Promise.allSettled(pending.map(entry => deliver(entry.outboxId, options)));
+      for (const res of results) {
+        if (res.status === 'rejected') {
+          logStructured(logger, {
+            level: 'error',
+            component: 'link_exports',
+            event: 'link_export_drain_item_failed',
+            operation: 'drain',
+            result: 'failed',
+            errorCode: extractErrorCode(res.reason),
+            sanitizedError: sanitizeError(res.reason)
+          });
+        }
+      }
       const failure = results.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
       return summarize(await store.load());

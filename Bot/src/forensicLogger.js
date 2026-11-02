@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const BURNED_SUBNET_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -63,7 +64,16 @@ class ForensicLogger {
           return state;
         });
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'store', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_logger_io_error',
+          operation: 'store_update',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err),
+          target: 'store'
+        });
       }
     }
 
@@ -73,7 +83,16 @@ class ForensicLogger {
         const line = JSON.stringify(record) + '\n';
         await fsp.appendFile(this.logFile, line, { mode: 0o600 });
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'file', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_logger_io_error',
+          operation: 'file_append',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err),
+          target: 'file'
+        });
       }
     }
 
@@ -95,14 +114,36 @@ class ForensicLogger {
           return state;
         });
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'store_prune', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_logger_io_error',
+          operation: 'store_prune',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err),
+          target: 'store_prune'
+        });
       }
     }
 
     // Prune JSONL file
     if (this.logFile) {
       try {
-        const content = await fsp.readFile(this.logFile, 'utf8').catch(() => '');
+        const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
+          if (err.code !== 'ENOENT') {
+            logStructured(null, {
+              level: 'warn',
+              component: 'forensic_logger',
+              event: 'forensic_log_read_failed',
+              operation: 'prune_readFile',
+              result: 'failed',
+              errorCode: extractErrorCode(err),
+              sanitizedError: sanitizeError(err)
+            });
+          }
+          return '';
+        });
         if (content) {
           const lines = content.split('\n').filter(Boolean);
           const retained = [];
@@ -114,12 +155,33 @@ class ForensicLogger {
               } else {
                 prunedCount++;
               }
-            } catch {}
+            } catch (parseErr) {
+              prunedCount++;
+              logStructured(null, {
+                level: 'warn',
+                component: 'forensic_logger',
+                event: 'corrupt_log_line_skipped',
+                operation: 'prune_parse',
+                result: 'skipped',
+                suppressionReason: 'corrupt_json',
+                errorCode: 'JSON_PARSE_ERROR',
+                sanitizedError: sanitizeError(parseErr)
+              });
+            }
           }
           await fsp.writeFile(this.logFile, retained.length ? retained.join('\n') + '\n' : '', { mode: 0o600 });
         }
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_logger_io_error', target: 'file_prune', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_logger_io_error',
+          operation: 'file_prune',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err),
+          target: 'file_prune'
+        });
       }
     }
 
@@ -143,7 +205,17 @@ class ForensicLogger {
         prunedCount = before - state.burnedSubnets.length;
         return state;
       });
-    } catch {}
+    } catch (err) {
+      logStructured(null, {
+        level: 'error',
+        component: 'forensic_logger',
+        event: 'prune_burned_subnets_failed',
+        operation: 'pruneBurnedSubnets',
+        result: 'failed',
+        errorCode: extractErrorCode(err),
+        sanitizedError: sanitizeError(err)
+      });
+    }
     return { prunedCount, cutoff, ttlDays: 30 };
   }
 
@@ -153,9 +225,34 @@ class ForensicLogger {
       const state = await this.store.load();
       logs = state.forensicLogs || [];
     } else if (this.logFile) {
-      const content = await fsp.readFile(this.logFile, 'utf8').catch(() => '');
+      const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
+        if (err.code !== 'ENOENT') {
+          logStructured(null, {
+            level: 'warn',
+            component: 'forensic_logger',
+            event: 'forensic_log_read_failed',
+            operation: 'query_readFile',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        }
+        return '';
+      });
       logs = content.split('\n').filter(Boolean).map(l => {
-        try { return JSON.parse(l); } catch { return null; }
+        try { return JSON.parse(l); } catch (parseErr) {
+          logStructured(null, {
+            level: 'warn',
+            component: 'forensic_logger',
+            event: 'corrupt_log_line_skipped',
+            operation: 'query_parse',
+            result: 'skipped',
+            suppressionReason: 'corrupt_json',
+            errorCode: 'JSON_PARSE_ERROR',
+            sanitizedError: sanitizeError(parseErr)
+          });
+          return null;
+        }
       }).filter(Boolean);
     }
 
@@ -178,21 +275,61 @@ class ForensicLogger {
           storeLogs.push(...state.forensicLogs);
         }
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_store_error', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_reconcile_store_error',
+          operation: 'reconcile_load_store',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err)
+        });
       }
     }
 
     const fileLogs = [];
     if (this.logFile) {
       try {
-        const content = await fsp.readFile(this.logFile, 'utf8').catch(() => '');
+        const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
+          if (err.code !== 'ENOENT') {
+            logStructured(null, {
+              level: 'warn',
+              component: 'forensic_logger',
+              event: 'forensic_log_read_failed',
+              operation: 'reconcile_readFile',
+              result: 'failed',
+              errorCode: extractErrorCode(err),
+              sanitizedError: sanitizeError(err)
+            });
+          }
+          return '';
+        });
         if (content) {
           for (const line of content.split('\n').filter(Boolean)) {
-            try { fileLogs.push(JSON.parse(line)); } catch {}
+            try { fileLogs.push(JSON.parse(line)); } catch (parseErr) {
+              logStructured(null, {
+                level: 'warn',
+                component: 'forensic_logger',
+                event: 'corrupt_log_line_skipped',
+                operation: 'reconcile_parse',
+                result: 'skipped',
+                suppressionReason: 'corrupt_json',
+                errorCode: 'JSON_PARSE_ERROR',
+                sanitizedError: sanitizeError(parseErr)
+              });
+            }
           }
         }
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_file_error', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_reconcile_file_error',
+          operation: 'reconcile_load_file',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err)
+        });
       }
     }
 
@@ -214,7 +351,15 @@ class ForensicLogger {
         });
         updatedStore = true;
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_store_write_error', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_reconcile_store_write_error',
+          operation: 'reconcile_write_store',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err)
+        });
       }
     }
 
@@ -227,7 +372,15 @@ class ForensicLogger {
         await fsp.rename(tempPath, this.logFile);
         updatedFile = true;
       } catch (err) {
-        process.stderr.write(JSON.stringify({ event: 'forensic_reconcile_file_write_error', error: err.message }) + '\n');
+        logStructured(null, {
+          level: 'error',
+          component: 'forensic_logger',
+          event: 'forensic_reconcile_file_write_error',
+          operation: 'reconcile_write_file',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err)
+        });
       }
     }
 
