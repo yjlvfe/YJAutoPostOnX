@@ -667,3 +667,28 @@ Following previous test passes (369/369), production stability encountered post-
   - All 5 Docker VPN containers (`yj_autopost_vpn_1..5`) healthy on ports 18801–18805 with zero server IP leak.
 - **Governance**: All 33 findings in `MASTER_TODO.md` strictly maintain Codex Status: **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained: **`PENDING`**.
 - **Delivery**: Evidence archive packaged and transmitted to Telegram admin chat `528864559`.
+
+#### Milestone M6 (Round 4): Evidence Audit, 15 Findings Closure, NordVPN Thrashing Elimination & Production Hardening
+- **Date**: 2026-11-02 (Riyadh Time)
+- **Files Modified**:
+  - `Bot/docker/entrypoint.sh`: Resilient fallback to `$country` when pinned server is missing/rejected; 60s failure backoff preventing container restart loops.
+  - `Bot/docker/sticky-health.sh`: Automatic fallback to `$country` on disconnected tunnel; updates `/var/lib/nordvpn/yj-server` with active server.
+  - `Bot/src/sqliteStore.js`: Fail-fast node:sqlite >= 22.5.0 engine check; fail-closed rejection of async promises inside `_transaction`; multi-process optimistic concurrency protection (`WHERE id = 1 AND revision = ?`); `PRAGMA synchronous=NORMAL; wal_autocheckpoint=1000;` and passive WAL checkpoint on close.
+  - `Bot/src/accounts.js`: Atomic refusal of destructive empty or header-only accounts CSV imports (`EMPTY_ACCOUNTS_CSV`).
+  - `Bot/src/runner.js`: User-friendly Arabic alert on empty CSV import attempt; `try/catch` error boundary around periodic scheduling check.
+  - `Bot/src/dockerVpn.js`: Immediate loop exit upon provider rate limiting/session limits; guaranteed tunnel reconnection before returning rotation failure.
+  - `Bot/src/forensicLogger.js`: Replaced silent catch blocks with structured stderr error events (`forensic_logger_io_error`); atomic two-way `reconcile()` method with atomic tempfile replacement and corrupted record tolerance.
+  - `Bot/src/quota.js` & `Bot/src/scheduling.js`: Defensive Date object parsing and validation ensuring exact Riyadh calendar day calculations across edge cases.
+  - `Bot/src/accountTable.js`: Consolidated duplicated table generation logic into `tableUtils.js`.
+  - `Bot/src/telegramFlows.js` & `Bot/src/telegramUi.js`: Purged dead/unused imports (`clean`, `preTable`).
+- **New Test Suites**:
+  - `Bot/test/p3_p4_findings_verification.test.js`: 11/11 PASS (testing FINDING-006, 017, 023, 024, 025, 027, 028, 029, 030, including multi-process OCC and corrupted JSONL reconciliation).
+  - `Bot/test/challenger_r4_m1_2_empirical.test.js`: 6/6 PASS.
+  - `Bot/test/challenger_r4_m1_empirical_fuzz.test.js`: 7/7 PASS.
+- **Verification Evidence**:
+  - Node.js test suites: **33/33 test files PASSED** (305 total test definitions, 100% pass rate).
+  - Python test suites: **183/183 unit tests PASSED** + **7/7 reproducer tests PASSED** (100% pass rate).
+  - Grand total: **495 tests PASS**.
+  - NordVPN infrastructure: All 5 slots (`yj_autopost_vpn_1..5`) active and healthy with `Restarts=0` and distinct public exit IPs. Zero host IP leaks.
+  - Production service: `yj-telegram-bot.service` active and responsive without Telegram 409 conflicts.
+- **Governance**: All 33 findings in `MASTER_TODO.md` updated to **`TESTED_PASS`**. Codex Status remains **`PENDING`**. User P1/P2 final signoff remains **`PENDING`**.

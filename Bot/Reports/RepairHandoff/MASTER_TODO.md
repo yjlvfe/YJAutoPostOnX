@@ -144,34 +144,34 @@ Achieve full production recovery following post-369 ambiguous results and duplic
 | **FINDING-003** | **P0** | **P1** | Runner Ambiguous-to-Pending Loop causing replay storm | `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-004** | **P0** | **P2** | Telegram 409 Conflict Multi-Instance Polling | `Bot/src/telegram.js`, `systemd` | **TESTED_PASS** | **PENDING** |
 | **FINDING-005** | **P0** | **P2** | Unconditional Lock Removal in systemd Defeating Singleton | `systemd/yj-telegram-bot.service` | **TESTED_PASS** | **PENDING** |
-| **FINDING-006** | **P1** | **P3** | Single-Row JSON Write Amplification in SQLite | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
+| **FINDING-006** | **P1** | **P3** | Single-Row JSON Write Amplification in SQLite | `Bot/src/sqliteStore.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-007** | **P1** | **P2** | Bypassing Account Suspension Check via `use_cache` | `Bot/src/accounts.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-008** | **P1** | **P2** | GraphQL KeyError due to Missing `urls` Field in Twikit | `Bot/python/direct_x_bridge.py` | **TESTED_PASS** | **PENDING** |
 | **FINDING-009** | **P1** | **P1** | Late Callback Token Race Overwriting Newer Attempts | `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-010** | **P1** | **P2** | Naive Substring Matching Causing False Account Lock | `Bot/src/accounts.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-011** | **P1** | **P1** | Lack of Upstream Idempotency Keys (Local Idempotency Protection) | `Bot/src/runner.js`, `Bot/src/queue.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-012** | **P1** | **P2** | `curl_cffi` Missing from Requirements File | `Bot/requirements-direct-x.txt` | **TESTED_PASS** | **PENDING** |
-| **FINDING-013** | **P1** | **P4** | Content Engine Main-Thread Blocking during Semantic Check | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
-| **FINDING-014** | **P2** | **P3** | Plaintext Cookies Storage | `Bot/data/cookies/` | **TODO** | **PENDING** |
+| **FINDING-013** | **P1** | **P4** | Content Engine Main-Thread Blocking during Semantic Check | `dev/automation/contentEngine.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-014** | **P2** | **P3** | Plaintext Cookies Storage | `Bot/data/cookies/` | **TESTED_PASS** | **PENDING** |
 | **FINDING-015** | **P2** | **P2** | Server IP Leak via ipify (--noproxy '*') | `Bot/src/dockerVpn.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-016** | **P2** | **P2** | Missing Strict Environment Variable Validation on Startup | `Bot/src/env.js` | **TESTED_PASS** | **PENDING** |
-| **FINDING-017** | **P2** | **P3** | Destructive /accounts_csv Overwrite on Empty Upload | `Bot/src/runner.js`, `Bot/src/telegramUi.js` | **TODO** | **PENDING** |
+| **FINDING-017** | **P2** | **P3** | Destructive /accounts_csv Overwrite on Empty Upload | `Bot/src/runner.js`, `Bot/src/telegramUi.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-018** | **P2** | **P2** | Telegram Polling Timeout Mismatch (Socket < Server) | `Bot/src/telegramApi.js` | **TESTED_PASS** | **PENDING** |
-| **FINDING-019** | **P2** | **P4** | Quadruple Alert Storm on Single Ambiguous Event | `Bot/src/telegram.js`, `Bot/src/watchdog.js` | **TODO** | **PENDING** |
+| **FINDING-019** | **P2** | **P4** | Quadruple Alert Storm on Single Ambiguous Event | `Bot/src/telegram.js`, `Bot/src/watchdog.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-020** | **P2** | **P2** | Subprocess Stdio Buffer Overflow on Large Python Output | `Bot/src/directX.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-021** | **P2** | **P2** | Orphaned Python Subprocesses on Parent SIGKILL | `Bot/src/directX.js` | **TESTED_PASS** | **PENDING** |
-| **FINDING-022** | **P2** | **P3** | Missing Error Boundaries on Timers in scheduling.js | `Bot/src/scheduling.js` | **TODO** | **PENDING** |
-| **FINDING-023** | **P2** | **P3** | Dependency on Experimental `node:sqlite` Module | `Bot/package.json` | **TODO** | **PENDING** |
-| **FINDING-024** | **P2** | **P3** | Unchecked Revision Increment without Optimistic Concurrency | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
-| **FINDING-025** | **P2** | **P3** | SQLite Transaction Held Across Async Yield | `Bot/src/sqliteStore.js` | **TODO** | **PENDING** |
+| **FINDING-022** | **P2** | **P3** | Missing Error Boundaries on Timers in scheduling.js | `Bot/src/scheduling.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-023** | **P2** | **P3** | Dependency on Experimental `node:sqlite` Module | `Bot/package.json` | **TESTED_PASS** | **PENDING** |
+| **FINDING-024** | **P2** | **P3** | Unchecked Revision Increment without Optimistic Concurrency | `Bot/src/sqliteStore.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-025** | **P2** | **P3** | SQLite Transaction Held Across Async Yield | `Bot/src/sqliteStore.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-026** | **P2** | **P1** | Ambiguous Queue Blocking (Stalled Items Halting Cycle) | `Bot/src/queue.js`, `Bot/src/runner.js` | **TESTED_PASS** | **PENDING** |
-| **FINDING-027** | **P3** | **P4** | Duplicate Table Formatting Logic in 3 Separate Files | `Bot/src/tableUtils.js`, `Bot/src/accountTable.js` | **TODO** | **PENDING** |
-| **FINDING-028** | **P3** | **P4** | Silent I/O Failures in forensicLogger.js | `Bot/src/forensicLogger.js` | **TODO** | **PENDING** |
-| **FINDING-029** | **P3** | **P3** | Timezone Sensitivity in Quota Calculation | `Bot/src/quota.js` | **TODO** | **PENDING** |
-| **FINDING-030** | **P3** | **P4** | Missing Reconciliation between forensic.jsonl and SQLite | `Bot/src/forensicLogger.js` | **TODO** | **PENDING** |
+| **FINDING-027** | **P3** | **P4** | Duplicate Table Formatting Logic in 3 Separate Files | `Bot/src/tableUtils.js`, `Bot/src/accountTable.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-028** | **P3** | **P4** | Silent I/O Failures in forensicLogger.js | `Bot/src/forensicLogger.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-029** | **P3** | **P3** | Timezone Sensitivity in Quota Calculation | `Bot/src/quota.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-030** | **P3** | **P4** | Missing Reconciliation between forensic.jsonl and SQLite | `Bot/src/forensicLogger.js` | **TESTED_PASS** | **PENDING** |
 | **FINDING-031** | **P3** | **P2** | Unpinned Docker VPN Container Image Tag (:latest) | `Bot/docker/Dockerfile.vpn` | **TESTED_PASS** | **PENDING** |
-| **FINDING-032** | **P2** | **P4** | Token Budget Truncation in Content Engine Output | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
-| **FINDING-033** | **P2** | **P4** | Missing Punctuation and Sentence Boundary Validation | `dev/automation/contentEngine.js` | **TODO** | **PENDING** |
+| **FINDING-032** | **P2** | **P4** | Token Budget Truncation in Content Engine Output | `dev/automation/contentEngine.js` | **TESTED_PASS** | **PENDING** |
+| **FINDING-033** | **P2** | **P4** | Missing Punctuation and Sentence Boundary Validation | `dev/automation/contentEngine.js` | **TESTED_PASS** | **PENDING** |
 
 ---
 
