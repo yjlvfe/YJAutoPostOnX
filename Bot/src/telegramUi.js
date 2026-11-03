@@ -18,6 +18,10 @@ const ISOLATION_REASONS = {
   COOKIE_REJECTED: 'رفض جلسة الكوكيز (Session rejected / invalid cookies)'
 };
 
+function isCaptchaStatus(status) {
+  return typeof status === 'string' && (status === 'كابتشا' || status === 'كابتشا (مطلوب حل يدوي)' || status.startsWith('كابتشا'));
+}
+
 function formatIsolationReason(reason) {
   if (!reason) return ISOLATION_REASONS.STRIKES_EXCEEDED;
   const str = String(reason).toLowerCase().trim();
@@ -1573,7 +1577,7 @@ class TelegramUi {
           const cookieChanged = a.cookieFile !== capturedCookieFile;
           const currentUserId = a.userId ? String(a.userId) : null;
           const userChanged = currentUserId !== capturedUserId || a.username !== capturedUsername;
-          const challengeClearedOrChanged = !a.needsOwnerCaptcha || a.status !== 'كابتشا';
+          const challengeClearedOrChanged = !a.needsOwnerCaptcha || !isCaptchaStatus(a.status);
 
           if (incidentChanged || genChanged || cookieChanged || userChanged || challengeClearedOrChanged) {
             staleOrPreempted = true;
@@ -1775,12 +1779,60 @@ class TelegramUi {
       diagnosticReason = ISOLATION_REASONS.STRIKES_EXCEEDED;
     }
 
+    let incidentId = null;
     if (diagnosticReason === ISOLATION_REASONS.CAPTCHA) {
+      incidentId = account.captchaIncidentId || `${account.id || username}_${account.captchaDetectedAt || 'current'}`;
       this.notifiedCaptchaIncidents ||= new Set();
-      const incidentId = account.captchaIncidentId || `${account.id || username}_${account.captchaDetectedAt || 'current'}`;
+      this.inFlightAlerts ||= new Set();
+
+      // Suppress if already successfully notified or currently in-flight
       if (this.notifiedCaptchaIncidents.has(incidentId) || account.lastNotifiedCaptchaIncidentId === incidentId) {
         return null;
       }
+      if (this.inFlightAlerts.has(incidentId)) {
+        return null;
+      }
+      this.inFlightAlerts.add(incidentId);
+    }
+
+    const message = buildIsolationMessage({ username, reason: diagnosticReason, otherActiveCount });
+    let notifyResult = null;
+    let notifyError = null;
+
+    try {
+      if (this.notify) {
+        notifyResult = await this.notify(message);
+      }
+    } catch (err) {
+      notifyError = err;
+    } finally {
+      if (incidentId) {
+        this.inFlightAlerts?.delete(incidentId);
+      }
+    }
+
+    if (notifyError) {
+      return null;
+    }
+
+    // Verify actual delivery success before marking state delivered!
+    let deliveryConfirmed = false;
+    if (Array.isArray(notifyResult)) {
+      // allSettled results from runner.js: must have at least one fulfilled delivery
+      deliveryConfirmed = notifyResult.some(r => r.status === 'fulfilled' && (r.value?.ok === true || r.value?.message_id != null));
+    } else if (notifyResult && typeof notifyResult === 'object') {
+      deliveryConfirmed = notifyResult.ok === true || notifyResult.message_id != null;
+    } else if (notifyResult === undefined || notifyResult === null) {
+      deliveryConfirmed = Boolean(this.notify);
+    } else {
+      deliveryConfirmed = Boolean(notifyResult);
+    }
+
+    if (!deliveryConfirmed) {
+      return null; // Delivery was not acknowledged by Telegram API; do not mark as sent to allow retry
+    }
+
+    if (diagnosticReason === ISOLATION_REASONS.CAPTCHA && incidentId) {
       this.notifiedCaptchaIncidents.add(incidentId);
       if (this.bot?.store?.update) {
         try {
@@ -1796,10 +1848,6 @@ class TelegramUi {
       }
     }
 
-    const message = buildIsolationMessage({ username, reason: diagnosticReason, otherActiveCount });
-    if (this.notify) {
-      await this.notify(message);
-    }
     return message;
   }
 

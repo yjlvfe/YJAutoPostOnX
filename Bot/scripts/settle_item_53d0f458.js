@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { randomUUID, createHash } = require('node:crypto');
 const { SqliteStore } = require('../src/sqliteStore');
+const { ForensicLogger } = require('../src/forensicLogger');
 
 const SETTLEMENT_TARGET = {
   id: '53d0f458-3144-4e89-a1af-202a8893afc6',
@@ -38,49 +39,12 @@ function isProdDb(targetPath) {
 }
 
 async function flushPendingForensicOutbox(store, targetLog) {
-  const state = await store.load();
-  const pending = state.pendingForensicOutbox || [];
-  if (pending.length === 0) return { flushed: 0, newlyAppended: 0 };
-
-  const dir = path.dirname(targetLog);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-
-  // Read existing event IDs from targetLog to guarantee deduplication
-  const existingIds = new Set();
-  if (fs.existsSync(targetLog)) {
-    try {
-      const content = await fsp.readFile(targetLog, 'utf8');
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          if (parsed.id) existingIds.add(parsed.id);
-        } catch {}
-      }
-    } catch {}
-  }
-
-  const toAppend = pending.filter(e => !existingIds.has(e.id));
-  if (toAppend.length > 0) {
-    const lines = toAppend.map(e => JSON.stringify(e)).join('\n') + '\n';
-    const fileHandle = await fsp.open(targetLog, 'a', 0o600);
-    try {
-      await fileHandle.write(lines);
-      await fileHandle.sync(); // durable fsync policy
-    } finally {
-      await fileHandle.close();
-    }
-  }
-
-  // Acknowledge and clear flushed events from SQLite outbox
-  const flushedIds = new Set(pending.map(e => e.id));
-  await store.update(s => {
-    s.pendingForensicOutbox = (s.pendingForensicOutbox || []).filter(e => !flushedIds.has(e.id));
-    return s;
+  const logger = new ForensicLogger({
+    store,
+    logFile: targetLog,
+    dataDir: path.dirname(path.dirname(targetLog))
   });
-
-  return { flushed: pending.length, newlyAppended: toAppend.length };
+  return logger.flushOutbox();
 }
 
 async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlement } = {}) {
@@ -190,37 +154,24 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
         getRiyadhDate(i.publishedAt) === riyadhHistoricalDay
       ).length;
 
-      if (currentHistoricalQuota < existingPublishedCount) {
-        throw new Error(`QUOTA_RECONCILIATION_AMBIGUOUS: Current historical quota (${currentHistoricalQuota}) is less than existing published items count (${existingPublishedCount}) for account ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay}. Refusing to guess.`);
-      }
-
-      // Baseline historical count on Nov 1 for this account:
-      // If items are populated, use existingPublishedCount; otherwise use current quota baseline.
-      const baselineCount = existingPublishedCount > 0 ? existingPublishedCount : currentHistoricalQuota;
-      const expectedTargetQuota = (currentHistoricalQuota === 9 || baselineCount === 9) ? 10 : baselineCount + 1;
-
-      // Evidence-based fail-closed reconciliation:
-      // 1. If quota has already reached 10 on the Nov 1 baseline (target), it is ALREADY credited -> NEVER increment to 11!
-      // 2. If quota is already >= expectedTargetQuota and item was marked credited -> DO NOT INCREMENT.
-      // 3. If quota == baselineCount, credit exactly +1 to reach expectedTargetQuota.
+      // Fail-closed validation for the one-off settlement of item 53d0 on Nov 1:
+      // The only proven historical transition is 9 -> 10, or an already-credited 10.
+      // Arbitrary baselines (e.g. quota 8, quota 11, or arbitrary counts) are strictly rejected.
       let quotaCredited = false;
-      const alreadyCredited = Boolean(item.settledQuotaCredited) ||
-        (currentHistoricalQuota === 10 && (baselineCount === 9 || baselineCount === 10)) ||
-        (currentHistoricalQuota >= expectedTargetQuota && existingPublishedCount > 0 && currentHistoricalQuota > existingPublishedCount);
 
-      if (alreadyCredited) {
-        // Enforce target without incrementing further (guards against 10 -> 11 regression)
+      if (currentHistoricalQuota === 10 && (existingPublishedCount === 9 || existingPublishedCount === 0)) {
+        // Target is already credited
         item.settledQuotaCredited = true;
         quotaCredited = false;
-        console.log(`[QUOTA_IDEMPOTENT] Quota for ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay} already credited (${currentHistoricalQuota} >= ${expectedTargetQuota}). No increment.`);
-      } else if (currentHistoricalQuota === baselineCount) {
-        // Authorized transition: from baselineCount to expectedTargetQuota (e.g. 9 -> 10)
-        state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] = expectedTargetQuota;
+        console.log(`[QUOTA_IDEMPOTENT] Quota for ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay} already credited at authorized target of 10.`);
+      } else if (currentHistoricalQuota === 9 && (existingPublishedCount === 9 || existingPublishedCount === 0)) {
+        // Authorized transition from proven baseline 9 to target 10
+        state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] = 10;
         item.settledQuotaCredited = true;
         quotaCredited = true;
-        console.log(`[QUOTA_CREDITED] Quota for ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay} adjusted from ${currentHistoricalQuota} -> ${expectedTargetQuota}.`);
+        console.log(`[QUOTA_CREDITED] Quota for ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay} adjusted from 9 -> 10.`);
       } else {
-        throw new Error(`QUOTA_RECONCILIATION_AMBIGUOUS: Unrecognized quota state (${currentHistoricalQuota}) vs baseline (${baselineCount}). Refusing to increment.`);
+        throw new Error(`QUOTA_RECONCILIATION_AMBIGUOUS: Unsupported or contradictory quota state for 53d0 settlement: currentHistoricalQuota=${currentHistoricalQuota}, existingPublishedCount=${existingPublishedCount} on ${riyadhHistoricalDay}. Only proven 9 -> 10 or verified 10 is authorized.`);
       }
 
       auditEvent = {

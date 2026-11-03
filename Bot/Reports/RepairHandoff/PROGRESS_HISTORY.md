@@ -1062,3 +1062,29 @@ Following previous test passes (369/369), production stability encountered post-
 - **Verification Results**:
   - Python tests: **207/207 PASS** (100%).
   - Node.js tests: **434/434 PASS** across 141 test suites (100%). Total: 641 passing tests. All 53 tasks preserved with all approvals strictly PENDING.
+
+### PR #27 Review Round 3 Fixes — Canonical CAPTCHA Predicate, Delivered Receipt Verification & Lock Stealing Defense (2026-11-03)
+
+- **Fix P0-1 — Canonical CAPTCHA Status Predicate & CAS No-Deadlock**:
+  - Defined canonical status predicate `isCaptchaStatus(status)` recognizing both `'كابتشا'` and `'كابتشا (مطلوب حل يدوي)'`.
+  - Resolved CAS verification deadlock in `Bot/src/telegramUi.js`, allowing owner verification to succeed for UI-recorded challenges.
+  - Successfully transitions account to disabled (`غير مفعل`) with publishing halted pending owner enablement.
+- **Fix P0-2 — Durable Alert Delivery Verification & Failure Retry**:
+  - Implemented `inFlightAlerts` mutex in `TelegramUi.prototype.sendIsolationAlert` to prevent duplicate concurrent alerts.
+  - Inspected actual `Promise.allSettled` receipts returned by `runner.js` notifier, asserting that at least one recipient delivery succeeded (`ok === true` or `message_id`).
+  - Persists `lastNotifiedCaptchaIncidentId` to SQLite store only after proven delivery, allowing automatic retry on transient Telegram failures.
+- **Fix P1-3 — Outbox Lock Ownership, No Stealing & Shared Serialization**:
+  - Wrote ownership token payload (`pid`, `token`, `acquiredAt`) into `${this.logFile}.lock` upon acquisition.
+  - Reclaims orphaned locks only when `isPidAlive(holderPid)` is confirmed dead (`ESRCH`); live processes held past 30s are never stolen.
+  - Checks ownership token before unlinking in `finally`, preventing deletion of replacement locks.
+  - Routed `flushPendingForensicOutbox` in `settle_item_53d0f458.js` directly through `ForensicLogger.prototype.flushOutbox()`.
+- **Fix P1-4 — Strict Historical Quota Baselines (No Guessing)**:
+  - Eliminated arbitrary fallback baseline guessing in `settle_item_53d0f458.js`.
+  - Restricted settlement strictly to proven baseline 9 -> 10, or verified already-credited 10 (NOOP).
+  - Fails closed with `QUOTA_RECONCILIATION_AMBIGUOUS` on any contradictory or unverified quota state (e.g. quota 8 or 11).
+- **Fix P1-5 — Project-Wide Session Visibility & Namespace Audit**:
+  - Performed read-only host and Docker inspection proving that Docker VPN containers are pure network proxies (`nordvpnd` and `microsocks`).
+  - Proved all Twikit/DirectX workers run directly on the host using `.venv-direct-x`, sharing single authoritative `session_leases.sqlite` registry with complete `/proc` visibility.
+- **Verification Results**:
+  - Python tests: **207/207 PASS** (100%).
+  - Node.js tests: **445/445 PASS** across 146 test suites (100%). Total: 652 passing tests. All 53 tasks preserved with all approvals strictly PENDING.

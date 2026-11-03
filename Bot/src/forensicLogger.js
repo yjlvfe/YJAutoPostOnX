@@ -324,19 +324,37 @@ class ForensicLogger {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const now = Date.now();
     const timeout = 10000;
+    const ownerToken = `${process.pid}_${crypto.randomUUID()}`;
     let acquired = false;
     let lockHandle = null;
     while (Date.now() - now < timeout) {
       try {
         lockHandle = await fsp.open(lockFile, 'wx', 0o600);
+        // Write ownership token and PID to establish proven ownership
+        const payload = JSON.stringify({ pid: process.pid, token: ownerToken, acquiredAt: Date.now() });
+        await lockHandle.write(payload);
+        await lockHandle.sync();
         acquired = true;
         break;
       } catch (err) {
         if (err.code === 'EEXIST') {
           try {
-            const stat = await fsp.stat(lockFile);
-            if (Date.now() - stat.mtimeMs > 30000) {
-              await fsp.unlink(lockFile).catch(() => {});
+            const data = await fsp.readFile(lockFile, 'utf8');
+            const lockInfo = JSON.parse(data);
+            if (lockInfo && typeof lockInfo.pid === 'number') {
+              let isAlive = false;
+              try {
+                process.kill(lockInfo.pid, 0);
+                isAlive = true;
+              } catch (killErr) {
+                if (killErr.code === 'ESRCH') isAlive = false;
+                else if (killErr.code === 'EPERM') isAlive = true;
+              }
+              if (!isAlive) {
+                // Holder is confirmed dead (ESRCH)! Safe to reclaim orphaned lock
+                await fsp.unlink(lockFile).catch(() => {});
+              }
+              // If holder is alive, NEVER revoke or unlink, even if elapsed time > 30s!
             }
           } catch {}
           await new Promise(r => setTimeout(r, 20 + Math.floor(Math.random() * 30)));
@@ -346,7 +364,7 @@ class ForensicLogger {
       }
     }
     if (!acquired) {
-      throw Object.assign(new Error('FORENSIC_LOG_LOCK_TIMEOUT: Could not acquire lock for forensic log.'), { code: 'FORENSIC_LOG_LOCK_TIMEOUT' });
+      throw Object.assign(new Error('FORENSIC_LOG_LOCK_TIMEOUT: Could not acquire lock for forensic log; active holder running or unverified.'), { code: 'FORENSIC_LOG_LOCK_TIMEOUT' });
     }
     try {
       return await fn();
@@ -354,7 +372,14 @@ class ForensicLogger {
       if (lockHandle) {
         try { await lockHandle.close(); } catch {}
       }
-      try { await fsp.unlink(lockFile); } catch {}
+      try {
+        // Only unlink if the lock file still belongs to our exact ownership token!
+        const currentData = await fsp.readFile(lockFile, 'utf8');
+        const parsed = JSON.parse(currentData);
+        if (parsed && parsed.token === ownerToken) {
+          await fsp.unlink(lockFile);
+        }
+      } catch {}
     }
   }
 

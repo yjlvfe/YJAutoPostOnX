@@ -110,7 +110,7 @@ describe('M14: Human-Only CAPTCHA Gate & Transactional Outbox Suite', () => {
           payload: { text: SETTLEMENT_TARGET.fullText, account: SETTLEMENT_TARGET.accountId }
         }
       ],
-      posting: { quota: { '2026-11-01': { [SETTLEMENT_TARGET.accountId]: 5 } } }
+      posting: { quota: { '2026-11-01': { [SETTLEMENT_TARGET.accountId]: 9 } } }
     };
     const store = new SqliteStore(testDbPath, initial);
     await store.load();
@@ -127,8 +127,8 @@ describe('M14: Human-Only CAPTCHA Gate & Transactional Outbox Suite', () => {
     assert.strictEqual(item.url, SETTLEMENT_TARGET.url);
     assert.strictEqual(item.settledQuotaCredited, true);
 
-    // Historical quota incremented by 1 (from 5 to 6)
-    assert.strictEqual(finalState.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 6);
+    // Historical quota incremented by 1 (from 9 to 10)
+    assert.strictEqual(finalState.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 10);
 
     // Outbox flushed cleanly to targetLog
     assert.ok(fs.existsSync(testLogPath));
