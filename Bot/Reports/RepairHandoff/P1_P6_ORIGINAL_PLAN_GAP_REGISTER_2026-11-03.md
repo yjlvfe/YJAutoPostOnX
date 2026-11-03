@@ -8,7 +8,7 @@
 - GitHub's M1–M11 labels are test/production rounds, **not replacements** for P1–P6. GitHub MASTER_TODO has a different internal phase taxonomy; do not overwrite the source's P1–P6 taxonomy.
 - Implementation, test evidence, Codex signoff, and owner-production acceptance are separate fields. **All 33 original Codex approvals remain PENDING**, as do approval gates for these new tasks.
 - The figure **~30 ambiguous** is from the last owner screenshot, not a fresh live SQLite query. Never auto-requeue post-dispatch ambiguous items without authoritative evidence.
-- The main branch verified here: `8b49f3590fe2c332547b64c57af8603599608b54` (PR #19 merged; GitHub CI success, VPS post-PR19 verification not yet delivered).
+- The main branch verified here: `7e1453bb0796c72966f556addd8291076925145c` (PR #21 merged; GitHub CI success, full test suites PASS).
 
 ## Additional work by ORIGINAL P phase
 
@@ -16,8 +16,8 @@
 
 | ID | Additional work | Implementation | Test evidence | Closure criteria |
 |---|---|---|---|---|
-| `ADD-P1-01` | جرد جميع المنشورات الغامضة (~30 في آخر لوحة) وتصنيف مصير كل itemId دون إعادة جماعية | `OPEN` | `NOT_RUN` | دليل حالة كل عنصر + استعادة ذرية فقط عند إثبات عدم النشر |
-| `ADD-P1-02` | تمييز رفض GraphQL المؤكد من نتيجة ما بعد dispatch غير المحسومة | `PARTIAL_MERGED` | `VPS_E2E_PENDING` | إثبات سياسة إعادة/حجر آمنة دون POST مكرر |
+| `ADD-P1-01` | جرد جميع المنشورات الغامضة (~30 في آخر لوحة) وتصنيف مصير كل itemId دون إعادة جماعية | `AUDITED_QUARANTINED` | `PASS` | دليل حالة كل عنصر + إرجاع ذري لـ 4 استردادات خاطئة + 30/30 محجوزة بلا إعادة نشر |
+| `ADD-P1-02` | تمييز رفض GraphQL المؤكد من نتيجة ما بعد dispatch غير المحسومة | `MERGED_PR21` | `PASS` | إثبات سياسة إعادة/حجر آمنة دون POST مكرر |
 | `ADD-P1-03` | قياس جميع محاولات النشر لا الناجحة فقط وربط الفشل بالكوتا والطابور | `MERGED` | `LIVE_EVIDENCE_PARTIAL` | محاولات=ناجح+فاشل+غامض لكل دورة وحساب؛ دون ازدواج عد |
 | `ADD-P1-04` | التحقق الممتد من سياج rate_limit بعد dispatch وتأكيدات النشر المتأخرة | `MERGED` | `LOCAL_REGRESSION_PASS_VPS_PENDING` | لا إعادة pending بعد إرسال غير محسوم |
 
@@ -42,7 +42,7 @@
 | ID | Additional work | Implementation | Test evidence | Closure criteria |
 |---|---|---|---|---|
 | `ADD-P4-01` | منع Twikit KeyError 'urls' في CreateTweet وقراءة Timeline | `MERGED` | `LIVE_EVIDENCE_REPORTED` | حسابات البايو الفارغ تنشر بلا انهيار |
-| `ADD-P4-02` | نقل أكواد ورسائل GraphQL/HTTP وكشف خطأ التحقق من Python إلى Node وSQLite | `MERGED_PR19` | `CI_GREEN_VPS_E2E_PENDING` | أسباب X الأصلية لكل فشل دون أسرار في اللوج |
+| `ADD-P4-02` | نقل أكواد ورسائل GraphQL/HTTP وكشف خطأ التحقق من Python إلى Node وSQLite | `MERGED_PR21` | `PASS` | أسباب X الأصلية لكل فشل دون أسرار في اللوج |
 | `ADD-P4-03` | عدم احتساب رفض المحتوى 186/187 كضربة حساب ومراجعة تبعات 3-strikes | `MERGED_PR19` | `CI_GREEN_VPS_E2E_PENDING` | اختبار حدود رفض المحتوى/الحظر/التهدئة |
 | `ADD-P4-04` | استقرار 5 حاويات VPN وعدم تسرب IP والـrotate خلال التشغيل الطويل | `IMPLEMENTED_HISTORICALLY` | `LIVE_EVIDENCE_REPORTED` | اختبارات عزل واتصال واستقرار على VPS |
 
