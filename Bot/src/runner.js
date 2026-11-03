@@ -929,7 +929,8 @@ async function run({
                 dispatchEntered: Boolean(dispatchEntered),
                 xResponseKind: result.xResponseKind || null,
                 xErrorCode: result.xErrorCode ?? null,
-                xErrorMessage: result.xErrorMessage ? sanitizeError(result.xErrorMessage).slice(0, 512) : null,
+                xErrorMessage: (result.xErrorMessage || result.rawError || result.reason)
+                  ? sanitizeError(result.xErrorMessage || result.rawError || result.reason).slice(0, 512) : null,
                 httpStatus: Number.isInteger(result.httpStatus) ? result.httpStatus : null,
                 verificationError: result.verificationError ? sanitizeError(result.verificationError).slice(0, 512) : null
               };
