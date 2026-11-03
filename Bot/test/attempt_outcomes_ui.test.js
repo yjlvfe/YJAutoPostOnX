@@ -72,3 +72,19 @@ test('panel throttling retains explicit immediate updates on start and stop', ()
   assert.match(ui,/this\.refreshPanels\(true\)/);
   assert.match(ui,/منشورات غامضة تحتاج مراجعة/);
 });
+
+test('rate limit before dispatch is pending, after dispatch is ambiguous', () => {
+  const { classifyPublishOutcome } = require('../src/publishOutcome');
+  const r = { published: false, rateLimit: true };
+  assert.equal(classifyPublishOutcome(r, false), 'pending');
+  assert.equal(classifyPublishOutcome(r, true), 'ambiguous');
+});
+
+test('unconfirmed outcomes stay quarantined; confirmed publish requires a URL', () => {
+  const { classifyPublishOutcome } = require('../src/publishOutcome');
+  assert.equal(classifyPublishOutcome({ published: true }, false), 'ambiguous');
+  assert.equal(classifyPublishOutcome({ ambiguous: true }, false), 'ambiguous');
+  assert.equal(classifyPublishOutcome({ published: true, url: 'https://x.com/a/status/123' }, true), 'published');
+  assert.equal(classifyPublishOutcome({ reason: 'tweet_too_long' }, false), 'cancelled');
+  assert.equal(classifyPublishOutcome({ reason: 'identity_read_unavailable' }, false), 'pending');
+});
