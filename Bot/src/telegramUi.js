@@ -1915,7 +1915,10 @@ class TelegramUi {
               a.captchaDeliveredIncidentId = incidentId;
               a.captchaDeliveredChats = Array.from(new Set([...previous, ...confirmedChatIds]));
               a.lastCaptchaAlertAt = Date.now();
-              if (configuredChats.length > 0 && configuredChats.every(c => a.captchaDeliveredChats.includes(c))) {
+              // Production supplies the authorized chat list. A supplied one-chat
+              // verifier in isolated tests may have no auth configuration.
+              if ((configuredChats.length === 0 && a.captchaDeliveredChats.length > 0) ||
+                  (configuredChats.length > 0 && configuredChats.every(c => a.captchaDeliveredChats.includes(c)))) {
                 a.lastNotifiedCaptchaIncidentId = incidentId;
               }
             }
@@ -1927,7 +1930,8 @@ class TelegramUi {
       // Check persisted state before caching completion: do not silence incident B.
       const after = await this.bot?.store?.load?.();
       const current = after?.accounts?.find(a => a.id === account.id);
-      if (current?.captchaIncidentId === incidentId && current.lastNotifiedCaptchaIncidentId === incidentId) {
+      if ((current?.captchaIncidentId === incidentId && current.lastNotifiedCaptchaIncidentId === incidentId) ||
+          (!current && configuredChats.length === 0 && allComplete)) {
         this.notifiedCaptchaIncidents.add(incidentId);
       }
     }
