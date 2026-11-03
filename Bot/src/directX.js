@@ -159,7 +159,13 @@ class DirectXAdapter {
             blocked: false,
             retryable: true,
             verifiedNotPosted: true,
-            reason: result.reason || 'publish_not_posted_on_timeline'
+            reason: result.reason || 'publish_not_posted_on_timeline',
+            rawError: result.rawError,
+            xErrorCode: result.xErrorCode,
+            xErrorMessage: result.xErrorMessage,
+            xResponseKind: result.xResponseKind,
+            verificationError: result.verificationError,
+            httpStatus: result.httpStatus
           };
         }
         if (result.rateLimit === true || result.status === 'rate_limit') {
@@ -173,6 +179,12 @@ class DirectXAdapter {
             accountFailure: 'rate_limit',
             retryAfterSeconds: result.retryAfterSeconds || 60,
             reason: result.reason || 'rate_limit',
+            rawError: result.rawError,
+            xErrorCode: result.xErrorCode,
+            xErrorMessage: result.xErrorMessage,
+            xResponseKind: result.xResponseKind,
+            verificationError: result.verificationError,
+            httpStatus: result.httpStatus,
           };
         }
         if (state.used || result.ambiguous) {
