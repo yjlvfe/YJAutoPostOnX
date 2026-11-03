@@ -757,6 +757,32 @@ Following previous test passes (369/369), production stability encountered post-
   - `Bot/Reports/RepairHandoff/Round6_M8/FINAL_PRODUCTION_VERDICT.md`
 - **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
 
+#### Milestone M10 (Round 8 - Post-PR #17 Live Production Multi-Round Endurance & Quota Exhaustion)
+- **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
+- **Milestone Objectives**:
+  - Pull and verify PR #17 (commit `447ffa07bc3ebaa853c652f6a96d93e8b9cea516`) with native start receipt, deferred SQLite read transactions, and telemetry.
+  - Re-align test assertions across unit suites (603 tests across all 4 tiers, 100% pass rate).
+  - Restart production service `yj-telegram-bot.service` (Main PID: `2439258`) with verified paths, single instance, and Docker VPN health.
+  - Initiate authentic cycle through native production scheduler (`source: scheduled`, Run ID: `b97fd7d352319b40c21649b5`).
+  - Verify receipt delivery to both admin chats (Owner Msg `1594`, Brother Msg `1595`) and simultaneous dashboard updates (Owner Msg `1593`, Brother Msg `1291`).
+  - Monitor natural multi-round rotation across all 5 accounts until 100% daily quota exhaustion (10/10 per account).
+  - Verify automatic completion, CSV delivery (`links_2026-11-03.csv`), and transition back to stopped state.
+- **Outcomes & Verifications**:
+  - All 603 automated tests passed across all 4 tiers (100% pass in 104s).
+  - **21 live verified posts published on X** in single Run `b97fd7d352319b40c21649b5`:
+    - `@crytpokingxvo8`: 3 posts (Reached 10/10 quota)
+    - `@emiehg`: 5 posts (Reached 10/10 quota)
+    - `@kaniabq`: 3 posts (Reached 10/10 quota)
+    - `@marcosvhv`: 7 posts (Reached 10/10 quota)
+    - `@menalobq`: 3 posts (Reached 10/10 quota)
+  - Full daily quota exhaustion reached: **50 / 50 confirmed posts published today on X**.
+  - Dual control panels performed 432 live edits with 99.8% delivery parity (Average edit latency: 338.9 ms; zero crashes on transient upstream timeout).
+  - Zero `sqlite_slow_read` stalls recorded during the run.
+  - Automatic completion emitted notification and delivered `links_2026-11-03.csv` to both chats (Owner Msg `1598`, Brother Msg `1599`).
+  - Schedule cleanly restored to disabled state.
+  - Deliverables: `LIVE_PRODUCTION_FULL_RUN.jsonl`, `ACCOUNT_ROTATION_MATRIX.md`, `LATENCY_AND_EVENT_LOOP_TELEMETRY.md`, `live_production_service_raw_logs.log`.
+- **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
+
 #### Milestone M8 (Round 7 - Post-Merge & Live Telegram Operator Verification)
 - **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
 - **Milestone Objectives**:
