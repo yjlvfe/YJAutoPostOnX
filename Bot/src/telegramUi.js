@@ -153,7 +153,7 @@ class TelegramUi {
           sanitizedError: sanitizeError(error)
         });
       });
-    }, 1000);
+    }, 3000);
     this.ticker.unref?.();
   }
   actions() {
@@ -656,7 +656,7 @@ class TelegramUi {
         const countdownSec = Number.isFinite(next) ? Math.max(0, (next - now) / 1000) : 0;
         const elapsedSec = cycleRunning(s) && s.cycle?.startedAt ? Math.max(0, Math.floor((now - new Date(s.cycle.startedAt).getTime()) / 1000)) : 0;
         const inHoursStage = (countdownSec >= 3600) || (elapsedSec >= 3600);
-        const intervalMs = inHoursStage ? 60000 : 5000;
+        const intervalMs = inHoursStage ? 60000 : 15000;
         if (now - (this.panelLastEdit.get(lockKey) || 0) < intervalMs) return;
       }
       const t = current?.token || token(); const text = await this.render(s);
