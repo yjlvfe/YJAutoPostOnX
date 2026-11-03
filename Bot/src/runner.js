@@ -334,6 +334,18 @@ async function run({
             sanitizedError: sanitizeError(res.reason),
             details: { chatId: effectiveChatIds[i] }
           });
+        } else {
+          logStructured(logger, {
+            level: 'info',
+            component: 'runner',
+            event: 'notify_send_success',
+            operation: 'sendMessage',
+            result: 'delivered_to_telegram_api',
+            details: {
+              chatId: effectiveChatIds[i],
+              messageId: res.value?.message_id ?? null
+            }
+          });
         }
       }
       return results;
