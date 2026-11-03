@@ -50,9 +50,16 @@ async function simulate({ journalPosts = 21, missingReceipt = false } = {}) {
     'node:sqlite': { DatabaseSync: fakeDb }
   })[name];
   const proc = { exitCode: 0 };
-  const context = { require: fakeRequire, process: proc,
+  let fakeNow = Date.parse('2026-11-03T04:10:25Z');
+  const FakeDate = class extends Date { static now() { return fakeNow; } };
+  const context = { require: fakeRequire, process: proc, Date: FakeDate,
     console: { log() {}, error() {} },
-    setTimeout: fn => { Promise.resolve().then(fn); return 1; } };
+    // Force a bounded observer timeout for the intentionally missing receipt.
+    setTimeout: fn => {
+      fakeNow += missingReceipt && reads >= 2 ? 3_000_000 : 1000;
+      Promise.resolve().then(fn);
+      return 1;
+    } };
   vm.runInNewContext(source, context, { filename: file, timeout: 1000 });
   for (let i = 0; i < 20; i++) await Promise.resolve();
   const output = [...files].find(([key]) => key.endsWith('MONITOR_VERDICT.json'));
