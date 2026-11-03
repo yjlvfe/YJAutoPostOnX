@@ -878,10 +878,20 @@ class TelegramUi {
           account.status = 'محظور';
           account.checkGeneration = crypto.randomUUID();
         } else if (failure === 'captcha') {
+          // Scope receipt history to the newly detected incident, not this account.
+          // Repeated checks of the same pending incident must not break owner CAS.
+          const alreadyPending = account.needsOwnerCaptcha && account.captchaIncidentId && isCaptchaStatus(account.status);
           account.enabled = false;
           account.status = 'كابتشا (مطلوب حل يدوي)';
           account.needsOwnerCaptcha = true;
-          account.checkGeneration = crypto.randomUUID();
+          if (!alreadyPending) {
+            account.captchaDetectedAt = Date.now();
+            account.captchaIncidentId = crypto.randomUUID();
+            account.captchaDeliveredIncidentId = account.captchaIncidentId;
+            account.captchaDeliveredChats = [];
+            delete account.lastNotifiedCaptchaIncidentId;
+            account.checkGeneration = crypto.randomUUID();
+          }
         } else if (failure === 'auth_session_unverified' || (!result.authenticated && !failure)) {
           // Unverified session / cause uncertain: DO NOT default to 'محظور'!
           // Only preserve existing 'محظور' if it was already marked as such by an authoritative check.
@@ -905,6 +915,16 @@ class TelegramUi {
         ...Object.fromEntries(['challenge', 'locked', 'captcha', 'suspended', 'banned'].map(flag => [flag, isolated && result[flag] === true])) };
       return s;
     }); } catch { throw Object.assign(new Error('Account check persistence failed'), { code: 'ACCOUNT_CHECK_PERSIST_FAILED' }); }
+    if (applied && session && source === 'x-session' && (result.accountFailure === 'captcha' || result.captcha === true)) {
+      // Background checks are also responsible for alerting the owner. Repeated
+      // checks reuse the incident ID and per-chat delivered receipt state.
+      const fresh = await this.bot.store.load();
+      const challenged = fresh.accounts?.find(a => a.id === accountId);
+      if (challenged?.needsOwnerCaptcha) {
+        await this.sendIsolationAlert({ account: challenged, reason: 'captcha' })
+          .catch(err => this._logError('captcha_alert_failed', 'recordAccountCheck', err, { accountId }));
+      }
+    }
     return applied;
   }
   async rejectQuota(quota, id) {
