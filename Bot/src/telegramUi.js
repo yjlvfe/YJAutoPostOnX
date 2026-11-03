@@ -626,10 +626,12 @@ class TelegramUi {
     const publishing = running && state.posting?.publishingAt ? new Date(state.posting.publishingAt).getTime() : NaN;
     const nextLine = Number.isFinite(publishing) ? `جاري النشر الآن... (${Math.max(0, Math.floor((new Date(this.clock()).getTime() - publishing) / 1000))} ث)` : countdown;
     const queueTotal = items.filter(x => x.state === 'pending').length;
+    const ambiguousCount = items.filter(x => x.state === 'ambiguous').length;
 
     const controlTableHtml = richTable(['القيمة', 'البند'], [
       [status, 'حالة العمل'],
       [String(queueTotal), 'المنشورات في الطابور'],
+      [String(ambiguousCount), 'منشورات غامضة تحتاج مراجعة'],
       [String(published), 'المنشورات الناجحة'],
       [`${active}/5`, 'الحسابات الفعالة'],
       [nextLine, 'المنشور التالي بعد'],
