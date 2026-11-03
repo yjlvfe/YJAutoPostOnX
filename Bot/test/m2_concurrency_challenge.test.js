@@ -1,6 +1,6 @@
 'use strict';
 
-const { test, describe } = require('node:test');
+const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -136,6 +136,25 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
   });
 
   describe('Objective 2: Concurrent SQLite State Access & Zero Contention', () => {
+    const os = require('node:os');
+    let tempDir = null;
+    let testDbPath = null;
+    const TEST_ITEM_COUNT = 4455;
+
+    before(async () => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'm2-concurrency-'));
+      testDbPath = path.join(tempDir, 'state.sqlite');
+      const items = Array.from({ length: TEST_ITEM_COUNT }, (_, i) => ({ id: `item-${i}` }));
+      const store = new SqliteStore(testDbPath, { items });
+      await store.load();
+      await store.close();
+    });
+
+    after(() => {
+      if (tempDir && fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
 
     test('rapid multi-process concurrent reads experience zero SQLITE_BUSY or lock contention errors', async () => {
       const NUM_PROCESSES = 8;
@@ -155,7 +174,7 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
                 const row = stmt.get();
                 if (row && row.id === 1 && row.revision >= 0 && row.json) {
                   const parsed = JSON.parse(row.json);
-                  if (Array.isArray(parsed.items) && parsed.items.length === 4455) {
+                  if (Array.isArray(parsed.items) && parsed.items.length === ${TEST_ITEM_COUNT}) {
                     successCount++;
                   } else {
                     errors.push('Item count mismatch: ' + parsed.items?.length);
@@ -171,7 +190,7 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
             db.close();
             process.stdout.write(JSON.stringify({ successCount, busyCount, errors }));
           `;
-          const child = spawn(process.execPath, ['-e', script, LIVE_DB_PATH], { stdio: ['ignore', 'pipe', 'pipe'] });
+          const child = spawn(process.execPath, ['-e', script, testDbPath], { stdio: ['ignore', 'pipe', 'pipe'] });
           let out = '';
           child.stdout.on('data', d => out += d);
           child.on('close', code => {
@@ -202,7 +221,7 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
     });
 
     test('SqliteStore concurrent load calls serialize cleanly and preserve state integrity', async () => {
-      const store = new SqliteStore(LIVE_DB_PATH);
+      const store = new SqliteStore(testDbPath);
       const CONCURRENCY = 20;
 
       const reads = Array.from({ length: CONCURRENCY }, () => store.load());
@@ -212,13 +231,13 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
       for (const s of states) {
         assert.ok(s, 'State must be non-null');
         assert.strictEqual(Array.isArray(s.items), true);
-        assert.strictEqual(s.items.length, 4455);
+        assert.strictEqual(s.items.length, TEST_ITEM_COUNT);
       }
       await store.close();
     });
 
     test('DatabaseSync read-only mode executes cleanly with PRAGMA journal_mode=WAL', () => {
-      const db = new DatabaseSync(LIVE_DB_PATH, { readOnly: true });
+      const db = new DatabaseSync(testDbPath, { readOnly: true });
       const pragmaWal = db.prepare('PRAGMA journal_mode').get();
       assert.strictEqual(pragmaWal.journal_mode, 'wal');
 
@@ -227,7 +246,7 @@ describe('Empirical Adversarial Challenge M2: Process Lock & State Concurrency',
 
       const row = db.prepare('SELECT id, revision FROM state WHERE id = 1').get();
       assert.strictEqual(row.id, 1);
-      assert.ok(row.revision > 0);
+      assert.ok(row.revision >= 0);
 
       db.close();
     });

@@ -63,19 +63,18 @@ const ENRICH_13_ITEMS = [
   { itemId: 'fa1f2749-8496-4d20-b6e4-d6fad4a5de0b', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' }
 ];
 
-async function main() {
-  const isApply = process.argv.includes('--apply');
-  const dbPath = path.resolve(__dirname, '../data/state.sqlite');
-  const logFilePath = path.resolve(__dirname, '../data/logs/forensic.jsonl');
+async function runReversion({ dbPath, logFilePath, isApply } = {}) {
+  const targetDb = dbPath || path.resolve(__dirname, '../data/state.sqlite');
+  const targetLog = logFilePath || path.resolve(__dirname, '../data/logs/forensic.jsonl');
 
   console.log(`=== REVERT & FORENSIC AUDIT SCRIPT (Mode: ${isApply ? 'APPLY' : 'DRY-RUN'}) ===`);
-  console.log('Target database:', dbPath);
+  console.log('Target database:', targetDb);
 
   if (!isApply) {
     console.log('NOTICE: Running in DRY-RUN mode. Pass --apply to execute changes atomically.');
   }
 
-  const store = new SqliteStore(dbPath);
+  const store = new SqliteStore(targetDb);
   let revertedCount = 0;
   let alreadyQuarantinedCount = 0;
   let enrichedCount = 0;
@@ -103,6 +102,10 @@ async function main() {
             alreadyQuarantinedCount++;
           } else {
             console.log(`Reverting item ${item.id} -> ambiguous (${rev.revertReason})`);
+            // Archive prior attempt before state reset
+            if (item.attempt) {
+              item.archivedAttempt = structuredClone(item.attempt);
+            }
             item.state = 'ambiguous';
             item.reason = rev.reason;
             item.claimedAt = rev.claimedAt;
@@ -132,53 +135,64 @@ async function main() {
       remainingAmbiguous = state.items.filter(i => i.state === 'ambiguous').length;
       totalPublished = state.items.filter(i => i.state === 'published').length;
 
-      // 1. Revert event with mandatory id and epoch
-      revertEvent = {
-        id: randomUUID(),
-        timestamp: nowIso,
-        epoch: nowEpoch,
-        eventType: 'm11_revert_false_recovery',
-        details: {
-          revertedCount,
-          alreadyQuarantinedCount,
-          remainingAmbiguous,
-          totalPublished,
-          items: REVERT_ITEMS.map(r => ({ itemId: r.id, revertReason: r.revertReason }))
-        }
-      };
-      state.forensicLogs.push(revertEvent);
+      // DO NOT record new events if no item changed state or was enriched!
+      if (revertedCount === 0 && enrichedCount === 0) {
+        console.log('No state mutations occurred. Zero events recorded to preserve clean audit ledger.');
+        return state;
+      }
 
-      // 2. Enrich event with mandatory id and epoch
-      enrichEvent = {
-        id: randomUUID(),
-        timestamp: nowIso,
-        epoch: nowEpoch,
-        eventType: 'm11_audit_13_ambiguous_accounts',
-        details: {
-          enrichedCount,
-          remainingAmbiguous,
-          items: ENRICH_13_ITEMS
-        }
-      };
-      state.forensicLogs.push(enrichEvent);
+      if (revertedCount > 0) {
+        revertEvent = {
+          id: randomUUID(),
+          timestamp: nowIso,
+          epoch: nowEpoch,
+          eventType: 'm11_revert_false_recovery',
+          details: {
+            revertedCount,
+            alreadyQuarantinedCount,
+            remainingAmbiguous,
+            totalPublished,
+            items: REVERT_ITEMS.map(r => ({ itemId: r.id, revertReason: r.revertReason }))
+          }
+        };
+        state.forensicLogs.push(revertEvent);
+      }
+
+      if (enrichedCount > 0) {
+        enrichEvent = {
+          id: randomUUID(),
+          timestamp: nowIso,
+          epoch: nowEpoch,
+          eventType: 'm11_audit_13_ambiguous_accounts',
+          details: {
+            enrichedCount,
+            remainingAmbiguous,
+            items: ENRICH_13_ITEMS
+          }
+        };
+        state.forensicLogs.push(enrichEvent);
+      }
 
       return state;
     });
 
-    store.close();
+    await store.close();
 
-    // Append both events to forensic.jsonl with 0o600
-    try {
-      const lines = [JSON.stringify(revertEvent), JSON.stringify(enrichEvent)].join('\n') + '\n';
-      await fsp.appendFile(logFilePath, lines, { mode: 0o600 });
-      console.log(`Persisted audit events to ${logFilePath}`);
-    } catch (err) {
-      console.error(`Warning: Failed to append to ${logFilePath}:`, err.message);
+    // Append to JSONL log file only if events were actually generated
+    const newEvents = [revertEvent, enrichEvent].filter(Boolean);
+    if (newEvents.length > 0) {
+      try {
+        const lines = newEvents.map(e => JSON.stringify(e)).join('\n') + '\n';
+        await fsp.appendFile(targetLog, lines, { mode: 0o600 });
+        console.log(`Persisted ${newEvents.length} audit event(s) to ${targetLog}`);
+      } catch (err) {
+        console.error(`Warning: Failed to append to ${targetLog}:`, err.message);
+      }
     }
 
     console.log(`\nReversion summary: ${revertedCount} reverted, ${alreadyQuarantinedCount} already in quarantine.`);
-    console.log(`Enrichment summary: ${enrichedCount} ambiguous items enriched with authentic accountId/username.`);
-    console.log(`Final Counts: ambiguous=${remainingAmbiguous} (expected 30), published=${totalPublished} (expected 155).`);
+    console.log(`Enrichment summary: ${enrichedCount} ambiguous items enriched.`);
+    console.log(`Final Counts: ambiguous=${remainingAmbiguous}, published=${totalPublished}.`);
   } else {
     // Dry run inspection
     const state = await store.load();
@@ -196,12 +210,19 @@ async function main() {
     }
     remainingAmbiguous = (state.items || []).filter(i => i.state === 'ambiguous').length;
     totalPublished = (state.items || []).filter(i => i.state === 'published').length;
-    store.close();
+    await store.close();
 
     console.log(`\n[DRY RUN] Would revert: ${revertedCount}, already quarantined: ${alreadyQuarantinedCount}.`);
     console.log(`[DRY RUN] Would enrich: ${enrichedCount} ambiguous items.`);
     console.log(`[DRY RUN] Current counts: ambiguous=${remainingAmbiguous}, published=${totalPublished}.`);
   }
+
+  return { revertedCount, alreadyQuarantinedCount, enrichedCount, remainingAmbiguous, totalPublished };
+}
+
+async function main() {
+  const isApply = process.argv.includes('--apply');
+  await runReversion({ isApply });
 }
 
 if (require.main === module) {
@@ -211,4 +232,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, REVERT_ITEMS, ENRICH_13_ITEMS };
+module.exports = { main, runReversion, REVERT_ITEMS, ENRICH_13_ITEMS };

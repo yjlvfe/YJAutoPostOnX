@@ -214,6 +214,77 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
     return None
 
 
+def classify_x_tweet_rejection(raw_json=None, errors=None, text='', http_status=None):
+    """
+    Granularly classify tweet content or policy rejections from X:
+      'duplicate_content'  -> Code 187, "Status is a duplicate", "already posted"
+      'length_exceeded'    -> Code 186, "Tweet needs to be a bit shorter", "character limit"
+      'content_moderation' -> Code 226, automated or spam flags
+      'account_locked'     -> Code 326, 353, 399, 241
+      'account_suspended'  -> Code 64, 63, 141
+      'auth_rejected'      -> Code 32, 135, 215, 99, 231
+      'rate_limit'         -> Code 88, 185, HTTP 429
+      'tweet_tombstone'    -> TweetTombstone in GraphQL response
+      None                 -> Not a recognized content/policy rejection
+    """
+    if isinstance(raw_json, dict) and not errors:
+        errors = raw_json.get('errors', [])
+    errors = errors if isinstance(errors, list) else []
+
+    codes = set()
+    messages = []
+
+    if isinstance(raw_json, dict):
+        if isinstance(raw_json.get('message'), str):
+            messages.append(raw_json['message'])
+        res_data = raw_json.get('data', {}).get('create_tweet', {}).get('tweet_results', {}).get('result', {})
+        if isinstance(res_data, dict) and res_data.get('__typename') == 'TweetTombstone':
+            return 'tweet_tombstone'
+
+    for e in errors:
+        if isinstance(e, dict):
+            if type(e.get('code')) is int:
+                codes.add(e['code'])
+            ext = e.get('extensions')
+            ext_code = ext.get('code') if isinstance(ext, dict) else None
+            if type(ext_code) is int:
+                codes.add(ext_code)
+            msg = e.get('message')
+            if isinstance(msg, str):
+                messages.append(msg)
+
+    if text and isinstance(text, str):
+        messages.append(text)
+
+    combined = ' '.join(messages).lower()
+
+    if 187 in codes or 'duplicate' in combined:
+        return 'duplicate_content'
+
+    if 186 in codes or 'shorter' in combined or 'too long' in combined or 'character limit' in combined:
+        return 'length_exceeded'
+
+    if 226 in codes or 'automated' in combined or 'spam' in combined:
+        return 'content_moderation'
+
+    if codes & {326, 353, 399, 241}:
+        return 'account_locked'
+
+    if codes & {64, 63, 141}:
+        return 'account_suspended'
+
+    if codes & {32, 135, 215, 99, 231}:
+        return 'auth_rejected'
+
+    if (codes & {88, 185}) or http_status == 429:
+        return 'rate_limit'
+
+    if 'tweettombstone' in combined:
+        return 'tweet_tombstone'
+
+    return None
+
+
 
 def _x_error_with_details(exc, payload=None, http_status=None):
     """Preserve X codes/messages on ALL exception paths, without printing raw JSON."""

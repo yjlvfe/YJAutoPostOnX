@@ -15,7 +15,7 @@ import urllib.parse
 
 # -I excludes even the script directory; add ONLY this owned directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from direct_x_compat import _compat_user_data, classify_x_account_failure
+from direct_x_compat import _compat_user_data, classify_x_account_failure, classify_x_tweet_rejection
 
 KNOWN_ACCOUNT_FAILURES = {
     'banned', 'captcha', 'cookie_expired', 'auth_rejected',
@@ -1024,6 +1024,9 @@ class DirectSession:
                             if isinstance(tombstone, dict):
                                 x_err_msg = tombstone.get('text', {}).get('text')
                 result = uncertain(reason)
+                tweet_rejection = classify_x_tweet_rejection(raw_json=last_resp, text=str(x_err_msg or ''))
+                if tweet_rejection:
+                    result['rejectionReason'] = tweet_rejection
                 if x_resp_kind:
                     result['xResponseKind'] = x_resp_kind
                 if x_err_code is not None:
@@ -1137,7 +1140,36 @@ class DirectSession:
                     **upstream_error_details(exc),
                 }
 
+            tweet_rejection = classify_x_tweet_rejection(
+                raw_json=getattr(exc, 'raw_json', None),
+                errors=getattr(exc, 'errors', None),
+                text=str(exc),
+                http_status=x_http_status
+            )
+            if tweet_rejection in ('duplicate_content', 'length_exceeded', 'content_moderation'):
+                return {
+                    'status': 'rejected',
+                    'published': False,
+                    'posted': False,
+                    'ambiguous': False,
+                    'retryable': False,
+                    'rejectionReason': tweet_rejection,
+                    'reason': f"rejected_{tweet_rejection}",
+                    'xErrorCode': x_error_code,
+                    'xResponseKind': x_response_kind or 'graphql_errors',
+                    'httpStatus': x_http_status,
+                    'xErrorMessage': x_message[:512] if isinstance(x_message, str) else None,
+                    'verificationError': verification_error or (
+                        str(timeline_res.get('fetchError'))[:512]
+                        if isinstance(timeline_res, dict) and timeline_res.get('fetchError') else None
+                    ),
+                    'rawError': str(exc)[:2048],
+                    **upstream_error_details(exc),
+                }
+
             result = uncertain('publish_confirmation_missing')
+            if tweet_rejection:
+                result['rejectionReason'] = tweet_rejection
             if account_failure in KNOWN_ACCOUNT_FAILURES:
                 result['accountFailure'] = account_failure
             if x_error_code is not None:

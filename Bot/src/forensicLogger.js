@@ -9,6 +9,44 @@ const { logStructured, sanitizeError, sanitizeString, sanitizeValue, extractErro
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const BURNED_SUBNET_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+let PROD_DATA_CANONICAL = null;
+function getCanonicalProdDataDir() {
+  if (!PROD_DATA_CANONICAL) {
+    try {
+      const prodDir = path.resolve(__dirname, '../data');
+      if (fs.existsSync(prodDir)) {
+        PROD_DATA_CANONICAL = fs.realpathSync(prodDir);
+      } else {
+        PROD_DATA_CANONICAL = prodDir;
+      }
+    } catch {
+      PROD_DATA_CANONICAL = path.resolve(__dirname, '../data');
+    }
+  }
+  return PROD_DATA_CANONICAL;
+}
+
+function isTestEnvironment() {
+  return Boolean(
+    process.env.NODE_ENV === 'test' ||
+    process.env.NODE_TEST_CONTEXT ||
+    process.env.npm_lifecycle_event === 'test' ||
+    process.env.YJ_TEST_MODE === '1' ||
+    process.argv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test')))
+  );
+}
+
+function assertForensicMutationAllowed(dataDir) {
+  if (isTestEnvironment() && !process.env.ALLOW_PROD_DB_WRITE_IN_TEST) {
+    const prodData = getCanonicalProdDataDir();
+    if (dataDir && (dataDir === prodData || dataDir.startsWith(prodData + path.sep))) {
+      const err = new Error('PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating production forensic logs. Use an isolated temporary dataDir.');
+      err.code = 'PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST';
+      throw err;
+    }
+  }
+}
+
 function normalizeSubnet(ip) {
   if (!ip || typeof ip !== 'string') return null;
   const parts = ip.split('/')[0].trim().split('.');
@@ -18,6 +56,7 @@ function normalizeSubnet(ip) {
 class ForensicLogger {
   constructor({ store, dataDir, maxAgeMs = SEVEN_DAYS_MS, clock = Date.now } = {}) {
     this.store = store || null;
+    this.dataDir = dataDir ? path.resolve(dataDir) : null;
     this.maxAgeMs = maxAgeMs;
     this.clock = clock;
     this.logFile = dataDir ? path.join(dataDir, 'logs', 'forensic.jsonl') : null;
@@ -79,6 +118,7 @@ class ForensicLogger {
 
     // 2. Persist to JSONL file
     if (this.logFile) {
+      assertForensicMutationAllowed(this.dataDir);
       try {
         const line = JSON.stringify(record) + '\n';
         await fsp.appendFile(this.logFile, line, { mode: 0o600 });
@@ -100,6 +140,7 @@ class ForensicLogger {
   }
 
   async prune(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
+    assertForensicMutationAllowed(this.dataDir);
     const cutoff = now - this.maxAgeMs;
     let prunedCount = 0;
 
@@ -266,6 +307,7 @@ class ForensicLogger {
   }
 
   async reconcile(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
+    assertForensicMutationAllowed(this.dataDir);
     const cutoff = now - this.maxAgeMs;
     const storeLogs = [];
     if (this.store) {
@@ -395,4 +437,4 @@ class ForensicLogger {
   }
 }
 
-module.exports = { ForensicLogger, normalizeSubnet, SEVEN_DAYS_MS, BURNED_SUBNET_TTL_MS };
+module.exports = { ForensicLogger, normalizeSubnet, SEVEN_DAYS_MS, BURNED_SUBNET_TTL_MS, getCanonicalProdDataDir, assertForensicMutationAllowed };

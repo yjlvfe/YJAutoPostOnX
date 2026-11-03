@@ -933,3 +933,28 @@ Following previous test passes (369/369), production stability encountered post-
 - **Additional limitation:** `revert_false_recovery_m11.js --apply` appends audit entries even with zero reverted/enriched items; its SQLite then JSONL writes are not a single atomic transaction. Audit durability/idempotency still needs independent fault injection, captured under P6 and P3.
 - `53d0f458`: Snowflake timestamp `2026-11-01T19:50:59.577Z` matches the original `@crytpokingxvo8` dispatch window; X-post evidence is strong but queue reconciliation and historical CSV handling still require independent verification. **Do not requeue/post it again**.
 - Added `round10` evidence and next-action fields to **each of the 20 ADD tasks** in [JSON tracker](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.json), with matching matrix in [Markdown tracker](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.md). All 33 original findings, prior test statuses, and every Codex / owner-signoff gate remain unchanged and `PENDING` where applicable.
+
+### Round 11 / M12 — SQLite Isolation Safety Guards, Script Idempotency, 53d0f458 Settlement & Granular Rejection Classification (2026-11-03)
+
+- **Resolution of Test-Isolation Critical Finding (ADD-P6-01 / P3 / P6)**:
+  - Added fail-closed runtime guard `assertMutationAllowed` in `Bot/src/sqliteStore.js`: immediately throws `PROD_DB_MUTATION_FORBIDDEN_IN_TEST` if any test attempts `save()` or `update()` against the production database path.
+  - Added runtime guard `assertForensicMutationAllowed` in `Bot/src/forensicLogger.js`: immediately throws `PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST` if any test attempts `prune()` or `reconcile()` against the production forensic data directory.
+  - Fully refactored `Bot/test/m11_round10_forensic_integrity.test.js`, `Bot/test/m2_concurrency_challenge.test.js`, and `Bot/test/live_vps_m4_operational.test.js` to execute exclusively within isolated temporary workspaces (`os.tmpdir()`) with automatic cleanup in `after()`.
+  - Added dedicated test suite `Bot/test/m12_sqlite_production_safety_guard.test.js` (7/7 PASS) verifying production rejection, isolated mutations, concurrency retries, mid-write rollback, and proving production `state.sqlite` hash and size remain 100% untouched.
+- **Migration & Revert Script Hardening**:
+  - `Bot/scripts/revert_false_recovery_m11.js`: enforced zero audit log pollution when 0 items mutated (`revertedCount === 0 && enrichedCount === 0`).
+  - Added `archivedAttempt` preservation whenever an item is reverted or transitioned from processing.
+  - Re-verified permanent fatal exit guard on `Bot/scripts/apply_m11_ambiguous_recovery.js`.
+- **Item 53d0f458 Settlement Engineering**:
+  - Created atomic script `Bot/scripts/settle_item_53d0f458.js` supporting `--dry-run` and `--apply`.
+  - Proved clean settlement: sets `published`, attaches verified URL and Snowflake ISO (`2026-11-01T19:50:59.577Z`), preserves `archivedAttempt`, adjusts only historical Nov 1 quota (from 9 to 10), and guarantees today's Nov 3 quota is untouched.
+- **Granular X Rejection Classification (Direct X / Python Bridge / Runner)**:
+  - Added `classify_x_tweet_rejection` in `Bot/python/direct_x_compat.py`: granularly parses and classifies `duplicate_content` (code 187), `length_exceeded` (code 186), `content_moderation` (code 226), `account_locked`, `account_suspended`, `auth_rejected`, `rate_limit`, and `tweet_tombstone`.
+  - Updated `Bot/python/direct_x_bridge.py` and `Bot/src/runner.js` to emit `rejectionReason` and record precise diagnostic failure classifications rather than masking errors as generic `publish_confirmation_missing` or `create_tweet_returned_none`.
+  - Added unit test suite `Bot/python/test_tweet_rejection_classification.py` (11/11 PASS).
+- **30 Ambiguous Items Complete Forensic Ledger**:
+  - Generated `Bot/Reports/m12_ambiguous_30_forensic_ledger.json` containing complete forensic details (itemId, account, timestamp, dispatch fence, text SHA-256, raw error, X error code, forensic events count, candidate URL, author match, and disposition).
+- **Consolidated Test Verification**:
+  - Python tests: **203/203 PASS** (100%).
+  - Node.js tests: **391/391 PASS** across 130 test suites (100%).
+  - All 53 tracked items (33 baseline findings + 20 ADD tasks) preserved with Codex and owner approvals strictly **PENDING**.
