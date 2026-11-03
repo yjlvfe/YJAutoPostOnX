@@ -1832,6 +1832,9 @@ class TelegramUi {
 
       // Inspect the CURRENT persisted incident, not a stale account object passed by the runner.
       const latest = await this.bot?.store?.load?.();
+      // Another callback may have acquired the incident while this awaited SQLite.
+      // Recheck before claiming it; the check and add below have no await between them.
+      if (this.inFlightAlerts.has(incidentId)) return null;
       const live = latest?.accounts?.find(a => a.id === account.id);
       if (live && live.captchaIncidentId !== incidentId) return null;
       // Never use deliveries from incident A to suppress a new incident B.
