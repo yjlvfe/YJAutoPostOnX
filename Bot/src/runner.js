@@ -17,6 +17,7 @@ const { normalizeSubnet } = require('./forensicLogger');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const { isKnownTwikitParserFailure } = require('./knownTwikitParserFailure');
 const { recordUnsuccessfulAttempt } = require('./attemptOutcomes');
+const { classifyPublishOutcome } = require('./publishOutcome');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -864,15 +865,7 @@ async function run({
           const result = await attempt.wait(() => adapter.publish({ session, payload: adapter instanceof DirectXAdapter ? directPayload : item.payload, confirmPublish: true, signal: attempt.signal, onDispatch }));
           if (result.accountFailure) await ui.recordAccountCheck(accountId, { accountFailure: result.accountFailure }, { session: true, expectedAccount: account });
           if (result.published && !dispatchEntered) throw Object.assign(new Error('Missing dispatch fence'), { code: 'DISPATCH_FENCE_MISSING' });
-          const newState = result.published && result.url
-            ? 'published'
-            : (result.rateLimit || result.accountFailure === 'rate_limit')
-            ? 'pending'
-            : (result.published || result.ambiguous || dispatchEntered)
-            ? 'ambiguous'
-            : ['text_too_long', 'tweet_too_long'].includes(result.reason)
-            ? 'cancelled'
-            : 'pending';
+          const newState = classifyPublishOutcome(result, dispatchEntered);
           const publishedAt = new Date(clock()).toISOString();
           let transitioned = false;
           await bot.store.update(s => {
