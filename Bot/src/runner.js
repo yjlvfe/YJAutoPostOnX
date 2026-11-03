@@ -919,6 +919,9 @@ async function run({
             s.posting ||= {};
             s.posting.publishingAt = null;
             transitioned = true;
+            if (i.attempt) {
+              i.archivedAttempt = structuredClone(i.attempt);
+            }
             delete i.attempt;
             i.state = newState; i.reason = result.reason || null;
             if (newState !== 'published') {
@@ -927,6 +930,7 @@ async function run({
               i.failureDiagnostic = {
                 observedAt: publishedAt,
                 dispatchEntered: Boolean(dispatchEntered),
+                rejectionReason: result.rejectionReason || null,
                 xResponseKind: result.xResponseKind || null,
                 xErrorCode: result.xErrorCode ?? null,
                 xErrorMessage: (result.xErrorMessage || result.rawError || result.reason)
@@ -1073,10 +1077,14 @@ async function run({
           await bot.store.update(s => {
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+              if (i.attempt) {
+                i.archivedAttempt = structuredClone(i.attempt);
+              }
               i.state = dispatchEntered || i.attempt?.phase === 'dispatching' ? 'ambiguous' : 'pending';
               i.failureDiagnostic = {
                 observedAt: new Date(clock()).toISOString(),
                 dispatchEntered: Boolean(dispatchEntered || i.attempt?.phase === 'dispatching'),
+                rejectionReason: err.rejectionReason || null,
                 xResponseKind: err.xResponseKind || 'exception',
                 xErrorCode: err.xErrorCode ?? err.code ?? null,
                 xErrorMessage: err.message ? sanitizeError(err.message).slice(0, 512) : null,

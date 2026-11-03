@@ -28,6 +28,7 @@ const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
+const os = require('node:os');
 const { createDockerRuntime, slotPort, containerName, MAX_SLOTS, VpnSlotManager } = require('../src/dockerVpn');
 const { isPublicIp } = require('../src/publicIp');
 const { AccountManager, accountRecord } = require('../src/accounts');
@@ -37,8 +38,10 @@ const { createLinkExports, dayOf } = require('../src/linkExports');
 const { createTelegramApi } = require('../src/telegramApi');
 const { config } = require('../src/env');
 
-const DATA_DIR = path.join(ROOT, 'data');
-const STATE_SQLITE_PATH = path.join(DATA_DIR, 'state.sqlite');
+const PROD_DATA_DIR = path.join(ROOT, 'data');
+const PROD_STATE_SQLITE_PATH = path.join(PROD_DATA_DIR, 'state.sqlite');
+let DATA_DIR = PROD_DATA_DIR;
+let STATE_SQLITE_PATH = PROD_STATE_SQLITE_PATH;
 const KNOWN_HOST_SERVER_IP = '64.112.42.39';
 
 function curlCommand(args, timeoutMs = 15000) {
@@ -67,6 +70,22 @@ function curlCommand(args, timeoutMs = 15000) {
 
 describe('Milestone M4: VPS Live Operational Testing & Safe Validation', () => {
   const runtime = createDockerRuntime();
+  let testTempDir = null;
+
+  before(async () => {
+    testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'm4-vps-test-'));
+    DATA_DIR = testTempDir;
+    STATE_SQLITE_PATH = path.join(testTempDir, 'state.sqlite');
+    if (fs.existsSync(PROD_STATE_SQLITE_PATH)) {
+      fs.copyFileSync(PROD_STATE_SQLITE_PATH, STATE_SQLITE_PATH);
+    }
+  });
+
+  after(() => {
+    if (testTempDir && fs.existsSync(testTempDir)) {
+      fs.rmSync(testTempDir, { recursive: true, force: true });
+    }
+  });
 
   // =========================================================================
   // SUB-SUITE 1: Live VPN Infrastructure, Distinct Slots & IP Refresh

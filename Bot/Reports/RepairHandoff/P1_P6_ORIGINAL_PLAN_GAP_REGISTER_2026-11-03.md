@@ -8,7 +8,7 @@
 - GitHub's M1–M11 labels are test/production rounds, **not replacements** for P1–P6. GitHub MASTER_TODO has a different internal phase taxonomy; do not overwrite the source's P1–P6 taxonomy.
 - Implementation, test evidence, Codex signoff, and owner-production acceptance are separate fields. **All 33 original Codex approvals remain PENDING**, as do approval gates for these new tasks.
 - The figure **~30 ambiguous** is from the last owner screenshot, not a fresh live SQLite query. Never auto-requeue post-dispatch ambiguous items without authoritative evidence.
-- The main branch verified here: `20f3483011400a4d0cb5f7ee293144fa50fa9760` (PR #21 and PR #22 merged; GitHub CI success, full test suites PASS).
+- The main branch verified here: `3d33bc6ae0145bfc29c482c0fa2f71f90fe69fc0` (PR #21, PR #22, PR #23, and PR #24 merged; GitHub CI success, full test suites PASS).
 
 ## Additional work by ORIGINAL P phase
 

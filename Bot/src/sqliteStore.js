@@ -21,6 +21,43 @@ function secureFileMode(file, { missing = false } = {}) {
   if ((stat.mode & 0o777) !== 0o600) fs.chmodSync(file, 0o600);
 }
 
+let PROD_DB_CANONICAL = null;
+function getCanonicalProdDbPath() {
+  if (!PROD_DB_CANONICAL) {
+    try {
+      const prodDir = path.resolve(__dirname, '../data');
+      if (fs.existsSync(prodDir)) {
+        PROD_DB_CANONICAL = path.join(fs.realpathSync(prodDir), 'state.sqlite');
+      } else {
+        PROD_DB_CANONICAL = path.resolve(__dirname, '../data/state.sqlite');
+      }
+    } catch {
+      PROD_DB_CANONICAL = path.resolve(__dirname, '../data/state.sqlite');
+    }
+  }
+  return PROD_DB_CANONICAL;
+}
+
+function isTestEnvironment() {
+  return Boolean(
+    process.env.NODE_ENV === 'test' ||
+    process.env.NODE_TEST_CONTEXT ||
+    process.env.npm_lifecycle_event === 'test' ||
+    process.env.YJ_TEST_MODE === '1' ||
+    process.argv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test')))
+  );
+}
+
+function assertMutationAllowed(key) {
+  if (isTestEnvironment() && !process.env.ALLOW_PROD_DB_WRITE_IN_TEST) {
+    if (key === getCanonicalProdDbPath()) {
+      const err = new Error('PROD_DB_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating the production database (state.sqlite). Use an isolated temporary database in a temporary test directory.');
+      err.code = 'PROD_DB_MUTATION_FORBIDDEN_IN_TEST';
+      throw err;
+    }
+  }
+}
+
 // All connections in this process must wait asynchronously for one another:
 // a synchronous SQLite busy wait would otherwise block an awaited mutator.
 const queues = new Map();
@@ -159,6 +196,7 @@ class SqliteStore {
   }
 
   async save(next) {
+    assertMutationAllowed(this.key);
     const snapshot = structuredClone(next);
     return serialize(this.key, () => {
       this._open();
@@ -177,6 +215,7 @@ class SqliteStore {
   }
 
   async update(mutator) {
+    assertMutationAllowed(this.key);
     return serialize(this.key, async () => {
       this._open();
       let attempts = 0;
@@ -218,4 +257,4 @@ class SqliteStore {
   }
 }
 
-module.exports = { SqliteStore };
+module.exports = { SqliteStore, getCanonicalProdDbPath, isTestEnvironment, assertMutationAllowed };
