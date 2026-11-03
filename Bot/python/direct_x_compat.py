@@ -167,7 +167,8 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
         if isinstance(e, dict):
             if type(e.get('code')) is int:
                 codes.add(e['code'])
-            ext_code = e.get('extensions', {}).get('code')
+            ext = e.get('extensions')
+            ext_code = ext.get('code') if isinstance(ext, dict) else None
             if type(ext_code) is int:
                 codes.add(ext_code)
             if 'bounce_location' in e:
