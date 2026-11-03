@@ -181,7 +181,11 @@ class DirectXAdapter {
             accountFailure: result.accountFailure,
             rawError: result.rawError,
             xErrorCode: result.xErrorCode,
-            fetchError: result.fetchError
+            fetchError: result.fetchError,
+            xResponseKind: result.xResponseKind,
+            xErrorMessage: result.xErrorMessage,
+            httpStatus: result.httpStatus,
+            verificationError: result.verificationError
           };
         }
         return {
@@ -190,6 +194,10 @@ class DirectXAdapter {
           rawError: result.rawError,
           xErrorCode: result.xErrorCode,
           fetchError: result.fetchError,
+          xResponseKind: result.xResponseKind,
+          xErrorMessage: result.xErrorMessage,
+          httpStatus: result.httpStatus,
+          verificationError: result.verificationError,
           rateLimit: Boolean(result.rateLimit),
           retryAfterSeconds: result.retryAfterSeconds,
           readDiagnostic: readDiagnostic(result.readDiagnostic),
