@@ -783,6 +783,36 @@ Following previous test passes (369/369), production stability encountered post-
   - Deliverables: `LIVE_PRODUCTION_FULL_RUN.jsonl`, `ACCOUNT_ROTATION_MATRIX.md`, `LATENCY_AND_EVENT_LOOP_TELEMETRY.md`, `live_production_service_raw_logs.log`.
 - **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
 
+#### Milestone M10 Extension: PR #18 Review, Complete Journal Extraction, Ambiguous Root Cause & Strike Forensic Audit
+- **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
+- **Review & Merge of PR #18**:
+  - Reviewed PR #18 (`fix/m10-evidence-monitor-completion-20261103`) addressing the observer script early exit at 16 posts.
+  - Verified GitHub CI checks (5/5 PASS) and ran automated test suite including `m10_evidence_monitor_completion.test.js` (4/4 PASS).
+  - Merged PR #18 cleanly into `main` and closed PR #18 on GitHub.
+- **Journalctl Extraction & 21-Turn End-to-End Correlation (07:10–07:35 Riyadh)**:
+  - Extracted complete uninterrupted raw service logs from `yj-telegram-bot.service` for `2026-11-03 07:10:00` through `07:35:00` (1,108 lines, mode 0600).
+  - Correlated all 21 published items in SQLite against journal `post_result: published`, authentic X URLs, and item IDs: **21 / 21 exact matches (100% correlation)**.
+  - Verified terminal delivery receipts for both admin chats in SQLite and journalctl: Chat `528864559` (Msg 1598) and Chat `5535435580` (Msg 1599).
+- **Forensic Investigation of 3 Ambiguous Outcomes (`publish_confirmation_missing`)**:
+  - **Identified Items**:
+    1. Item `4d9df18c` (`@emiehg`) @ 07:17:16 (Duration: 6,791 ms, rawError: `direct_x_api_failure`).
+    2. Item `6bd6d6cf` (`@kaniabq`) @ 07:18:17 (Duration: 5,984 ms, rawError: `direct_x_api_failure`).
+    3. Item `5f375ded` (`@emiehg`) @ 07:26:39 (Duration: 6,924 ms, rawError: `direct_x_api_failure`).
+  - **Root Cause Lifecycle Analysis**:
+    1. *Request Dispatch*: Succeeded over SOCKS5 proxy to X GraphQL `CreateTweet`.
+    2. *Response Reading*: X responded with HTTP 200, but the JSON payload contained an `"errors"` array. In `Bot/python/direct_x_compat.py`, `_request` raised a blanket `TwitterException('direct_x_api_failure')`, which stripped away GraphQL error details (`error_code`, `error_message`, `raw_json`).
+    3. *Publish Confirmation*: The bridge caught the exception, and because dispatch crossed the fence, executed `verify_timeline`. The 6–7s duration was caused by the 2.0s propagation sleep followed by 2 pages of GraphQL timeline queries over SOCKS5 proxy.
+    4. *Live Verification on X*: A live query of `@emiehg` and `@kaniabq` timelines on X conclusively proved that **none of the 3 tweets were published on X**.
+  - **Account Strike Audit**:
+    - Forensic logs in `data/logs/forensic.jsonl` confirmed that **temporary strikes (failures: 1) WERE recorded** for each ambiguous event (`eventType: "account_failure_strike"`), correcting the previous inaccurate report claim. The strikes were reset back to 0 only when subsequent posts succeeded.
+- **Root Cause Remediation & Test Verification**:
+  - Patched `Bot/python/direct_x_compat.py` to preserve raw GraphQL error details, codes, messages, and `raw_json` in `TwitterException`.
+  - Patched `Bot/src/runner.js` to propagate `xErrorCode` and full error context into `handleAccountFailure` and `forensicLogger`.
+  - Added tests: `python/test_compat_api_failure_details.py` (2/2 PASS) and `test/x_error_code_preservation.test.js` (2/2 PASS).
+  - All 610 automated checks passed across all 4 tiers (100% pass rate in 104s).
+  - Restarted production service `yj-telegram-bot.service` (Main PID: `3294092`).
+- **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
+
 #### Milestone M8 (Round 7 - Post-Merge & Live Telegram Operator Verification)
 - **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
 - **Milestone Objectives**:

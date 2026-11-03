@@ -338,7 +338,18 @@ def compatibility_client():
             except ValueError:
                 raise TwitterException('direct_x_invalid_json') from None
             if isinstance(data, dict) and data.get('errors'):
-                raise TwitterException('direct_x_api_failure')
+                first_err = data['errors'][0] if isinstance(data['errors'], list) and data['errors'] else {}
+                err_code = first_err.get('code') or first_err.get('extensions', {}).get('code')
+                err_msg = first_err.get('message', 'direct_x_api_failure')
+                error = TwitterException(f'direct_x_api_failure: [{err_code}] {err_msg}' if err_code is not None else f'direct_x_api_failure: {err_msg}')
+                error.raw_json = data
+                error.errors = data['errors']
+                error.code = err_code
+                error.error_code = err_code
+                failure = classify_x_account_failure(raw_json=data, errors=data['errors'])
+                if failure:
+                    error.account_failure = failure
+                raise error
             return data, response
 
         async def get_user_by_id(self, user_id):

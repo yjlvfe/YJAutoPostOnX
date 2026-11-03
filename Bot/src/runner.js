@@ -526,7 +526,8 @@ async function run({
         failure,
         reason,
         retryAfterSeconds,
-        rawError
+        rawError,
+        xErrorCode
       }) => {
         const isPermanent = ['banned', 'captcha'].includes(failure);
         const isKnownParserError = isKnownTwikitParserFailure({ failure, rawError });
@@ -679,7 +680,8 @@ async function run({
           port: session?.port,
           exitIp: session?.exitIp,
           subnet: currentSubnet,
-          xErrorMessage: reason,
+          xErrorCode: xErrorCode ?? null,
+          xErrorMessage: rawError || reason,
           details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated, libraryParseFailure: isKnownParserError }
         }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
 
@@ -975,7 +977,8 @@ async function run({
               session,
               failure: 'ambiguous',
               reason: result.reason || 'publish_confirmation_missing',
-              rawError: result.rawError
+              rawError: result.rawError,
+              xErrorCode: result.xErrorCode
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
@@ -1064,7 +1067,8 @@ async function run({
               session,
               failure: 'ambiguous',
               reason: err.code || err.message || 'exception_after_dispatch',
-              rawError: err.message
+              rawError: err.message,
+              xErrorCode: err.code || err.xErrorCode
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
