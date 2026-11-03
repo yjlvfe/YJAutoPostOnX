@@ -153,7 +153,7 @@ class TelegramUi {
           sanitizedError: sanitizeError(error)
         });
       });
-    }, 3000);
+    }, 1000);
     this.ticker.unref?.();
   }
   actions() {
@@ -658,7 +658,7 @@ class TelegramUi {
         const countdownSec = Number.isFinite(next) ? Math.max(0, (next - now) / 1000) : 0;
         const elapsedSec = cycleRunning(s) && s.cycle?.startedAt ? Math.max(0, Math.floor((now - new Date(s.cycle.startedAt).getTime()) / 1000)) : 0;
         const inHoursStage = (countdownSec >= 3600) || (elapsedSec >= 3600);
-        const intervalMs = inHoursStage ? 60000 : 15000;
+        const intervalMs = inHoursStage ? 60000 : 5000;
         if (now - (this.panelLastEdit.get(lockKey) || 0) < intervalMs) return;
       }
       const t = current?.token || token(); const text = await this.render(s);
@@ -921,6 +921,26 @@ class TelegramUi {
     if (!started) return { started: false, reasons: ['الدورة جارية أو الزر قديم أو تغيرت البيانات'] };
     this.resetQueueStall();
     this.attach(snapshot);
+    // Report the REAL origin of the accepted run. "control" must not be
+    // misrepresented as a genuine Telegram button press.
+    const origin = source === 'manual' ? 'زر تيليجرام' : source === 'scheduled' ? 'الجدولة' : 'التحكم الداخلي';
+    const notification = Promise.resolve().then(() => {
+      if (!this.notify) return [];
+      return this.notify('🟢 تم استلام طلب تشغيل النشر وبدأت الدورة بالفعل.\nالمصدر: ' + origin + '\nرقم الدورة: ' + runId);
+    }).then(deliveries => {
+      const results = Array.isArray(deliveries) ? deliveries : [];
+      logStructured(this.bot?.logger, {
+        level: results.length && results.some(x => x.status === 'rejected') ? 'warn' : 'info',
+        component: 'telegram_ui',
+        event: 'cycle_start_notification_completed',
+        runId,
+        operation: 'begin.notify',
+        result: results.some(x => x.status === 'fulfilled') ? 'delivered' : 'unconfirmed',
+        details: { source, attempted: results.length,
+          delivered: results.filter(x => x.status === 'fulfilled').length }
+      });
+    }).catch(err => this._logError('cycle_start_notify_failed', 'begin', err, { runId, source }));
+    this.onPanelTask?.(notification);
     await this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_after_begin_failed', 'begin', err)); return { started: true, runId };
   }
   attach(snapshot) {
