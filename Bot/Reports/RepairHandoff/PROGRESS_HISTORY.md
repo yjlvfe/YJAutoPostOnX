@@ -954,7 +954,36 @@ Following previous test passes (369/369), production stability encountered post-
   - Added unit test suite `Bot/python/test_tweet_rejection_classification.py` (11/11 PASS).
 - **30 Ambiguous Items Complete Forensic Ledger**:
   - Generated `Bot/Reports/m12_ambiguous_30_forensic_ledger.json` containing complete forensic details (itemId, account, timestamp, dispatch fence, text SHA-256, raw error, X error code, forensic events count, candidate URL, author match, and disposition).
-- **Consolidated Test Verification**:
+- Consolidated Test Verification:
   - Python tests: **203/203 PASS** (100%).
   - Node.js tests: **391/391 PASS** across 130 test suites (100%).
   - All 53 tracked items (33 baseline findings + 20 ADD tasks) preserved with Codex and owner approvals strictly **PENDING**.
+
+### Round 12 / M13 — Three-Account Restriction Incident Response, 5-Session Cap Enforcement & Settle 53d0 Hardening (2026-11-03)
+
+- **Incident Response & Containment (Phase Zero)**:
+  - Addressed owner report of three accounts appearing restricted (`kaniabq`, `marcosvhv`, `menalobq`).
+  - Confirmed immediate zero-leak containment: publishing engine strictly STOPPED (`cycleState: "stopped"`), zero new POST requests submitted to X, zero automatic re-queuing, and zero duplicate attempts.
+  - Performed pure read-only forensic inspection: proved that all three accounts successfully completed their full 10-post daily quota in the morning batch (04:12Z - 04:32Z); afternoon check at 12:58Z returned `authenticated: false` due to cookie session expiration (`auth_session_unverified`) rather than suspension (codes 64 and 326 were false).
+  - Documented complete timeline and incident evidence in `Reports/M13_THREE_ACCOUNT_RESTRICTION_INCIDENT.md` and `Reports/M13_THREE_ACCOUNT_TIMELINE_REDACTED.json`.
+- **Project-Wide 5-Session Hard Ceiling (`src/sessionGuard.js`)**:
+  - Engineered atomic fail-closed concurrency guard enforcing at most 5 concurrent DirectX / Twikit / browser sessions project-wide (`MAX_PROJECT_SESSIONS = 5`).
+  - Integrated into `DirectXAdapter.prototype.open()` to fail closed on any 6th session attempt with `MAX_PROJECT_SESSIONS_EXCEEDED`.
+  - Added dedicated test suite `Bot/test/m13_session_guard_ceiling.test.js` (3/3 PASS).
+- **Hardened Settle 53d0 & Dual-Write Outbox (`Bot/scripts/settle_item_53d0f458.js`)**:
+  - Enforced strict Compare-and-Set (CAS): requires `item.state === 'ambiguous'` and verified text SHA-256 (`6175d09d7a46563c`), returning idempotent no-op if already settled.
+  - Prevented duplicate quota increments across crashes/re-runs via `item.settledQuotaCredited`.
+  - Enforced durable outbox (`state.pendingForensicOutbox`) for dual-write safety between SQLite and `forensic.jsonl`.
+  - Strictly blocked direct production `--apply` execution without independent owner approval (`BLOCKED_PENDING_OWNER_APPROVAL`).
+- **SQLite Directory & Mutation Isolation (`src/sqliteStore.js`, `src/forensicLogger.js`)**:
+  - Eliminated bypass flags and ensured directory attribute permissions are never touched on production paths during test runs.
+  - Verified 10/10 PASS on `Bot/test/m12_sqlite_production_safety_guard.test.js`.
+- **Content Rejection Taxonomy Separation (`src/xFailureClassification.js`, `src/runner.js`)**:
+  - Disentangled X content rejections (187, 186, tombstone) from account failure strikes; ensured posts remain quarantined in `ambiguous` after dispatchEntered without striking account health.
+- **30 Ambiguous Items Full SHA-256 Ledger**:
+  - Generated full 64-character SHA-256 hashes (`textSha256Full`) alongside 16-character prefixes in `Reports/m12_ambiguous_30_forensic_ledger.json` and `Reports/M13_AMBIGUOUS_30_STATUS.json`.
+  - Maintained 100% quarantine retention (30/30) with `requeueApproved: false`.
+- **Full Test Suite Status**:
+  - Python tests: **203/203 PASS** (100%).
+  - Node.js tests: **397/397 PASS** across 131 test suites (100%).
+  - Production database SHA-256, size, and quota remain 100% untouched. All 53 items in P1–P6 preserved with Codex and owner approvals strictly **PENDING**.

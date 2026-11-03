@@ -182,11 +182,25 @@ async function runReversion({ dbPath, logFilePath, isApply } = {}) {
     const newEvents = [revertEvent, enrichEvent].filter(Boolean);
     if (newEvents.length > 0) {
       try {
+        const dir = path.dirname(targetLog);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
         const lines = newEvents.map(e => JSON.stringify(e)).join('\n') + '\n';
         await fsp.appendFile(targetLog, lines, { mode: 0o600 });
         console.log(`Persisted ${newEvents.length} audit event(s) to ${targetLog}`);
       } catch (err) {
         console.error(`Warning: Failed to append to ${targetLog}:`, err.message);
+        try {
+          const recoveryStore = new SqliteStore(targetDb);
+          await recoveryStore.update(s => {
+            s.pendingForensicOutbox ||= [];
+            s.pendingForensicOutbox.push(...newEvents);
+            return s;
+          });
+          await recoveryStore.close();
+          console.log('Saved audit events to pendingForensicOutbox in SQLite');
+        } catch (innerErr) {
+          console.error('Critical: Failed to store pending forensic outbox:', innerErr.message);
+        }
       }
     }
 

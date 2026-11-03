@@ -37,9 +37,16 @@ function isTestEnvironment() {
 }
 
 function assertForensicMutationAllowed(dataDir) {
-  if (isTestEnvironment() && !process.env.ALLOW_PROD_DB_WRITE_IN_TEST) {
+  if (isTestEnvironment()) {
     const prodData = getCanonicalProdDataDir();
-    if (dataDir && (dataDir === prodData || dataDir.startsWith(prodData + path.sep))) {
+    let resolved = null;
+    try {
+      resolved = dataDir ? path.resolve(dataDir) : null;
+      if (resolved && fs.existsSync(resolved)) {
+        resolved = fs.realpathSync(resolved);
+      }
+    } catch {}
+    if (resolved && (resolved === prodData || resolved.startsWith(prodData + path.sep))) {
       const err = new Error('PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating production forensic logs. Use an isolated temporary dataDir.');
       err.code = 'PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST';
       throw err;

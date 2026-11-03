@@ -28,3 +28,4 @@ state.sqlite
 Bot/state.sqlite
 Bot/data/
 Bot/.venv-direct-x/
+*.zip

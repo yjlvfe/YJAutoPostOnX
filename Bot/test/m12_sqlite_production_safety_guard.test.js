@@ -238,7 +238,7 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
       assert.strictEqual(stateApplied.posting.quota['2026-11-03'][SETTLEMENT_TARGET.accountId], 10, 'Nov 3 quota must NOT be double-counted (remains 10)');
 
       // Verify audit log
-      const auditEvt = (stateApplied.forensicLogs || []).find(e => e.eventType === 'm12_settle_53d0f458_snowflake_published');
+      const auditEvt = (stateApplied.forensicLogs || []).find(e => e.eventType === 'm13_settle_53d0f458_snowflake_published' || e.eventType === 'm12_settle_53d0f458_snowflake_published');
       assert.ok(auditEvt, 'Settlement audit event must exist in forensicLogs');
       assert.ok(auditEvt.id, 'Audit event must have unique id');
       assert.ok(auditEvt.epoch, 'Audit event must have numeric epoch');
@@ -246,9 +246,83 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
       // Verify log file
       assert.ok(fs.existsSync(logPath), 'Log file must be created');
       const logContent = fs.readFileSync(logPath, 'utf8');
-      assert.ok(logContent.includes('m12_settle_53d0f458_snowflake_published'));
+      assert.ok(logContent.includes('settle_53d0f458_snowflake_published'));
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('8. settle_item_53d0f458 enforces Compare-and-Set and prevents duplicate quota increment', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'm13-cas-test-'));
+    try {
+      const dbPath = path.join(tempDir, 'state.sqlite');
+      const logPath = path.join(tempDir, 'forensic.jsonl');
+      const { settleItem53d0, SETTLEMENT_TARGET } = require('../scripts/settle_item_53d0f458');
+
+      // Initial state: Item is in 'processing' (not ambiguous) -> CAS should reject
+      const store = new SqliteStore(dbPath, {
+        items: [{
+          id: SETTLEMENT_TARGET.id,
+          state: 'processing',
+          payload: { text: SETTLEMENT_TARGET.fullText }
+        }],
+        posting: { quota: { '2026-11-01': { [SETTLEMENT_TARGET.accountId]: 5 } } }
+      });
+      await store.load();
+      await store.close();
+
+      await assert.rejects(
+        () => settleItem53d0({ dbPath, logFilePath: logPath, isApply: true }),
+        /INVALID_ITEM_STATE/
+      );
+
+      // Now set to ambiguous with valid text prefix
+      const store2 = new SqliteStore(dbPath);
+      await store2.update(s => {
+        s.items[0].state = 'ambiguous';
+        return s;
+      });
+      await store2.close();
+
+      // First apply should succeed
+      const res1 = await settleItem53d0({ dbPath, logFilePath: logPath, isApply: true });
+      assert.strictEqual(res1.settled, true);
+
+      // Verify quota is 6
+      const store3 = new SqliteStore(dbPath);
+      const state3 = await store3.load();
+      assert.strictEqual(state3.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 6);
+      await store3.close();
+
+      // Re-running apply on already published item should be an idempotent no-op without re-incrementing quota
+      const res2 = await settleItem53d0({ dbPath, logFilePath: logPath, isApply: true });
+      assert.strictEqual(res2.settled, false, 'Second run must be idempotent no-op');
+
+      const store4 = new SqliteStore(dbPath);
+      const state4 = await store4.load();
+      assert.strictEqual(state4.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 6, 'Quota must remain 6 (no double increment)');
+      await store4.close();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('9. settle_item_53d0f458 blocks execution on production db unless explicitly approved', async () => {
+    const { settleItem53d0 } = require('../scripts/settle_item_53d0f458');
+    const res = await settleItem53d0({ isApply: true });
+    assert.strictEqual(res.settled, false);
+    assert.strictEqual(res.status, 'BLOCKED_PENDING_OWNER_APPROVAL');
+  });
+
+  it('10. isXContentRejection classifies 187, 186 and explicit rejection reasons without account strikes', () => {
+    const { isXContentRejection } = require('../src/xFailureClassification');
+    assert.strictEqual(isXContentRejection({ failure: 'ambiguous', xResponseKind: 'graphql_errors', xErrorCode: 187 }), true);
+    assert.strictEqual(isXContentRejection({ failure: 'ambiguous', xResponseKind: 'graphql_errors', xErrorCode: 186 }), true);
+    assert.strictEqual(isXContentRejection({ failure: 'ambiguous', xResponseKind: 'graphql_errors', xErrorCode: 226 }), false);
+    assert.strictEqual(isXContentRejection({ rejectionReason: 'duplicate_content' }), true);
+    assert.strictEqual(isXContentRejection({ rejectionReason: 'length_exceeded' }), true);
+    assert.strictEqual(isXContentRejection({ rejectionReason: 'tweet_tombstone' }), true);
+    assert.strictEqual(isXContentRejection({ failure: 'banned', xResponseKind: 'graphql_errors', xErrorCode: 187 }), false);
+    assert.strictEqual(isXContentRejection({ failure: 'ambiguous', xResponseKind: 'graphql_errors', xErrorCode: 326 }), false);
   });
 });
