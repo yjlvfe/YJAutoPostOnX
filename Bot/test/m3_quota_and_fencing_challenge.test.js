@@ -659,7 +659,7 @@ describe('M3 Empirical Challenge: Quota Deduction, Ambiguity Quarantine & Token 
       // Audit today's quota (2026-11-01)
       const today = riyadhDay();
       const quotaToday = state.posting?.quota?.[today] || {};
-      const publishedToday = (state.items || []).filter(i => i.state === 'published' && i.publishedAt && i.publishedAt.startsWith(today));
+      const publishedToday = (state.items || []).filter(i => i.state === 'published' && i.publishedAt && riyadhDay(i.publishedAt) === today);
 
       const countByAccount = {};
       for (const item of publishedToday) {
