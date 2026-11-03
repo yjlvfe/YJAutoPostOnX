@@ -1,7 +1,8 @@
 'use strict';
 const path = require('node:path');
 const fs = require('node:fs');
-const { DatabaseSync } = require('node:sqlite');
+const fsp = require('node:fs/promises');
+const { randomUUID } = require('node:crypto');
 const { SqliteStore } = require('../src/sqliteStore');
 
 const REVERT_ITEMS = [
@@ -32,8 +33,8 @@ const REVERT_ITEMS = [
   {
     id: '53d0f458-3144-4e89-a1af-202a8893afc6',
     reason: 'unresolved_in_finally',
-    accountId: undefined,
-    accountUsername: undefined,
+    accountId: 'x-930e0054b395228aefa9',
+    accountUsername: 'crytpokingxvo8',
     claimedAt: '2026-11-01T19:50:53.963Z',
     attempt: {
       phase: 'dispatching',
@@ -46,78 +47,168 @@ const REVERT_ITEMS = [
   }
 ];
 
-async function main() {
-  const dbPath = path.resolve(__dirname, '../data/state.sqlite');
-  console.log('Reverting false recoveries in SqliteStore at:', dbPath);
-  const store = new SqliteStore(dbPath);
+const ENRICH_13_ITEMS = [
+  { itemId: '47da5e8a-9c24-45ed-ae64-4d3c163a8b9a', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: '8b9481aa-4723-4b0b-bfc4-b7fdff6730e3', accountId: 'x-930e0054b395228aefa9', accountUsername: 'crytpokingxvo8' },
+  { itemId: '10afc79e-7634-4149-acd1-90277ff53b1e', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: '3719dfde-c7b6-446f-a8ba-211f48b92ec2', accountId: 'x-2aa7928dd26217e0939c', accountUsername: 'okasanbq' },
+  { itemId: 'c1eecbd3-704d-43ba-8306-93a1a15b4350', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: 'a589288f-19af-4cbb-bc24-90a07940c394', accountId: 'x-2aa7928dd26217e0939c', accountUsername: 'okasanbq' },
+  { itemId: '5ffd64c2-713c-4768-976d-d8d0b0a1673e', accountId: 'x-930e0054b395228aefa9', accountUsername: 'crytpokingxvo8' },
+  { itemId: '5e5f91ab-2841-4848-a035-4c1c8a8df197', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: '53d0f458-3144-4e89-a1af-202a8893afc6', accountId: 'x-930e0054b395228aefa9', accountUsername: 'crytpokingxvo8' },
+  { itemId: '34ed9685-4513-4ff8-afb6-f98e45204f9d', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: 'f75e4f8d-c5ed-44b0-8aa9-77af63be85dc', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: 'bd12d092-4480-4b9f-a41d-0324ec77b317', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' },
+  { itemId: 'fa1f2749-8496-4d20-b6e4-d6fad4a5de0b', accountId: 'x-ab22678a0fc05660b440', accountUsername: 'emiehg' }
+];
 
+async function main() {
+  const isApply = process.argv.includes('--apply');
+  const dbPath = path.resolve(__dirname, '../data/state.sqlite');
+  const logFilePath = path.resolve(__dirname, '../data/logs/forensic.jsonl');
+
+  console.log(`=== REVERT & FORENSIC AUDIT SCRIPT (Mode: ${isApply ? 'APPLY' : 'DRY-RUN'}) ===`);
+  console.log('Target database:', dbPath);
+
+  if (!isApply) {
+    console.log('NOTICE: Running in DRY-RUN mode. Pass --apply to execute changes atomically.');
+  }
+
+  const store = new SqliteStore(dbPath);
   let revertedCount = 0;
+  let alreadyQuarantinedCount = 0;
+  let enrichedCount = 0;
   let remainingAmbiguous = 0;
   let totalPublished = 0;
 
-  await store.update(state => {
-    state.items ||= [];
-    state.forensicLogs ||= [];
+  const nowEpoch = Date.now();
+  const nowIso = new Date(nowEpoch).toISOString();
 
-    const byId = new Map(REVERT_ITEMS.map(r => [r.id, r]));
+  let revertEvent = null;
+  let enrichEvent = null;
 
-    for (const item of state.items) {
-      if (byId.has(item.id)) {
-        const rev = byId.get(item.id);
-        console.log(`Reverting item ${item.id} -> ambiguous (${rev.revertReason})`);
-        item.state = 'ambiguous';
-        item.reason = rev.reason;
-        item.claimedAt = rev.claimedAt;
-        if (rev.accountId) item.accountId = rev.accountId; else delete item.accountId;
-        if (rev.accountUsername) item.accountUsername = rev.accountUsername; else delete item.accountUsername;
-        if (rev.attempt) item.attempt = rev.attempt; else delete item.attempt;
-        delete item.url;
-        delete item.tweetId;
-        delete item.publishedAt;
-        delete item.recoveredFromTimeline;
-        delete item.failureDiagnostic;
-        revertedCount++;
+  if (isApply) {
+    await store.update(state => {
+      state.items ||= [];
+      state.forensicLogs ||= [];
+
+      const byId = new Map(REVERT_ITEMS.map(r => [r.id, r]));
+      const enrichById = new Map(ENRICH_13_ITEMS.map(e => [e.itemId, e]));
+
+      for (const item of state.items) {
+        if (byId.has(item.id)) {
+          const rev = byId.get(item.id);
+          if (item.state === 'ambiguous' && !item.url && !item.tweetId && !item.publishedAt) {
+            alreadyQuarantinedCount++;
+          } else {
+            console.log(`Reverting item ${item.id} -> ambiguous (${rev.revertReason})`);
+            item.state = 'ambiguous';
+            item.reason = rev.reason;
+            item.claimedAt = rev.claimedAt;
+            if (rev.accountId) item.accountId = rev.accountId;
+            if (rev.accountUsername) item.accountUsername = rev.accountUsername;
+            if (rev.attempt) item.attempt = rev.attempt;
+            delete item.url;
+            delete item.tweetId;
+            delete item.publishedAt;
+            delete item.recoveredFromTimeline;
+            delete item.failureDiagnostic;
+            revertedCount++;
+          }
+        }
+
+        // Enrich 13 items with authentic provenance from forensic.jsonl
+        if (enrichById.has(item.id) && item.state === 'ambiguous') {
+          const enrich = enrichById.get(item.id);
+          if (!item.accountId || !item.accountUsername) {
+            item.accountId = enrich.accountId;
+            item.accountUsername = enrich.accountUsername;
+            enrichedCount++;
+          }
+        }
       }
-    }
 
-    remainingAmbiguous = state.items.filter(i => i.state === 'ambiguous').length;
-    totalPublished = state.items.filter(i => i.state === 'published').length;
+      remainingAmbiguous = state.items.filter(i => i.state === 'ambiguous').length;
+      totalPublished = state.items.filter(i => i.state === 'published').length;
 
-    state.forensicLogs.push({
-      timestamp: new Date().toISOString(),
-      eventType: 'm11_revert_false_recovery',
-      details: {
-        revertedCount,
-        remainingAmbiguous,
-        totalPublished,
-        items: REVERT_ITEMS.map(r => ({ itemId: r.id, revertReason: r.revertReason }))
-      }
+      // 1. Revert event with mandatory id and epoch
+      revertEvent = {
+        id: randomUUID(),
+        timestamp: nowIso,
+        epoch: nowEpoch,
+        eventType: 'm11_revert_false_recovery',
+        details: {
+          revertedCount,
+          alreadyQuarantinedCount,
+          remainingAmbiguous,
+          totalPublished,
+          items: REVERT_ITEMS.map(r => ({ itemId: r.id, revertReason: r.revertReason }))
+        }
+      };
+      state.forensicLogs.push(revertEvent);
+
+      // 2. Enrich event with mandatory id and epoch
+      enrichEvent = {
+        id: randomUUID(),
+        timestamp: nowIso,
+        epoch: nowEpoch,
+        eventType: 'm11_audit_13_ambiguous_accounts',
+        details: {
+          enrichedCount,
+          remainingAmbiguous,
+          items: ENRICH_13_ITEMS
+        }
+      };
+      state.forensicLogs.push(enrichEvent);
+
+      return state;
     });
 
-    return state;
-  });
+    store.close();
 
-  store.close();
-  console.log(`Reversion completed: ${revertedCount} items returned to ambiguous quarantine.`);
-  console.log(`Remaining ambiguous: ${remainingAmbiguous} (expected 30).`);
-  console.log(`Total published: ${totalPublished} (expected 155).`);
+    // Append both events to forensic.jsonl with 0o600
+    try {
+      const lines = [JSON.stringify(revertEvent), JSON.stringify(enrichEvent)].join('\n') + '\n';
+      await fsp.appendFile(logFilePath, lines, { mode: 0o600 });
+      console.log(`Persisted audit events to ${logFilePath}`);
+    } catch (err) {
+      console.error(`Warning: Failed to append to ${logFilePath}:`, err.message);
+    }
 
-  // Clean links_2026-11-01.csv
-  const csvPath = path.resolve(__dirname, '../data/exports/links_2026-11-01.csv');
-  if (fs.existsSync(csvPath)) {
-    const lines = fs.readFileSync(csvPath, 'utf8').trim().split('\n');
-    // Remove the row for 53d0f458 if present
-    const filtered = lines.filter(line => !line.includes('2116981347772498219'));
-    fs.writeFileSync(csvPath, filtered.join('\n') + '\n', 'utf8');
-    console.log(`Cleaned ${csvPath}: ${lines.length} -> ${filtered.length} lines.`);
+    console.log(`\nReversion summary: ${revertedCount} reverted, ${alreadyQuarantinedCount} already in quarantine.`);
+    console.log(`Enrichment summary: ${enrichedCount} ambiguous items enriched with authentic accountId/username.`);
+    console.log(`Final Counts: ambiguous=${remainingAmbiguous} (expected 30), published=${totalPublished} (expected 155).`);
+  } else {
+    // Dry run inspection
+    const state = await store.load();
+    const byId = new Map(REVERT_ITEMS.map(r => [r.id, r]));
+    const enrichById = new Map(ENRICH_13_ITEMS.map(e => [e.itemId, e]));
+
+    for (const item of (state.items || [])) {
+      if (byId.has(item.id)) {
+        if (item.state === 'ambiguous' && !item.url) alreadyQuarantinedCount++;
+        else revertedCount++;
+      }
+      if (enrichById.has(item.id) && item.state === 'ambiguous') {
+        if (!item.accountId || !item.accountUsername) enrichedCount++;
+      }
+    }
+    remainingAmbiguous = (state.items || []).filter(i => i.state === 'ambiguous').length;
+    totalPublished = (state.items || []).filter(i => i.state === 'published').length;
+    store.close();
+
+    console.log(`\n[DRY RUN] Would revert: ${revertedCount}, already quarantined: ${alreadyQuarantinedCount}.`);
+    console.log(`[DRY RUN] Would enrich: ${enrichedCount} ambiguous items.`);
+    console.log(`[DRY RUN] Current counts: ambiguous=${remainingAmbiguous}, published=${totalPublished}.`);
   }
 }
 
 if (require.main === module) {
   main().catch(err => {
-    console.error('Reversion failed:', err);
+    console.error('Operation failed:', err);
     process.exit(1);
   });
 }
 
-module.exports = { main, REVERT_ITEMS };
+module.exports = { main, REVERT_ITEMS, ENRICH_13_ITEMS };

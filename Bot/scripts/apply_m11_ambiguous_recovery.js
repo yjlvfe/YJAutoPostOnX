@@ -1,4 +1,13 @@
 'use strict';
+// FATAL SAFETY GUARD: This migration is permanently disabled.
+// The recovery attempted here was audited in M11 Round 9 and proven to contain false recoveries
+// due to author and historical date mismatches. All items were reverted via revert_false_recovery_m11.js.
+if (require.main === module) {
+  console.error('CRITICAL: apply_m11_ambiguous_recovery.js is PERMANENTLY DISABLED to protect production state.');
+  console.error('Historical items were audited in M11 and returned to ambiguous quarantine.');
+  process.exit(1);
+}
+
 const path = require('node:path');
 const fs = require('node:fs');
 const { SqliteStore } = require('../src/sqliteStore');
