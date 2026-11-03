@@ -1062,6 +1062,15 @@ async function run({
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
               i.state = dispatchEntered || i.attempt?.phase === 'dispatching' ? 'ambiguous' : 'pending';
+              i.failureDiagnostic = {
+                observedAt: new Date(clock()).toISOString(),
+                dispatchEntered: Boolean(dispatchEntered || i.attempt?.phase === 'dispatching'),
+                xResponseKind: err.xResponseKind || 'exception',
+                xErrorCode: err.xErrorCode ?? err.code ?? null,
+                xErrorMessage: err.message ? sanitizeError(err.message).slice(0, 512) : null,
+                httpStatus: Number.isInteger(err.httpStatus) ? err.httpStatus : null,
+                verificationError: err.verificationError ? sanitizeError(err.verificationError).slice(0, 512) : null
+              };
               recordUnsuccessfulAttempt(s, { accountId, outcome: i.state === 'ambiguous' ? 'ambiguous' : 'failed', at: clock() });
               if (i.state === 'ambiguous') {
                 i.accountId = accountId;
