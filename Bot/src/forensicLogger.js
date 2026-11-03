@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { withForensicMutex } = require('./forensicMutex');
 const { logStructured, sanitizeError, sanitizeString, sanitizeValue, extractErrorCode } = require('./structuredLogger');
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -132,7 +133,7 @@ class ForensicLogger {
       assertForensicMutationAllowed(this.dataDir);
       try {
         const line = JSON.stringify(record) + '\n';
-        await fsp.appendFile(this.logFile, line, { mode: 0o600 });
+        await this._withLogLock(() => fsp.appendFile(this.logFile, line, { mode: 0o600 }));
       } catch (err) {
         logStructured(null, {
           level: 'error',
@@ -179,9 +180,10 @@ class ForensicLogger {
       }
     }
 
-    // Prune JSONL file
+    // Prune JSONL file under the same interprocess mutex as append/reconcile.
     if (this.logFile) {
       try {
+        await this._withLogLock(async () => {
         const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
           if (err.code !== 'ENOENT') {
             logStructured(null, {
@@ -223,6 +225,7 @@ class ForensicLogger {
           }
           await fsp.writeFile(this.logFile, retained.length ? retained.join('\n') + '\n' : '', { mode: 0o600 });
         }
+        });
       } catch (err) {
         logStructured(null, {
           level: 'error',
@@ -318,87 +321,9 @@ class ForensicLogger {
   }
 
   async _withLogLock(fn) {
-    if (!this.logFile) return fn();
-    const lockFile = `${this.logFile}.lock`;
-    const dir = path.dirname(lockFile);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const now = Date.now();
-    const timeout = 10000;
-    const ownerToken = `${process.pid}_${crypto.randomUUID()}`;
-    let acquired = false;
-    let lockHandle = null;
-    while (Date.now() - now < timeout) {
-      try {
-        lockHandle = await fsp.open(lockFile, 'wx', 0o600);
-        // Write ownership token and PID to establish proven ownership
-        const payload = JSON.stringify({ pid: process.pid, token: ownerToken, acquiredAt: Date.now() });
-        await lockHandle.write(payload);
-        await lockHandle.sync();
-        acquired = true;
-        break;
-      } catch (err) {
-        if (err.code === 'EEXIST') {
-          try {
-            const data = await fsp.readFile(lockFile, 'utf8');
-            const lockInfo = JSON.parse(data);
-            if (lockInfo && typeof lockInfo.pid === 'number') {
-              let isAlive = false;
-              try {
-                process.kill(lockInfo.pid, 0);
-                isAlive = true;
-              } catch (killErr) {
-                if (killErr.code === 'ESRCH') isAlive = false;
-                else if (killErr.code === 'EPERM') isAlive = true;
-              }
-              if (!isAlive) {
-                // Holder is confirmed dead (ESRCH)!
-                // Safely reclaim orphaned lock without stale-unlink races:
-                // Use atomic rename to claim the specific orphan file.
-                // If two contenders attempt this concurrently, only ONE can succeed.
-                // Contender B will fail with ENOENT and will NOT delete a new holder's lock!
-                const reclaimFile = `${lockFile}.reclaim.${process.pid}.${crypto.randomUUID()}`;
-                try {
-                  await fsp.rename(lockFile, reclaimFile);
-                  const reclaimedRaw = await fsp.readFile(reclaimFile, 'utf8').catch(() => null);
-                  const reclaimedInfo = reclaimedRaw ? JSON.parse(reclaimedRaw) : null;
-                  if (reclaimedInfo && reclaimedInfo.token === lockInfo.token) {
-                    await fsp.unlink(reclaimFile).catch(() => {});
-                  } else {
-                    // Token changed before rename; file was replaced by a new holder!
-                    // Restore it immediately!
-                    await fsp.rename(reclaimFile, lockFile).catch(() => {});
-                  }
-                } catch {
-                  // Rename failed (e.g. ENOENT): another contender already reclaimed or acquired it.
-                }
-              }
-              // If holder is alive, NEVER revoke or unlink, even if elapsed time > 30s!
-            }
-          } catch {}
-          await new Promise(r => setTimeout(r, 20 + Math.floor(Math.random() * 30)));
-          continue;
-        }
-        throw err;
-      }
-    }
-    if (!acquired) {
-      throw Object.assign(new Error('FORENSIC_LOG_LOCK_TIMEOUT: Could not acquire lock for forensic log; active holder running or unverified.'), { code: 'FORENSIC_LOG_LOCK_TIMEOUT' });
-    }
-    try {
-      return await fn();
-    } finally {
-      if (lockHandle) {
-        try { await lockHandle.close(); } catch {}
-      }
-      try {
-        // Only unlink if the lock file still belongs to our exact ownership token!
-        const currentData = await fsp.readFile(lockFile, 'utf8');
-        const parsed = JSON.parse(currentData);
-        if (parsed && parsed.token === ownerToken) {
-          await fsp.unlink(lockFile);
-        }
-      } catch {}
-    }
+    // One shared, SQLite-backed mutex across processes and crash restarts.
+    // No time-based lock theft, pathname races, or unsafe stale-file renames.
+    return withForensicMutex(this.logFile, fn);
   }
 
   async reconcile(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
