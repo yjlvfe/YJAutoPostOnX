@@ -1600,6 +1600,11 @@ class TelegramUi {
           delete a.captchaIncidentId;
           delete a.captchaCode;
           delete a.captchaReason;
+          // Per-chat receipts are scoped to ONE security incident and must not
+          // suppress a later CAPTCHA on the same X account.
+          delete a.captchaDeliveredChats;
+          delete a.captchaDeliveredIncidentId;
+          delete a.lastNotifiedCaptchaIncidentId;
           a.checkGeneration = crypto.randomUUID();
           return s;
         });
@@ -1805,7 +1810,14 @@ class TelegramUi {
         return null;
       }
 
-      if (account.captchaIncidentId === incidentId && Array.isArray(account.captchaDeliveredChats)) {
+      // Inspect the CURRENT persisted incident, not a stale account object passed by the runner.
+      const latest = await this.bot?.store?.load?.();
+      const live = latest?.accounts?.find(a => a.id === account.id);
+      if (live && live.captchaIncidentId !== incidentId) return null;
+      // Never use deliveries from incident A to suppress a new incident B.
+      if (live?.captchaDeliveredIncidentId === incidentId && Array.isArray(live.captchaDeliveredChats)) {
+        prevDelivered = new Set(live.captchaDeliveredChats.map(String));
+      } else if (!live && account.captchaDeliveredIncidentId === incidentId && Array.isArray(account.captchaDeliveredChats)) {
         prevDelivered = new Set(account.captchaDeliveredChats.map(String));
       }
       if (configuredChats.length > 0) {
@@ -1878,10 +1890,14 @@ class TelegramUi {
         try {
           await this.bot.store.update(s => {
             const a = (s.accounts || []).find(acc => acc.id === account.id);
-            if (a) {
-              a.captchaDeliveredChats = newDelivered;
+            // A newer security incident may have arrived while Telegram was responding.
+            if (a && a.captchaIncidentId === incidentId) {
+              const previous = a.captchaDeliveredIncidentId === incidentId && Array.isArray(a.captchaDeliveredChats)
+                ? a.captchaDeliveredChats.map(String) : [];
+              a.captchaDeliveredIncidentId = incidentId;
+              a.captchaDeliveredChats = Array.from(new Set([...previous, ...confirmedChatIds]));
               a.lastCaptchaAlertAt = Date.now();
-              if (allComplete) {
+              if (configuredChats.length > 0 && configuredChats.every(c => a.captchaDeliveredChats.includes(c))) {
                 a.lastNotifiedCaptchaIncidentId = incidentId;
               }
             }
@@ -1890,7 +1906,10 @@ class TelegramUi {
         } catch {}
       }
 
-      if (allComplete) {
+      // Check persisted state before caching completion: do not silence incident B.
+      const after = await this.bot?.store?.load?.();
+      const current = after?.accounts?.find(a => a.id === account.id);
+      if (current?.captchaIncidentId === incidentId && current.lastNotifiedCaptchaIncidentId === incidentId) {
         this.notifiedCaptchaIncidents.add(incidentId);
       }
     }
