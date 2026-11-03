@@ -38,7 +38,14 @@
       "tests": "PASS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "دليل حالة كل عنصر + استعادة ذرية فقط عند إثبات عدم النشر"
+      "acceptance": "دليل حالة كل عنصر + استعادة ذرية فقط عند إثبات عدم النشر",
+      "round10": {
+        "status": "PARTIAL__AUDIT_COMPLETE_RESOLUTION_OPEN",
+        "evidence": "Round10 inventory 30/30 ambiguous with 0 auto-requeues; 13 missing account associations populated; item 53d0 has strong publish-time evidence.",
+        "remaining": "Resolve each item independently; do not mark recovery done while 30 remain quarantined; identify 53d0 disposition safely.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P1",
@@ -48,7 +55,14 @@
       "tests": "PASS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "إثبات سياسة إعادة/حجر آمنة دون POST مكرر"
+      "acceptance": "إثبات سياسة إعادة/حجر آمنة دون POST مكرر",
+      "round10": {
+        "status": "CODE_MERGED__LIVE_REJECTION_PROOF_PENDING",
+        "evidence": "PR #21 enhanced CreateTweet/None diagnostics; CI passed; no definitive new live failure evidence in attached ZIP.",
+        "remaining": "Confirm real next X error code/response and guarantee no second POST.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P1",
@@ -58,7 +72,14 @@
       "tests": "LIVE_EVIDENCE_PARTIAL",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "محاولات=ناجح+فاشل+غامض لكل دورة وحساب؛ دون ازدواج عد"
+      "acceptance": "محاولات=ناجح+فاشل+غامض لكل دورة وحساب؛ دون ازدواج عد",
+      "round10": {
+        "status": "CODE_MERGED__PRODUCTION_METRICS_PENDING",
+        "evidence": "PR #21 post_result now has run, account, status, dispatch and timing plus GraphQL fields.",
+        "remaining": "Measure real next cycle failed/ambiguous/success and quota with journal reconciliation.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P1",
@@ -68,7 +89,14 @@
       "tests": "LOCAL_REGRESSION_PASS_VPS_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "لا إعادة pending بعد إرسال غير محسوم"
+      "acceptance": "لا إعادة pending بعد إرسال غير محسوم",
+      "round10": {
+        "status": "INTEGRATION_PARTIAL__ENDURANCE_PENDING",
+        "evidence": "Dispatch fence and deferred rate-limit handling merged; earlier 21-post M10 run has evidence.",
+        "remaining": "Post-dispatch rate-limit/late-confirmation fault validation without automatic replay.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P2",
@@ -78,7 +106,14 @@
       "tests": "LIVE_EVIDENCE_REPORTED",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "runId + messageId وإشعارات فعلية لزر/جدولة"
+      "acceptance": "runId + messageId وإشعارات فعلية لزر/جدولة",
+      "round10": {
+        "status": "HISTORICAL_LIVE_EVIDENCE__SIGNOFF_PENDING",
+        "evidence": "Owner/brother live panel and start receipts reported in M8–M10.",
+        "remaining": "Current long-run dual-panel/start-source receipt and owner signoff.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P2",
@@ -88,7 +123,14 @@
       "tests": "LIVE_EVIDENCE_PARTIAL",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "معرفة مكان الاختناق بأرقام قياس؛ سرعة ticker الأصلية"
+      "acceptance": "معرفة مكان الاختناق بأرقام قياس؛ سرعة ticker الأصلية",
+      "round10": {
+        "status": "HISTORICAL_MEASURED__FOLLOWUP_PENDING",
+        "evidence": "M10 telemetry measured publish and SQLite/panel latency.",
+        "remaining": "Correlate next X rejection latency with current logs; distinguish timeline verification overhead.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P2",
@@ -98,7 +140,14 @@
       "tests": "LIVE_EVIDENCE_REPORTED",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "حفظ terminal receipts من المصدر الحقيقي"
+      "acceptance": "حفظ terminal receipts من المصدر الحقيقي",
+      "round10": {
+        "status": "HISTORICAL_LIVE_EVIDENCE__SIGNOFF_PENDING",
+        "evidence": "M10 final CSV receipts in owner and brother chats reported and previously correlated.",
+        "remaining": "Check terminal CSV/stop after PR #23; no CSV omission for actually published posts.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P3",
@@ -108,7 +157,14 @@
       "tests": "LIVE_EVIDENCE_REPORTED",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "BEGIN deferred للقراءة واختبار تزامن عمليات SQLite"
+      "acceptance": "BEGIN deferred للقراءة واختبار تزامن عمليات SQLite",
+      "round10": {
+        "status": "CODE_MERGED__ENDURANCE_PENDING",
+        "evidence": "Read-only BEGIN deferred behavior previously merged and tested.",
+        "remaining": "Sustained SQLite latency and writer-contention checks across real cycles.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P3",
@@ -118,7 +174,14 @@
       "tests": "VPS_E2E_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "failureDiagnostic + runId + attemptId + audit trail"
+      "acceptance": "failureDiagnostic + runId + attemptId + audit trail",
+      "round10": {
+        "status": "PARTIAL__PROVENANCE_ENRICHED",
+        "evidence": "Round10 inventory 30/30 has accountId, including 13 historically missing; new failureDiagnostic fields merged.",
+        "remaining": "Verify mapping against original raw forensic events; keep attempt provenance and causal diagnostics durable, not just top-level accountId.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P3",
@@ -128,7 +191,14 @@
       "tests": "FURTHER_ENDURANCE_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "دوارات ممتدة ومراقبة الموارد وسلامة الطابور"
+      "acceptance": "دوارات ممتدة ومراقبة الموارد وسلامة الطابور",
+      "round10": {
+        "status": "HISTORICAL_MULTIROUND__ENDURANCE_PENDING",
+        "evidence": "M10 verified 21 posts across five accounts, with full run/CSV record.",
+        "remaining": "Further long-run after PR #23 with restarts, resource and no duplicate posts.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P4",
@@ -138,7 +208,14 @@
       "tests": "LIVE_EVIDENCE_REPORTED",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "حسابات البايو الفارغ تنشر بلا انهيار"
+      "acceptance": "حسابات البايو الفارغ تنشر بلا انهيار",
+      "round10": {
+        "status": "HISTORICAL_LIVE_EVIDENCE__SIGNOFF_PENDING",
+        "evidence": "PR #15 and M8 reports covered Twikit KeyError urls normalization and live posting.",
+        "remaining": "Confirm no regressions with current pinned Python packages in real X runs.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P4",
@@ -148,7 +225,14 @@
       "tests": "PASS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "أسباب X الأصلية لكل فشل دون أسرار في اللوج"
+      "acceptance": "أسباب X الأصلية لكل فشل دون أسرار في اللوج",
+      "round10": {
+        "status": "CODE_MERGED__REAL_X_ERROR_PROOF_PENDING",
+        "evidence": "PR #19/#21 carry GraphQL code/message/status; new source-presence tests and CI green.",
+        "remaining": "Show a genuine new API error end-to-end in sanitized journal and SQLite with exact account/item attribution.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P4",
@@ -158,7 +242,14 @@
       "tests": "CI_GREEN_VPS_E2E_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "اختبار حدود رفض المحتوى/الحظر/التهدئة"
+      "acceptance": "اختبار حدود رفض المحتوى/الحظر/التهدئة",
+      "round10": {
+        "status": "CODE_MERGED__3STRIKES_LIVE_TEST_PENDING",
+        "evidence": "Codes 186/187 exempted from account strikes in PR #19 by classifier.",
+        "remaining": "Verify real rejection code/strike handling, never exempt ban/captcha/auth failures.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P4",
@@ -168,7 +259,14 @@
       "tests": "LIVE_EVIDENCE_REPORTED",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "اختبارات عزل واتصال واستقرار على VPS"
+      "acceptance": "اختبارات عزل واتصال واستقرار على VPS",
+      "round10": {
+        "status": "AGENT_REPORTED_HEALTHY__ENDURANCE_PENDING",
+        "evidence": "Round10 Hermes report says five VPN containers healthy and production service active.",
+        "remaining": "Independent long-run VPN/exit-IP and rotation checks with no host IP leak.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P5",
@@ -178,7 +276,14 @@
       "tests": "ROOT_CAUSE_ACCEPTANCE_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "فحص دقيق للنص قبل الإرسال بدون حذف"
+      "acceptance": "فحص دقيق للنص قبل الإرسال بدون حذف",
+      "round10": {
+        "status": "DIAGNOSTICS_PRESENT__ROOT_CAUSE_OPEN",
+        "evidence": "Text length/UTF-16 observations and error code 186 recognition exist in merged code.",
+        "remaining": "Trace overlong output to generator/validation; prevent invalid content before CreateTweet.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P5",
@@ -188,7 +293,14 @@
       "tests": "ROOT_CAUSE_ACCEPTANCE_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "تحقيق بالهاش/الروابط وعدم تكرار نشر"
+      "acceptance": "تحقيق بالهاش/الروابط وعدم تكرار نشر",
+      "round10": {
+        "status": "DIAGNOSTICS_PRESENT__ROOT_CAUSE_OPEN",
+        "evidence": "Historical posts may duplicate older X posts; original GraphQL code was not recorded, so 187 is not retro-proven.",
+        "remaining": "Prevent duplicate content upstream; avoid equating historical same-text match with current publish success.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P6",
@@ -198,7 +310,14 @@
       "tests": "CI_GREEN_REDACTION_VPS_AUDIT_PENDING",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "لا تسريب Cookies/Tokens وربط أدلة الحادث"
+      "acceptance": "لا تسريب Cookies/Tokens وربط أدلة الحادث",
+      "round10": {
+        "status": "PARTIAL__URGENT_TEST_ISOLATION_RISK",
+        "evidence": "PR #23 introduced durable id/epoch for audit events, redaction and migration guards; audit tests call prune/reconcile on Bot/data/state.sqlite.",
+        "remaining": "Move destructive/repair tests to isolated temporary SQLite/JSONL; prove independent durability without touching production; handle dual-write partial failures.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P6",
@@ -208,7 +327,14 @@
       "tests": "AGENT_REPORTED_COMPLETE_LOGS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "تطابق post_result وSQLite وإيصالات الشاتين"
+      "acceptance": "تطابق post_result وSQLite وإيصالات الشاتين",
+      "round10": {
+        "status": "MONITOR_MERGED__HISTORICAL_EVIDENCE",
+        "evidence": "PR #18 monitor captures through stop and dual CSV receipts; M10 raw journal was correlated to 21 posted items.",
+        "remaining": "Ensure new audit archives carry complete raw journal, exact run scope and evidence retention.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P6",
@@ -218,7 +344,14 @@
       "tests": "NOT_RUN",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "لا إغلاق قبل استقلال المراجع وموافقة المالك"
+      "acceptance": "لا إغلاق قبل استقلال المراجع وموافقة المالك",
+      "round10": {
+        "status": "OPEN__INDEPENDENT_REVIEW_REQUIRED",
+        "evidence": "All 33 original findings and 20 added tasks still Codex PENDING; owner signoffs not granted.",
+        "remaining": "Run independent Codex review using raw evidence; preserve separate owner acceptance by P phase.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     },
     {
       "phase": "P6",
@@ -228,7 +361,22 @@
       "tests": "NOT_RUN",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
-      "acceptance": "لا تسقط اعتمادات أو سجلات قديمة؛ تحديث baseline المتقادم"
+      "acceptance": "لا تسقط اعتمادات أو سجلات قديمة؛ تحديث baseline المتقادم",
+      "round10": {
+        "status": "PARTIAL__ISSUE12_STALE",
+        "evidence": "PRs #20–#23 preserve P1–P6 and 33+20; original master and Round10 report exist; Issue #12 baseline still stale.",
+        "remaining": "Reconcile Issue #12 and approve PR-linked tracking update without rewriting historic statuses.",
+        "independentApproval": "PENDING",
+        "ownerAcceptance": "PENDING"
+      }
     }
-  ]
+  ],
+  "lastReviewed": {
+    "date": "2026-11-03",
+    "round": "Round10 M11",
+    "codeMain": "0be50e5cab4c42eedf71bbfe2cf5cc22df83f215",
+    "source": "GitHub main PR #23 + user-provided Round10 ZIP; some operational claims agent-reported only",
+    "originalCount": 33,
+    "extraCount": 20
+  }
 }
