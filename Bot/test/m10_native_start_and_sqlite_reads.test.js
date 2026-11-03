@@ -96,4 +96,7 @@ test('fast panel timing restored; real publish diagnostics are recorded', () => 
   assert.match(runner, /textCodePoints:/);
   assert.match(runner, /event: 'notify_send_success'/);
   assert.match(ui, /cycle_start_notification_completed/);
+  assert.match(ui, /cycle_start_readiness_checked/);
+  assert.match(ui, /cycle_start_state_transition/);
+  assert.match(ui, /cycle_start_panel_refresh_timing/);
 });
