@@ -554,6 +554,12 @@ async function run({
             if (isPermanent) {
               acc.enabled = false;
               acc.status = failure === 'captcha' ? 'كابتشا' : 'محظور';
+              if (failure === 'captcha') {
+                acc.needsOwnerCaptcha = true;
+                acc.captchaDetectedAt = Date.now();
+                acc.captchaCode = xErrorCode || 326;
+                acc.captchaReason = rejectionReason || reason || 'security_challenge_detected';
+              }
               acc.checkGeneration = crypto.randomUUID();
               accountResult.isolated = true;
               accountResult.status = acc.status;
@@ -562,6 +568,13 @@ async function run({
                 const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
                 if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
               }
+            } else if (failure === 'auth_session_unverified') {
+              acc.enabled = false;
+              acc.status = 'غير محقق (جلسة غير مؤكدة)';
+              acc.unverifiedReason = reason || 'auth_session_unverified';
+              acc.checkGeneration = crypto.randomUUID();
+              accountResult.isolated = true;
+              accountResult.status = acc.status;
             } else if (isKnownParserError || isContentReject) {
               // A parser error or a GraphQL content rejection is not an
               // account failure. Still quarantine the post after dispatch.
@@ -615,7 +628,7 @@ async function run({
         const otherActive = (sNow.accounts || []).filter(a =>
           a.id !== accountId &&
           a.enabled !== false &&
-          !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
+          !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)'].includes(a.status) &&
           (a.failures || 0) < 3 &&
           (run.accountIds || []).includes(a.id) &&
           accountCapacity(sNow, a, clock()).remaining > 0 &&
@@ -628,7 +641,9 @@ async function run({
           cooling.delete(accountId);
         } else if (accountResult.isolated) {
           cooling.delete(accountId);
-          vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+          if (failure !== 'captcha' && failure !== 'banned') {
+            vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+          }
         } else if (isRateLimit) {
           const delayMs = Math.min(900000, Math.max(60000, (retryAfterSeconds || 60) * 1000));
           const entry = {

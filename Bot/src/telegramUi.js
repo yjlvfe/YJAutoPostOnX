@@ -39,10 +39,20 @@ function formatIsolationReason(reason) {
 function buildIsolationMessage({ username, reason, otherActiveCount = 0 }) {
   const cleanUsername = username ? `@${String(username).replace(/^@/, '')}` : 'الحساب';
   const formattedReason = formatIsolationReason(reason);
-  if (otherActiveCount > 0) {
-    return `تم عزل الحساب ${cleanUsername} تلقائياً (السبب: ${formattedReason}) ومواصلة الدورة عبر بقية الحسابات (${otherActiveCount}).`;
+  const captchaInstruction = ' (حل التحقق من X بنفسك عبر الموقع/التطبيق الرسمي ثم اضغط تم الحل)';
+  const extra = formattedReason === ISOLATION_REASONS.CAPTCHA ? captchaInstruction : '';
+
+  if (reason === 'auth_session_unverified' || String(reason).includes('غير محقق')) {
+    if (otherActiveCount > 0) {
+      return `⚠️ تنبيه للحساب ${cleanUsername}: جلسة غير مؤكدة / السبب غير محدد (auth_session_unverified). تم إيقاف الحساب، ومواصلة الدورة عبر بقية الحسابات (${otherActiveCount}). يرجى فحص الحساب عبر الموقع الرسمي لـ X.`;
+    }
+    return `⚠️ تنبيه للحساب ${cleanUsername}: جلسة غير مؤكدة / السبب غير محدد (auth_session_unverified). تم إيقاف الحساب وتوقفت الدورة. يرجى فحص الحساب عبر الموقع الرسمي لـ X.`;
   }
-  return `تم عزل الحساب ${cleanUsername} تلقائياً (السبب: ${formattedReason}). لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`;
+
+  if (otherActiveCount > 0) {
+    return `تم عزل الحساب ${cleanUsername} تلقائياً (السبب: ${formattedReason})${extra} ومواصلة الدورة عبر بقية الحسابات (${otherActiveCount}).`;
+  }
+  return `تم عزل الحساب ${cleanUsername} تلقائياً (السبب: ${formattedReason})${extra}. لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`;
 }
 
 const formatDurationAdaptive = seconds => {
@@ -853,12 +863,30 @@ class TelegramUi {
       else if (checks.vpn && !require('./publicIp').isPublicIp(checks.vpn.ip)) checks.vpn.ip = null;
       if (ip) account.exitIp = ip;
       const failure = result.accountFailure || (result.suspended === true || result.banned === true ? 'banned' : result.captcha === true ? 'captcha' : null);
-      if (session && source === 'x-session' && ['banned', 'captcha'].includes(failure)) {
-        account.enabled = false;
-        account.status = failure === 'banned' ? 'محظور' : 'كابتشا';
-        account.checkGeneration = crypto.randomUUID();
+      if (session && source === 'x-session') {
+        if (failure === 'banned') {
+          account.enabled = false;
+          account.status = 'محظور';
+          account.checkGeneration = crypto.randomUUID();
+        } else if (failure === 'captcha') {
+          account.enabled = false;
+          account.status = 'كابتشا (مطلوب حل يدوي)';
+          account.needsOwnerCaptcha = true;
+          account.checkGeneration = crypto.randomUUID();
+        } else if (failure === 'auth_session_unverified' || (!result.authenticated && !failure)) {
+          // Unverified session / cause uncertain: DO NOT default to 'محظور'!
+          // Only preserve existing 'محظور' if it was already marked as such by an authoritative check.
+          if (account.status !== 'محظور') {
+            account.enabled = false;
+            account.status = 'غير محقق (جلسة غير مؤكدة)';
+            account.checkGeneration = crypto.randomUUID();
+          }
+        }
       }
-      if (refresh && session && healthy && ip && result.authenticated === true && !failure) account.status = account.enabled === false ? 'غير مفعل' : 'مفعل';
+      if (refresh && session && healthy && ip && result.authenticated === true && !failure) {
+        account.status = account.enabled === false ? 'غير مفعل' : 'مفعل';
+        if (account.needsOwnerCaptcha) account.needsOwnerCaptcha = false;
+      }
       onApplied?.(structuredClone(account));
       if (session) checks.session = { checkedAt, source, isolated, authenticated: isolated && result.authenticated === true, username: /^[A-Za-z0-9_]{1,15}$/.test(result.username || '') ? result.username : null,
         ...Object.fromEntries(['challenge', 'locked', 'captcha', 'suspended', 'banned'].map(flag => [flag, isolated && result[flag] === true])) };
@@ -1108,7 +1136,17 @@ class TelegramUi {
         await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
         return { banned: true };
       }
-      const isCurrentlyActive = account.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(account.status);
+      const isCaptcha = account.status === 'كابتشا' || account.status === 'كابتشا (مطلوب حل يدوي)' || account.needsOwnerCaptcha === true;
+      if (isCaptcha) {
+        await acknowledge('هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', true);
+        return { captcha: true };
+      }
+      const isUnverified = account.status === 'غير محقق' || account.status === 'غير محقق (جلسة غير مؤكدة)';
+      if (isUnverified) {
+        await acknowledge('جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', true);
+        return { unverified: true };
+      }
+      const isCurrentlyActive = account.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(account.status);
       if (isCurrentlyActive) {
         await this.bot.store.update(s => {
           const a = (s.accounts || []).find(acc => acc.id === targetId);
@@ -1252,19 +1290,25 @@ class TelegramUi {
 
   accountDetailKeyboard(account) {
     const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
-    const isCaptcha = account.status === 'كابتشا' || String(account.status || '').toLowerCase() === 'captcha';
-    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha;
+    const isCaptcha = account.status === 'كابتشا' || account.status === 'كابتشا (مطلوب حل يدوي)' || account.needsOwnerCaptcha === true;
+    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha && !String(account.status || '').includes('غير محقق');
 
-    // زر واحد للتبديل: إذا كان مفعلاً يظهر أحمر ومكتوب "تعطيل"، وإذا كان غير مفعل يظهر أخضر ومكتوب "تفعيل"
     const toggleButton = isEnabled
       ? { text: 'تعطيل', callback_data: `accmanage:disable:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
       : { text: 'تفعيل', callback_data: `accmanage:enable:${account.id}`, ...(this.inlineStyles ? { style: 'success' } : {}) };
 
+    const firstRow = isCaptcha
+      ? [
+          { text: '✅ تم الحل (فحص الاعتماد)', callback_data: `accmanage:verify_captcha:${account.id}`, ...(this.inlineStyles ? { style: 'success' } : {}) },
+          { text: 'حذف الحساب', callback_data: `accmanage:delete_prompt:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
+        ]
+      : [
+          toggleButton,
+          { text: 'حذف الحساب', callback_data: `accmanage:delete_prompt:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
+        ];
+
     const inline_keyboard = [
-      [
-        toggleButton,
-        { text: 'حذف الحساب', callback_data: `accmanage:delete_prompt:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
-      ],
+      firstRow,
       [
         { text: 'فحص جلسة X', callback_data: `accmanage:check_session:${account.id}`, ...(this.inlineStyles ? { style: 'primary' } : {}) },
         { text: 'فحص VPN وIP', callback_data: `accmanage:check_vpn:${account.id}`, ...(this.inlineStyles ? { style: 'primary' } : {}) }
@@ -1325,7 +1369,17 @@ class TelegramUi {
         await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
         return { banned: true };
       }
-      const activeCount = (state.accounts || []).filter(a => a.id !== targetId && a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status)).length;
+      const isCaptcha = account.status === 'كابتشا' || account.status === 'كابتشا (مطلوب حل يدوي)' || account.needsOwnerCaptcha === true;
+      if (isCaptcha) {
+        await acknowledge('هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', true);
+        return { captcha: true };
+      }
+      const isUnverified = account.status === 'غير محقق' || account.status === 'غير محقق (جلسة غير مؤكدة)';
+      if (isUnverified) {
+        await acknowledge('جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', true);
+        return { unverified: true };
+      }
+      const activeCount = (state.accounts || []).filter(a => a.id !== targetId && a.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status)).length;
       if (activeCount >= 5) {
         await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
         return { limitExceeded: true };
@@ -1419,6 +1473,74 @@ class TelegramUi {
       }
       await acknowledge(`تم تعطيل الحساب @${account.username || account.label}`);
       return { disabled: true };
+    }
+
+    if (parsed.action === 'verify_captcha' && parsed.value) {
+      const targetId = parsed.value;
+      const state = await this.bot.store.load();
+      const account = (state.accounts || []).find(a => a.id === targetId);
+      if (!account) {
+        await acknowledge('الحساب غير موجود', true);
+        return { notFound: true };
+      }
+
+      // Rate limiting: strictly at least 30 seconds between attempts
+      const now = Date.now();
+      if (account.lastCaptchaVerifyAt && (now - account.lastCaptchaVerifyAt) < 30_000) {
+        const remainingSec = Math.ceil((30_000 - (now - account.lastCaptchaVerifyAt)) / 1000);
+        await acknowledge(`يرجى الانتظار ${remainingSec} ثانية قبل إعادة التحقق.`, true);
+        return { rateLimited: true };
+      }
+
+      await this.bot.store.update(s => {
+        const a = (s.accounts || []).find(acc => acc.id === targetId);
+        if (a) a.lastCaptchaVerifyAt = now;
+        return s;
+      });
+
+      await acknowledge('جاري فحص حالة الاعتماد لدى X (قراءة فقط)...');
+
+      let verificationSuccess = false;
+      let checkError = null;
+      try {
+        if (this.bot.directXAdapter && typeof this.bot.directXAdapter.verifyAccount === 'function') {
+          const res = await this.bot.directXAdapter.verifyAccount(account);
+          if (res && res.authenticated === true && !res.challenge && !res.locked && !res.captcha && !res.suspended) {
+            verificationSuccess = true;
+          } else {
+            checkError = res?.rejectionReason || res?.accountFailure || 'challenge_still_active';
+          }
+        } else {
+          verificationSuccess = Boolean(account.authenticated === true && !account.needsOwnerCaptcha);
+        }
+      } catch (err) {
+        checkError = err.message;
+      }
+
+      if (verificationSuccess) {
+        await this.bot.store.update(s => {
+          const a = (s.accounts || []).find(acc => acc.id === targetId);
+          if (a) {
+            a.status = 'غير مفعل';
+            a.needsOwnerCaptcha = false;
+            a.captchaResolvedAt = Date.now();
+            a.checkGeneration = crypto.randomUUID();
+          }
+          return s;
+        });
+        const updated = await this.bot.store.load();
+        const updatedAcc = updated.accounts?.find(a => a.id === targetId);
+        if (messageId && updatedAcc) {
+          const text = this.accountDetailText(updatedAcc);
+          const markup = this.accountDetailKeyboard(updatedAcc);
+          await this.bot.transport.editMessageText(id.chat, messageId, text, { parse_mode: 'HTML', reply_markup: markup }).catch(() => {});
+        }
+        await this.bot.transport.sendMessage(id.chat, `✅ نجح التحقق من حل الكابتشا للحساب @${account.username || account.label}!\n\nتم ضبط حالة الحساب إلى «غير مفعل». يمكنك الآن الضغط على «تفعيل» لتفعيله يدوياً عند الرغبة.`);
+        return { verified: true, status: 'غير مفعل' };
+      } else {
+        await this.bot.transport.sendMessage(id.chat, `⚠️ لم يكتمل حل التحقق للحساب @${account.username || account.label} بعد.\n\nلا يزال الحساب مقيداً أو يطلب التحقق من X (${checkError || 'challenge_pending'}). يرجى التأكد من حل الكابتشا عبر الموقع الرسمي لـ X.`);
+        return { verified: false, error: checkError };
+      }
     }
 
     if (parsed.action === 'check_session' && parsed.value) {

@@ -15,7 +15,8 @@ const SETTLEMENT_TARGET = {
   historicalDay: '2026-11-01',
   fullText: '📌 الفارق الحقيقي بين المقامرة والتداول الواعي هو أمر وقف الخسارة. تخلّ عن عنادك واعترف بخطأ الصفقة قبل أن تمسح محفظتك بالكامل.\n\nافتح حسابك الاستثماري في MEXC بكود MEXC-12UHY5\n\n#إدارة_المخاطر #تداول',
   expectedTextPrefix: '📌 الفارق الحقيقي بين المقامرة والتداول الواعي هو أمر وقف ال',
-  expectedTextSha256Prefix: '6175d09d7a46563c'
+  expectedTextSha256Prefix: '6175d09d7a46563c',
+  expectedSha256Full: '6175d09d7a46563c051342f26ec9559a88689ccc3644eee690fdc95fc116133b'
 };
 
 function getRiyadhDate(dateInput) {
@@ -34,6 +35,46 @@ function isProdDb(targetPath) {
     }
   } catch {}
   return false;
+}
+
+async function flushPendingForensicOutbox(store, targetLog) {
+  const state = await store.load();
+  const pending = state.pendingForensicOutbox || [];
+  if (pending.length === 0) return { flushed: 0, newlyAppended: 0 };
+
+  const dir = path.dirname(targetLog);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+
+  // Read existing event IDs from targetLog to guarantee deduplication
+  const existingIds = new Set();
+  if (fs.existsSync(targetLog)) {
+    try {
+      const content = await fsp.readFile(targetLog, 'utf8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed.id) existingIds.add(parsed.id);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  const toAppend = pending.filter(e => !existingIds.has(e.id));
+  if (toAppend.length > 0) {
+    const lines = toAppend.map(e => JSON.stringify(e)).join('\n') + '\n';
+    await fsp.appendFile(targetLog, lines, { mode: 0o600 });
+  }
+
+  // Acknowledge and clear flushed events from SQLite outbox
+  const flushedIds = new Set(pending.map(e => e.id));
+  await store.update(s => {
+    s.pendingForensicOutbox = (s.pendingForensicOutbox || []).filter(e => !flushedIds.has(e.id));
+    return s;
+  });
+
+  return { flushed: pending.length, newlyAppended: toAppend.length };
 }
 
 async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlement } = {}) {
@@ -85,13 +126,20 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
         throw new Error(`INVALID_ITEM_STATE: Item ${SETTLEMENT_TARGET.id} must be in 'ambiguous' state to settle (current: '${item.state}')`);
       }
 
-      // Content verification
+      // Strict content verification: full 64-char SHA-256 hash
       const text = item.payload?.text || '';
-      if (text) {
-        const textHash = createHash('sha256').update(text, 'utf8').digest('hex');
-        if (!textHash.startsWith(SETTLEMENT_TARGET.expectedTextSha256Prefix)) {
-          throw new Error(`CONTENT_MISMATCH: Item ${SETTLEMENT_TARGET.id} text SHA-256 prefix does not match expected (${textHash.slice(0, 16)} != ${SETTLEMENT_TARGET.expectedTextSha256Prefix})`);
-        }
+      if (!text) {
+        throw new Error(`MISSING_TEXT: Item ${SETTLEMENT_TARGET.id} text is missing`);
+      }
+      const fullHash = createHash('sha256').update(text, 'utf8').digest('hex');
+      if (fullHash !== SETTLEMENT_TARGET.expectedSha256Full) {
+        throw new Error(`FULL_SHA256_MISMATCH: Item ${SETTLEMENT_TARGET.id} full SHA-256 does not match expected (${fullHash} != ${SETTLEMENT_TARGET.expectedSha256Full})`);
+      }
+
+      // Account & provenance verification
+      const itemAccId = item.accountId || item.payload?.account;
+      if (itemAccId && itemAccId !== SETTLEMENT_TARGET.accountId) {
+        throw new Error(`ACCOUNT_PROVENANCE_MISMATCH: Item account ${itemAccId} != ${SETTLEMENT_TARGET.accountId}`);
       }
 
       // Archive attempt
@@ -117,9 +165,13 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
       delete item.reason;
       delete item.failureDiagnostic;
 
-      // Historical quota adjustment in Riyadh timezone
+      // Historical quota adjustment strictly in Riyadh timezone for historical day
       const riyadhHistoricalDay = getRiyadhDate(SETTLEMENT_TARGET.publishedAt);
       const todayRiyadh = getRiyadhDate(nowEpoch);
+
+      if (riyadhHistoricalDay !== SETTLEMENT_TARGET.historicalDay) {
+        throw new Error(`HISTORICAL_DAY_MISMATCH: Target historical day ${SETTLEMENT_TARGET.historicalDay} != ${riyadhHistoricalDay}`);
+      }
 
       state.posting.quota[riyadhHistoricalDay] ||= {};
       const currentHistoricalQuota = state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] || 0;
@@ -136,7 +188,7 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
         id: randomUUID(),
         timestamp: nowIso,
         epoch: nowEpoch,
-        eventType: 'm13_settle_53d0f458_snowflake_published',
+        eventType: 'm14_settle_53d0f458_snowflake_published',
         details: {
           itemId: SETTLEMENT_TARGET.id,
           tweetId: SETTLEMENT_TARGET.tweetId,
@@ -147,40 +199,28 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
           todayRiyadh,
           quotaCredited,
           quotaBefore: currentHistoricalQuota,
-          quotaAfter: state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId]
+          quotaAfter: state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId],
+          fullSha256: fullHash
         }
       };
+
+      // Atomic Dual-Write: Persist outbox event in the SAME SQLite transaction
       state.forensicLogs.push(auditEvent);
+      state.pendingForensicOutbox.push(auditEvent);
       settled = true;
 
       return state;
     });
 
-    await store.close();
-
-    // Durable dual-write append with fallback to pendingForensicOutbox
-    if (auditEvent) {
-      try {
-        const dir = path.dirname(targetLog);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-        await fsp.appendFile(targetLog, JSON.stringify(auditEvent) + '\n', { mode: 0o600 });
-        console.log(`Persisted settlement audit event to ${targetLog}`);
-      } catch (err) {
-        console.error(`Warning: Direct append to ${targetLog} failed (${err.message}). Storing in pendingForensicOutbox.`);
-        try {
-          const recoveryStore = new SqliteStore(targetDb);
-          await recoveryStore.update(s => {
-            s.pendingForensicOutbox ||= [];
-            s.pendingForensicOutbox.push(auditEvent);
-            return s;
-          });
-          await recoveryStore.close();
-        } catch (innerErr) {
-          console.error('Critical: Failed to record pending forensic outbox:', innerErr.message);
-        }
-      }
+    // Post-commit: Flush pending outbox to external logfile
+    try {
+      const flushResult = await flushPendingForensicOutbox(store, targetLog);
+      console.log(`Flushed ${flushResult.flushed} outbox event(s) to ${targetLog}`);
+    } catch (err) {
+      console.warn(`Warning: Flush to ${targetLog} deferred to next cycle (${err.message}). Event remains safe in pendingForensicOutbox.`);
     }
 
+    await store.close();
     console.log(`Settlement of ${SETTLEMENT_TARGET.id} completed. Published status recorded.`);
   } else {
     // Dry run
@@ -212,4 +252,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, settleItem53d0, SETTLEMENT_TARGET };
+module.exports = { main, settleItem53d0, flushPendingForensicOutbox, SETTLEMENT_TARGET };

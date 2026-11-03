@@ -88,6 +88,7 @@ class DirectXAdapter {
       child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
         stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
       });
+      lease.bindChild?.(child.pid);
       lease.pid = child.pid;
     } catch (spawnError) {
       lease.release();

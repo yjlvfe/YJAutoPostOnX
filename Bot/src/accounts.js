@@ -31,19 +31,21 @@ function accountRecord(input = {}) {
       let normStatus = rawStatus;
       if (['محظور', 'suspended', 'banned'].includes(rawStatus.toLowerCase()) || rawStatus === 'محظور') {
         normStatus = 'محظور';
-      } else if (['كابتشا', 'captcha', 'challenge', 'verification_required'].includes(rawStatus.toLowerCase()) || rawStatus === 'كابتشا') {
-        normStatus = 'كابتشا';
+      } else if (['كابتشا', 'captcha', 'challenge', 'verification_required', 'needs_owner_captcha', 'كابتشا (مطلوب حل يدوي)'].includes(rawStatus.toLowerCase()) || rawStatus.includes('كابتشا')) {
+        normStatus = rawStatus.includes('حل يدوي') ? 'كابتشا (مطلوب حل يدوي)' : 'كابتشا';
+      } else if (['غير محقق', 'auth_session_unverified', 'unverified', 'غير محقق (جلسة غير مؤكدة)'].includes(rawStatus.toLowerCase()) || rawStatus === 'غير محقق' || rawStatus === 'غير محقق (جلسة غير مؤكدة)') {
+        normStatus = 'غير محقق (جلسة غير مؤكدة)';
       } else if (rawStatus === 'معزول (3 إخفاقات)') {
         normStatus = 'معزول (3 إخفاقات)';
       } else if (['غير مفعل', 'خامل', 'disabled', 'inactive'].includes(rawStatus.toLowerCase()) || rawStatus === 'غير مفعل') {
         normStatus = 'غير مفعل';
-      } else if (input.enabled === false && !['كابتشا', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
+      } else if (input.enabled === false && !['كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
         normStatus = 'غير مفعل';
-      } else if (input.enabled !== false && !['كابتشا', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
+      } else if (input.enabled !== false && !['كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
         normStatus = 'مفعل';
       }
       return {
-        enabled: input.enabled !== false && !['محظور', 'كابتشا', 'غير مفعل', 'معزول (3 إخفاقات)'].includes(normStatus),
+        enabled: input.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'غير مفعل', 'معزول (3 إخفاقات)'].includes(normStatus),
         status: normStatus
       };
     })(),
@@ -64,6 +66,13 @@ function positiveInteger(value, name) {
   if (!Number.isSafeInteger(number) || number < 1) throw new Error(`${name} must be a positive integer`);
   return number;
 }
+const INACTIVE_STATUSES = ['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق', 'غير محقق (جلسة غير مؤكدة)', 'غير مفعل', 'معزول (3 إخفاقات)'];
+
+function isAccountInactive(status) {
+  if (!status) return false;
+  return INACTIVE_STATUSES.includes(status);
+}
+
 function nonNegativeInteger(value, name) {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 0) throw new Error(`${name} must be a non-negative integer`);
@@ -112,7 +121,7 @@ class AccountManager {
       if (confirmation && state.accounts.some(a => a.username?.toLowerCase() === record.username?.toLowerCase())) throw new Error('Account already exists');
       if (state.accounts.some(item => item.id === record.id)) throw new Error('Account already exists');
       if (Number.isFinite(this.maxAccounts) && state.accounts.length >= this.maxAccounts) throw new Error(`At most ${this.maxAccounts} accounts are supported`);
-      const activeCount = state.accounts.filter(a => a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status)).length;
+      const activeCount = state.accounts.filter(a => a.enabled !== false && !isAccountInactive(a.status)).length;
       if (activeCount >= this.maxActiveAccounts) {
         record.enabled = false;
         record.status = 'غير مفعل';
@@ -131,7 +140,7 @@ class AccountManager {
       const current = (state.accounts || []).find(item => item.id === accountId);
       if (!current) throw new Error('Account not found');
       if (patch.enabled === true && current.enabled === false) {
-        const activeCount = (state.accounts || []).filter(a => a.id !== accountId && a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status)).length;
+        const activeCount = (state.accounts || []).filter(a => a.id !== accountId && a.enabled !== false && !isAccountInactive(a.status)).length;
         if (activeCount >= this.maxActiveAccounts) {
           throw new Error(`At most ${this.maxActiveAccounts} active accounts are supported`);
         }
@@ -173,7 +182,7 @@ class AccountManager {
     if (new Set(normalized.map(item => item.id)).size !== normalized.length) throw new Error('Duplicate account id');
     let activeCount = 0;
     const capped = normalized.map(account => {
-      const isActive = account.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(account.status);
+      const isActive = account.enabled !== false && !isAccountInactive(account.status);
       if (isActive) {
         activeCount++;
         if (activeCount > this.maxActiveAccounts) {

@@ -186,6 +186,10 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
         id: SETTLEMENT_TARGET.id,
         state: 'ambiguous',
         reason: 'unresolved_in_finally',
+        payload: {
+          text: SETTLEMENT_TARGET.fullText,
+          account: SETTLEMENT_TARGET.accountId
+        },
         attempt: {
           token: 'token-53d0-test',
           phase: 'dispatching',
@@ -238,7 +242,7 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
       assert.strictEqual(stateApplied.posting.quota['2026-11-03'][SETTLEMENT_TARGET.accountId], 10, 'Nov 3 quota must NOT be double-counted (remains 10)');
 
       // Verify audit log
-      const auditEvt = (stateApplied.forensicLogs || []).find(e => e.eventType === 'm13_settle_53d0f458_snowflake_published' || e.eventType === 'm12_settle_53d0f458_snowflake_published');
+      const auditEvt = (stateApplied.forensicLogs || []).find(e => e.eventType?.includes('settle_53d0f458_snowflake_published'));
       assert.ok(auditEvt, 'Settlement audit event must exist in forensicLogs');
       assert.ok(auditEvt.id, 'Audit event must have unique id');
       assert.ok(auditEvt.epoch, 'Audit event must have numeric epoch');

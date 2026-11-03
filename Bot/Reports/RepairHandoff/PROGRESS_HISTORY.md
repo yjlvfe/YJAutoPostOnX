@@ -987,3 +987,32 @@ Following previous test passes (369/369), production stability encountered post-
   - Python tests: **203/203 PASS** (100%).
   - Node.js tests: **397/397 PASS** across 131 test suites (100%).
   - Production database SHA-256, size, and quota remain 100% untouched. All 53 items in P1–P6 preserved with Codex and owner approvals strictly **PENDING**.
+
+### Round 13 / M14 — Human-Only CAPTCHA Gate, Real Interprocess 5-Session Ceiling & Transactional Outbox (2026-11-03)
+
+- **Work Package 1 — Human-Only CAPTCHA Gate & Unverified Session Disentanglement**:
+  - Implemented fail-closed human verification gate across `Bot/python/direct_x_compat.py`, `direct_x_bridge.py`, `Bot/src/directX.js`, `runner.js`, `accounts.js`, and `telegramUi.js`.
+  - Granularly distinguished explicit CAPTCHA/challenge (`326/353/399/241`, bounce locations, Arkose) from suspension (`64`), cookie expiry (`89`), rate limits, network errors, and `auth_session_unverified`.
+  - On CAPTCHA detection: immediately stopped further attempts, disabled dispatch, persisted durable `needsOwnerCaptcha: true` with code and timestamp, and notified owner once per incident: `"حل التحقق من X بنفسك عبر الموقع/التطبيق الرسمي ثم اضغط تم الحل"`.
+  - Zero automated CAPTCHA solving, zero rapid retries, and zero VPN rotation on CAPTCHA/ban to prevent evasion triggers.
+  - Implemented owner-triggered, rate-limited (30s) read-only verification (`accmanage:verify_captcha`). Account transitions to `غير مفعل` on verified pass and remains disabled until explicit owner toggle. Live publishing remains stopped.
+  - Unverified sessions without explicit codes are accurately reported as `auth_session_unverified / السبب غير محدد` without asserting cookie expiry without evidence.
+- **Work Package 2 — Interprocess SQLite Session Guard & 5-Session Cap**:
+  - Re-architected `Bot/src/sessionGuard.js` from process-local `Map` into an interprocess, crash-safe SQLite transactional lease registry (`session_leases.sqlite`).
+  - Enforced project-wide ceiling of at most 5 concurrent sessions across all Node processes, Python workers, and Docker containers.
+  - Eliminated premature TTL deletion: leases are preserved indefinitely while owning Node PID or child PID lives. Reclaims occur only upon confirmed process termination via `ESRCH`.
+  - Added host-level untracked DirectX process detection scanning `/proc` for active `direct_x_bridge.py`.
+  - Tested in `Bot/test/m14_session_guard_adversarial.test.js` (5/5 PASS): two independent Node processes racing concurrently never exceed 5 sessions; 6th denied fail-closed.
+- **Work Package 3 — Transactional Outbox & SQLite Settlement Hardening**:
+  - Eliminated dual-write audit gap in `settle_item_53d0f458.js` and `revert_false_recovery_m11.js`: audit events are committed to `state.pendingForensicOutbox` inside the primary SQLite transaction.
+  - Implemented `flushPendingForensicOutbox` with UUID deduplication to drain events safely post-commit.
+  - Enforced full 64-character SHA-256 validation (`6175d09d7a46563c051342f26ec9559a88689ccc3644eee690fdc95fc116133b`) for item `53d0f458`, rejecting missing or altered text fail-closed.
+  - Enforced strict CAS (`item.state === 'ambiguous'`), preserved historical Nov 1 Riyadh quota, prevented duplicate quota additions, and kept production `--apply` gated under `BLOCKED_PENDING_OWNER_APPROVAL`.
+- **Work Package 4 — Account Evidence & Quarantine Retention**:
+  - Completed read-only forensic inspection of accounts `@kaniabq`, `@marcosvhv`, `@menalobq`: demarcated confirmed facts (morning 10/10 posts succeeded, afternoon returned `authenticated: false` with 64/326 negative) from unproven hypotheses. Marked `OWNER_MANUAL_CHECK_REQUIRED`.
+  - Maintained all 30 ambiguous items in quarantine with `requeueApproved: false`.
+  - Preserved all 53 items in original P1–P6 plan with all Codex and owner approvals strictly **PENDING**.
+- **Consolidated Verification Status**:
+  - Python tests: **207/207 PASS** (100%).
+  - Node.js tests: **409/409 PASS** across 133 suites (100%).
+  - Status Breakdown: `LOCAL_TEST_PASS` (100%), `CI_PASS` (pending PR merge check), `LIVE_E2E_PENDING` (halted), `BLOCKED` (production apply), `OWNER_ACTION_REQUIRED` (account browser inspection).
