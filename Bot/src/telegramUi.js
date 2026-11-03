@@ -1832,6 +1832,8 @@ class TelegramUi {
     }
 
     const message = buildIsolationMessage({ username, reason: diagnosticReason, otherActiveCount });
+    // Keep incident in-flight until its confirmed receipts are durably stored.
+    try {
     let notifyResult = null;
     let notifyError = null;
 
@@ -1841,10 +1843,6 @@ class TelegramUi {
       }
     } catch (err) {
       notifyError = err;
-    } finally {
-      if (incidentId) {
-        this.inFlightAlerts?.delete(incidentId);
-      }
     }
 
     if (notifyError) {
@@ -1915,6 +1913,9 @@ class TelegramUi {
     }
 
     return message;
+    } finally {
+      if (incidentId) this.inFlightAlerts?.delete(incidentId);
+    }
   }
 
   shouldNotifyStrike(strikeNumber) {
