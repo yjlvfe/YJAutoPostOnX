@@ -895,3 +895,30 @@ Following previous test passes (369/369), production stability encountered post-
   - Node.js tests: 377/377 PASS across 128 test suites.
   - Opened PR #21 (`fix/m11-root-cause-diagnostics-20261103`), verified all 5 GitHub CI checks passed 100%, and merged as commit `7e1453bb0796c72966f556addd8291076925145c`.
   - All 33 original findings and 20 ADD tasks preserved with Codex approvals strictly PENDING.
+
+### Round 10 — M11 Forensic Reversion Hardening, 53d0f458 Snowflake Proof & Account Reconciliation (2026-11-03)
+
+- **Detailed Forensic Findings & Hardening**:
+  1. **Item 53d0f458 Snowflake & Timeline Verification**:
+     - Confirmed Tweet ID `2116981347772498219` generated at `2026-11-01T19:50:59.577Z` by Twitter Snowflake calculation: `((2116981347772498219n >> 22n) + 1288834974657n)`.
+     - Exactly correlates with runner attempt dispatched at `19:50:53.963Z` and forensic log events: `post_error` at `19:50:59.569Z` (8ms prior) and `post_ambiguous` at `19:50:59.946Z` (369ms post).
+     - Confirmed payload text:MEXC promo / risk management post authored by `@crytpokingxvo8`.
+     - Proved that absence from `links_2026-11-01.csv` was due to export snapshot timing on Nov 1, not non-publication. Item is proven published on X and must **never** be re-queued or re-published.
+  2. **Script Guards & Migration Hardening**:
+     - Added un-bypassable fatal exit guard to `apply_m11_ambiguous_recovery.js` to permanently prevent accidental historical state corruption.
+     - Hardened `revert_false_recovery_m11.js` with default `--dry-run`, mandatory `--apply` flag, and full idempotency checks.
+  3. **Audit Event Durability against prune & reconcile**:
+     - Ensured all M11 audit records include unique UUID `id`, numeric millisecond `epoch`, and ISO `timestamp`.
+     - Appended audit events to both `state.forensicLogs` and `data/logs/forensic.jsonl` (mode 0o600).
+     - Verified that `ForensicLogger.prune()` and `ForensicLogger.reconcile()` preserve M11 audit events with 100% integrity.
+  4. **Provenance Recovery for 13 Ambiguous Items**:
+     - Re-audited the 13 ambiguous items missing top-level `accountId`.
+     - Recovered 100% authentic account provenance from `forensic.jsonl`: 7 items on `@emiehg`, 3 items on `@crytpokingxvo8`, 2 items on `@okasanbq` (historical rotated account), 1 item on `@crytpokingxvo8`. Zero items guessed.
+     - Updated `Reports/audit_ambiguous_m11.json` showing 30/30 items fully attributed with 0 missing accounts.
+  5. **Quota Reality Clarification**:
+     - `state.settings.dailyQuota` is set to 20 per account (100 total capacity for 5 accounts).
+     - State consumed 50 posts today (10 per account), leaving 50 remaining capacity.
+     - Historical `daily_quota_exhausted` status was stamped when the cycle stopped earlier at 04:32:23 UTC when accounts hit 10, before the limit was adjusted.
+- **Approvals & Governance**:
+  - All 33 original findings and 20 ADD tasks preserved intact.
+  - All 33 Codex review approvals and all owner signoffs remain strictly **PENDING**.
