@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 let DatabaseSync;
 try {
   ({ DatabaseSync } = require('node:sqlite'));
@@ -40,6 +41,7 @@ class SqliteStore {
     this.state = null;
     this.db = null;
     this.closed = false;
+    this.lastSlowReadLog = 0;
     // Resolve aliases of the parent directory so different instances share a queue.
     const directory = path.dirname(this.file);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -73,8 +75,10 @@ class SqliteStore {
     } catch (error) { db.close(); throw error; }
   }
 
-  _transaction(fn) {
-    this.db.exec('BEGIN IMMEDIATE');
+  _transaction(fn, { immediate = true } = {}) {
+    // A plain SELECT must not reserve the database writer lock. Defer the
+    // transaction for load(), but retain BEGIN IMMEDIATE for all mutations.
+    this.db.exec(immediate ? 'BEGIN IMMEDIATE' : 'BEGIN');
     try {
       const result = fn();
       if (result && typeof result.then === 'function') {
@@ -123,11 +127,34 @@ class SqliteStore {
   }
 
   async load() {
+    const enqueuedAt = performance.now();
     return serialize(this.key, () => {
+      const acquiredAt = performance.now();
       this._open();
-      const result = this._transaction(() => this._readOrInitialize());
-      this.state = structuredClone(result);
-      return structuredClone(result);
+      // BEGIN deferred avoids locking out writers for a read-only query.
+      // An empty newly-created database may still initialize its schema.
+      const result = this._transaction(() => this._readOrInitialize(), { immediate: false });
+      // _readOrInitialize() produces a fresh parsed object; store owns it and
+      // returns one independent clone rather than cloning the entire queue twice.
+      this.state = result;
+      const snapshot = structuredClone(result);
+      const doneAt = performance.now();
+      const totalMs = doneAt - enqueuedAt;
+      if (totalMs >= 250 && Date.now() - this.lastSlowReadLog >= 30_000) {
+        this.lastSlowReadLog = Date.now();
+        try {
+          process.stderr.write(JSON.stringify({
+            event: 'sqlite_slow_read',
+            at: new Date().toISOString(),
+            totalMs: Math.round(totalMs),
+            queueWaitMs: Math.round(acquiredAt - enqueuedAt),
+            readAndCloneMs: Math.round(doneAt - acquiredAt)
+          }) + '\n');
+        } catch {
+          // Logging must never change the transaction's success or stall reads.
+        }
+      }
+      return snapshot;
     });
   }
 
