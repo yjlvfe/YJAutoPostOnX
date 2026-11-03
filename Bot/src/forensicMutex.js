@@ -64,15 +64,31 @@ async function withForensicMutex(logFile, fn, { timeoutMs = LOCK_WAIT_MS } = {})
   let held = false;
   let transaction = false;
   try {
-    db.exec('PRAGMA busy_timeout = 300; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
-    db.exec(`CREATE TABLE IF NOT EXISTS forensic_mutex (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      owner_pid INTEGER NOT NULL,
-      owner_start TEXT NOT NULL,
-      owner_token TEXT NOT NULL
-    );`);
-
+    // Schema creation itself can race between independently starting workers.
+    // Retry BUSY at initialization as well as during ownership acquisition.
     const deadline = Date.now() + timeoutMs;
+    let initialized = false;
+    while (!initialized && Date.now() < deadline) {
+      try {
+        db.exec('PRAGMA busy_timeout = 300; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
+        db.exec(`CREATE TABLE IF NOT EXISTS forensic_mutex (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          owner_pid INTEGER NOT NULL,
+          owner_start TEXT NOT NULL,
+          owner_token TEXT NOT NULL
+        );`);
+        initialized = true;
+      } catch (err) {
+        if (!retryableBusy(err)) throw err;
+        await wait(20 + Math.floor(Math.random() * 30));
+      }
+    }
+    if (!initialized) {
+      throw Object.assign(new Error('FORENSIC_LOG_LOCK_TIMEOUT: could not initialize shared mutex.'), {
+        code: 'FORENSIC_LOG_LOCK_TIMEOUT'
+      });
+    }
+
     while (!held && Date.now() < deadline) {
       try {
         db.exec('BEGIN IMMEDIATE;');
