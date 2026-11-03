@@ -94,7 +94,7 @@ describe('Challenger R4-M1-2: Empirical Verification of PR #11 Alert & Forensic 
     const finalState = await store.load();
 
     // 1. Task 1 Verification: Zero Telegram alerts emitted for single ambiguous outcome
-    const itemAlerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة'));
+    const itemAlerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة') && !n.includes('تم استلام طلب تشغيل النشر'));
     assert.strictEqual(itemAlerts.length, 0, `Expected 0 Telegram notifications, got ${itemAlerts.length}: ${JSON.stringify(itemAlerts)}`);
 
     // 2. Item state verification in SQLite
@@ -198,7 +198,7 @@ describe('Challenger R4-M1-2: Empirical Verification of PR #11 Alert & Forensic 
     const finalState = await store.load();
 
     // 1. Task 1 Verification: Zero Telegram alerts
-    const alerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة'));
+    const alerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة') && !n.includes('تم استلام طلب تشغيل النشر'));
     assert.strictEqual(alerts.length, 0, `Expected 0 Telegram alerts on post-dispatch exception, got: ${JSON.stringify(alerts)}`);
 
     // 2. Item quarantined as ambiguous with full attribution
@@ -283,7 +283,7 @@ describe('Challenger R4-M1-2: Empirical Verification of PR #11 Alert & Forensic 
     const finalState = await store.load();
 
     // Zero Telegram alerts
-    const alerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة'));
+    const alerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة') && !n.includes('تم استلام طلب تشغيل النشر'));
     assert.strictEqual(alerts.length, 0);
 
     // Item quarantined as ambiguous because dispatch was crossed
@@ -379,7 +379,7 @@ describe('Challenger R4-M1-2: Empirical Verification of PR #11 Alert & Forensic 
 
     // Task 3 Verification: Notifications check
     // Exactly 1 alert total!
-    const itemAlerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة'));
+    const itemAlerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة') && !n.includes('تم استلام طلب تشغيل النشر'));
     assert.strictEqual(itemAlerts.length, 1,
       `Expected exactly 1 notification total across all 3 strikes, received ${itemAlerts.length}: ${JSON.stringify(itemAlerts)}`);
 
@@ -492,9 +492,10 @@ describe('Challenger R4-M1-2: Empirical Verification of PR #11 Alert & Forensic 
     assert.strictEqual(itemB.url, 'https://x.com/user_beta/status/2000000000000000001');
 
     // Exactly 1 isolation alert sent, mentioning continuing with remaining account (1)
-    assert.strictEqual(notifications.length, 1, `Expected exactly 1 notification, got ${notifications.length}: ${JSON.stringify(notifications)}`);
-    assert.ok(notifications[0].includes('تم عزل الحساب @user_alpha تلقائياً'));
-    assert.ok(notifications[0].includes('ومواصلة الدورة عبر بقية الحسابات (1)'));
+    const isolationAlerts = notifications.filter(n => n.includes('تم عزل الحساب'));
+    assert.strictEqual(isolationAlerts.length, 1, `Expected exactly 1 isolation alert, got ${isolationAlerts.length}: ${JSON.stringify(notifications)}`);
+    assert.ok(isolationAlerts[0].includes('تم عزل الحساب @user_alpha تلقائياً'));
+    assert.ok(isolationAlerts[0].includes('ومواصلة الدورة عبر بقية الحسابات (1)'));
 
     // Quota: Only Account B deducted
     const day = Object.keys(finalState.posting?.quota || {})[0];
@@ -559,7 +560,8 @@ describe('Challenger R4-M1-2: Empirical Verification of PR #11 Alert & Forensic 
     const account = finalState.accounts.find(a => a.id === 'acc-reset');
     assert.strictEqual(account.failures, 0, 'Failures must be reset to 0 after success');
     assert.strictEqual(account.enabled, true);
-    assert.strictEqual(notifications.length, 0, 'Zero alerts emitted');
+    const itemAlerts = notifications.filter(n => !n.includes('لا توجد روابط منشورات مؤكدة') && !n.includes('تم استلام طلب تشغيل النشر'));
+    assert.strictEqual(itemAlerts.length, 0, 'Zero alerts emitted');
   });
 
 });

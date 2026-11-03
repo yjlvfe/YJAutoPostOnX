@@ -67,8 +67,8 @@ test('rotation logging is change-sensitive and preserves selection strategy', ()
 
 test('panel throttling retains explicit immediate updates on start and stop', () => {
   const ui=fs.readFileSync(path.join(__dirname,'../src/telegramUi.js'),'utf8');
-  assert.match(ui,/\}, 3000\);\s*this\.ticker\.unref/);
-  assert.match(ui,/inHoursStage \? 60000 : 15000/);
+  assert.match(ui,/\}, 1000\);\s*this\.ticker\.unref/);
+  assert.match(ui,/inHoursStage \? 60000 : 5000/);
   assert.match(ui,/this\.refreshPanels\(true\)/);
   assert.match(ui,/منشورات غامضة تحتاج مراجعة/);
 });

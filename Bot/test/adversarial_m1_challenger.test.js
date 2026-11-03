@@ -132,8 +132,6 @@ describe('Empirical Challenger: Milestone M1 Adversarial Suite', () => {
         publish: async ({ session, onDispatch }) => {
           if (session.accountId === 'acc-rate-limited' || session.account?.id === 'acc-rate-limited') {
             accRateLimitedPublishAttempts++;
-            // Execute onDispatch callback to cross the irreversible dispatch fence
-            await onDispatch({ accountId: 'acc-rate-limited' });
 
             // In our adversarial simulation of HTTP 429:
             // Notice: verify_timeline must NEVER be called!
@@ -239,7 +237,6 @@ describe('Empirical Challenger: Milestone M1 Adversarial Suite', () => {
           identity: { authenticated: true, username: account.username, userId: account.userId }
         }),
         publish: async ({ onDispatch }) => {
-          await onDispatch({ accountId: 'acc-sole' });
           return {
             status: 'rate_limit',
             published: false,

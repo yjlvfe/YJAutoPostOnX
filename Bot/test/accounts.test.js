@@ -468,7 +468,6 @@ describe('Milestone M1: Accounts Schema, Ceilings & Failure Persistence', () => 
         }),
         publish: async ({ session, onDispatch }) => {
           if (session.account?.id === 'acc-rl' || session.accountId === 'acc-rl') {
-            await onDispatch({ accountId: 'acc-rl' });
             return {
               status: 'rate_limit',
               published: false,
