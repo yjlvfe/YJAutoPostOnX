@@ -1,4 +1,6 @@
 'use strict';
+const { DatabaseSync } = require('node:sqlite');
+const { withForensicMutex, mutexDbPath } = require('../src/forensicMutex');
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -263,64 +265,36 @@ describe('M14 Round 3: Comprehensive Review Blocker Regression Tests', () => {
   /* -------------------------------------------------------------------------- */
 
   describe('P1-3: Outbox Lock Ownership, No Stealing & Crash Recovery', () => {
-    it('1. lock is NOT stolen when held by active process even past 30 seconds', async () => {
+    it('1. SQLite mutex is not stolen from a live holder even if the operation is slow', async () => {
       const logger1 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
-      const logger2 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
-
-      const lockFile = `${logPath}.lock`;
-      const dir = path.dirname(lockFile);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-
-      // Create a lockfile held by CURRENT live process with timestamp 35 seconds ago
-      const lockPayload = JSON.stringify({
-        pid: process.pid,
-        token: `owner_${process.pid}_slow`,
-        acquiredAt: Date.now() - 35000
+      let entered = false;
+      await logger1._withLogLock(async () => {
+        const db = new DatabaseSync(mutexDbPath(logPath));
+        const owner = db.prepare('SELECT owner_pid FROM forensic_mutex WHERE id=1').get();
+        assert.strictEqual(owner.owner_pid, process.pid);
+        db.close();
+        await assert.rejects(
+          withForensicMutex(logPath, async () => { entered = true; }, { timeoutMs: 150 }),
+          err => err.code === 'FORENSIC_LOG_LOCK_TIMEOUT'
+        );
       });
-      await fsp.writeFile(lockFile, lockPayload, { mode: 0o600 });
-
-      // Competing flusher must NOT steal or delete the lock because process.pid is still ALIVE!
-      await assert.rejects(
-        async () => {
-          // Use short timeout test via custom logger with 200ms wait
-          const start = Date.now();
-          await logger2._withLogLock(async () => {});
-        },
-        err => {
-          assert.strictEqual(err.code, 'FORENSIC_LOG_LOCK_TIMEOUT');
-          return true;
-        }
-      );
-
-      // Verify the original lockfile was NOT deleted by logger2!
-      assert.ok(fs.existsSync(lockFile), 'Active lock must not be deleted by competing writer');
-      const curContent = await fsp.readFile(lockFile, 'utf8');
-      assert.strictEqual(JSON.parse(curContent).token, `owner_${process.pid}_slow`);
-      await fsp.unlink(lockFile);
+      assert.strictEqual(entered, false, 'The competing writer must never enter a live critical section');
     });
 
-    it('2. orphaned lock held by dead process (ESRCH) is safely reclaimed', async () => {
+    it('2. SQLite mutex reclaims orphaned ownership only when process death is proven', async () => {
       const logger = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
-      const lockFile = `${logPath}.lock`;
-      const dir = path.dirname(lockFile);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      await logger._withLogLock(async () => {}); // initialize schema
+      const db = new DatabaseSync(mutexDbPath(logPath));
+      db.prepare('INSERT INTO forensic_mutex (id, owner_pid, owner_start, owner_token) VALUES (1, ?, ?, ?)')
+        .run(99999999, '0', 'dead_token');
+      db.close();
 
-      // Use a confirmed non-existent PID (e.g. 99999999)
-      const deadPid = 99999999;
-      const deadLockPayload = JSON.stringify({
-        pid: deadPid,
-        token: 'dead_token_123',
-        acquiredAt: Date.now() - 1000
-      });
-      await fsp.writeFile(lockFile, deadLockPayload, { mode: 0o600 });
-
-      // Competing flusher detects dead PID (ESRCH) and reclaims lock cleanly
       let executed = false;
-      await logger._withLogLock(async () => {
-        executed = true;
-      });
-
-      assert.strictEqual(executed, true, 'Must reclaim orphaned lock from dead PID');
+      await logger._withLogLock(async () => { executed = true; });
+      assert.strictEqual(executed, true, 'Dead PID lease must be reclaimed safely');
+      const check = new DatabaseSync(mutexDbPath(logPath));
+      assert.strictEqual(check.prepare('SELECT COUNT(*) AS n FROM forensic_mutex').get().n, 0);
+      check.close();
     });
 
     it('3. flushPendingForensicOutbox uses the exact same lock serialization as ForensicLogger', async () => {
