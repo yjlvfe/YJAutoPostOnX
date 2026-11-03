@@ -1010,17 +1010,25 @@ class DirectSession:
             # Dispatch crossed the fence — the tweet MAY have posted but the
             # response was lost (timeout/network glitch). Before marking
             # ambiguous, verify by reading the user's recent timeline.
-            x_error_code = getattr(exc, 'code', None) or getattr(exc, 'error_code', None)
+            x_error_code = getattr(exc, 'code', None)
+            if x_error_code is None:
+                x_error_code = getattr(exc, 'error_code', None)
+            x_response_kind = getattr(exc, 'x_response_kind', None)
+            x_message = getattr(exc, 'x_error_message', None)
+            x_http_status = getattr(exc, 'http_status', None)
             account_failure = getattr(exc, 'account_failure', None) or classify_x_account_failure(raw_json=getattr(exc, 'raw_json', None), text=str(exc))
 
             timeline_res = None
+            verification_error = None
             try:
                 if hasattr(self, 'verify_timeline_has_post') and callable(self.verify_timeline_has_post):
                     timeline_res = await self.verify_timeline_has_post(text, identity)
                 else:
                     timeline_res = await self.verify_timeline(text, identity)
-            except Exception:
-                pass
+            except Exception as verification_exc:
+                # A failed verification read is distinct from the original X
+                # CreateTweet response; both diagnostics must survive the bridge.
+                verification_error = str(verification_exc)[:512]
 
             if (isinstance(timeline_res, dict)
                     and timeline_res.get('found') is True
@@ -1078,8 +1086,15 @@ class DirectSession:
             result = uncertain('publish_confirmation_missing')
             if account_failure in KNOWN_ACCOUNT_FAILURES:
                 result['accountFailure'] = account_failure
-            if x_error_code:
+            if x_error_code is not None:
                 result['xErrorCode'] = x_error_code
+            result['xResponseKind'] = x_response_kind or 'unclassified_exception'
+            result['httpStatus'] = x_http_status if isinstance(x_http_status, int) else None
+            result['xErrorMessage'] = x_message[:512] if isinstance(x_message, str) else None
+            result['verificationError'] = verification_error or (
+                str(timeline_res.get('fetchError'))[:512]
+                if isinstance(timeline_res, dict) and timeline_res.get('fetchError') else None
+            )
             result['rawError'] = str(exc)[:2048]
             return result
 
