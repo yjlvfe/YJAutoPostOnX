@@ -874,10 +874,21 @@ class TelegramUi {
   }
   async begin(source, id, suppliedToken, { maxItems, stopAfterSuccess = false } = {}) {
     this.startTicker();
-    const before = await this.bot.store.load(); const ready = await this.readiness(before);
+    const beginStartedAt = Date.now();
+    const before = await this.bot.store.load();
+    const dbLoadedAt = Date.now();
+    const ready = await this.readiness(before);
+    logStructured(this.bot?.logger, {
+      level: 'info', component: 'telegram_ui', event: 'cycle_start_readiness_checked',
+      operation: 'begin.readiness', result: ready.reasons.length ? 'blocked' : 'eligible',
+      durationMs: Date.now() - dbLoadedAt,
+      details: { source, initialStoreLoadMs: dbLoadedAt - beginStartedAt,
+        eligibleAccounts: ready.ids?.length || 0, reasonCount: ready.reasons.length }
+    });
     if (ready.quota?.exhausted) return this.rejectQuota(ready.quota, id);
     if (ready.reasons.length) { if (id) await this.bot.transport.sendMessage(id.chat, `لا يمكن بدء الدورة: ${ready.reasons.join('، ')}`); return { started: false, reasons: ready.reasons }; }
     let started = false; let snapshot; let blockedQuota; const runId = token();
+    const persistenceStartedAt = Date.now();
     await this.bot.store.update(s => {
       if (['running', 'stopping'].includes(s.cycle?.state) || this.job || s.linkExportLease || s.telegramUi?.pendingReport || (s.linkOutbox || []).some(entry => entry.status === 'sending')) return s;
       if (id) {
@@ -917,6 +928,13 @@ class TelegramUi {
       for (const u of Object.values(s.telegramUi.users || {})) if (u.panel && !s.telegramUi.dashboards[String(u.chatId)]) u.panel.token = token();
       snapshot = structuredClone(s.telegramUi.run); started = true; return s;
     });
+    logStructured(this.bot?.logger, {
+      level: 'info', component: 'telegram_ui', event: 'cycle_start_state_transition',
+      runId: started ? runId : null, operation: 'begin.persist',
+      result: started ? 'accepted' : 'rejected',
+      durationMs: Date.now() - persistenceStartedAt,
+      details: { source }
+    });
     if (blockedQuota) return this.rejectQuota(blockedQuota, id);
     if (!started) return { started: false, reasons: ['الدورة جارية أو الزر قديم أو تغيرت البيانات'] };
     this.resetQueueStall();
@@ -941,7 +959,15 @@ class TelegramUi {
       });
     }).catch(err => this._logError('cycle_start_notify_failed', 'begin', err, { runId, source }));
     this.onPanelTask?.(notification);
-    await this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_after_begin_failed', 'begin', err)); return { started: true, runId };
+    const panelStartedAt = Date.now();
+    await this.refreshPanels(true).catch(err => this._logWarn('panel_refresh_after_begin_failed', 'begin', err));
+    logStructured(this.bot?.logger, {
+      level: 'info', component: 'telegram_ui', event: 'cycle_start_panel_refresh_timing',
+      runId, operation: 'begin.refreshPanels', result: 'settled',
+      durationMs: Date.now() - panelStartedAt,
+      details: { source }
+    });
+    return { started: true, runId };
   }
   attach(snapshot) {
     if (this.job) return false;
