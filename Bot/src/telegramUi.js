@@ -79,7 +79,7 @@ const eligible = account => account.enabled !== false && typeof account.username
 const validSettings = settings => Number.isSafeInteger(settings.delayMs) && settings.delayMs >= 0 && (settings.dailyQuota == null || (Number.isSafeInteger(settings.dailyQuota) && settings.dailyQuota > 0));
 
 class TelegramUi {
-  constructor({ bot, runtimeReady = async () => ({ ready: false, reasons: ['مكونات النشر الفعلي غير جاهزة'] }), launch, clock = () => new Date(), inlineStyles = true, downloadDocument, isolatedVerifier, onCycleFinished, onCycleStop, onPanelTask, notify, accountRefreshRetryMs = 2000 }) {
+  constructor({ bot, runtimeReady = async () => ({ ready: false, reasons: ['مكونات النشر الفعلي غير جاهزة'] }), launch, clock = () => new Date(), inlineStyles = true, downloadDocument, isolatedVerifier, onCycleFinished, onCycleStop, onPanelTask, notify, accountRefreshRetryMs = 2000, autoStartTicker = true }) {
     this.bot = bot; this.runtimeReady = runtimeReady; this.launch = launch; this.clock = clock; this.inlineStyles = inlineStyles;
     this.isolatedVerifier = isolatedVerifier;
     this.accountRefreshJob = null; this.accountRefreshRetryMs = accountRefreshRetryMs; this.destroyed = false;
@@ -87,8 +87,8 @@ class TelegramUi {
     this.onPanelTask = typeof onPanelTask === 'function' ? onPanelTask : null;
     this.stallAlertSent = false;
     this.rawNotify = notify;
-    this.notify = async (text) => {
-      if (!this.rawNotify) return;
+    this.notify = async (text, options) => {
+      if (!this.rawNotify) return null;
       if (typeof text === 'string') {
         if (text.includes('جميع الحسابات غير مؤهلة أو في فترة انتظار')) {
           if (this.stallAlertSent) {
@@ -100,7 +100,7 @@ class TelegramUi {
               result: 'suppressed',
               suppressionReason: 'stall_alert_already_sent'
             });
-            return;
+            return null;
           }
           this.stallAlertSent = true;
         }
@@ -113,7 +113,7 @@ class TelegramUi {
             result: 'suppressed',
             suppressionReason: 'transient_strike_suppressed'
           });
-          return;
+          return null;
         }
         if (text.includes('تم عزل الحساب') && !text.includes('(السبب:')) {
           text = text
@@ -123,11 +123,11 @@ class TelegramUi {
             .replace(/\(جلسة مرفوضة\)/g, `(السبب: ${ISOLATION_REASONS.COOKIE_REJECTED})`);
         }
       }
-      return this.rawNotify(text);
+      return this.rawNotify(text, options);
     };
     this.onCycleFinished = onCycleFinished; this.onCycleStop = onCycleStop; this.job = null; this.activeRun = null; this.panelLocks = new Map(); this.actionLocks = new Map(); this.refreshTask = null;
     this.flows = new TelegramFlows(this, { downloadDocument, isolatedVerifier });
-    this.startTicker();
+    if (autoStartTicker) this.startTicker();
   }
   _logWarn(event, operation, err, extra = {}) {
     logStructured(this.bot?.logger, {
@@ -154,9 +154,14 @@ class TelegramUi {
     });
   }
   startTicker() {
-    if (this.ticker) return;
+    if (this.ticker || this.destroyed) return;
     this.ticker = setInterval(() => {
+      if (this.destroyed) {
+        if (this.ticker) { clearInterval(this.ticker); this.ticker = null; }
+        return;
+      }
       this.refreshPanels().catch(error => {
+        if (this.destroyed || /store is closed/i.test(error?.message || '')) return;
         logStructured(this.bot?.logger, {
           level: 'error',
           component: 'telegram_ui',
@@ -880,7 +885,10 @@ class TelegramUi {
         } else if (failure === 'auth_session_unverified' || (!result.authenticated && !failure)) {
           // Unverified session / cause uncertain: DO NOT default to 'محظور'!
           // Only preserve existing 'محظور' if it was already marked as such by an authoritative check.
-          if (account.status !== 'محظور') {
+          // ALSO preserve existing pending owner CAPTCHA workflow! A periodic unverified check
+          // must never overwrite pending challenge status, incident metadata, or checkGeneration.
+          const isPendingCaptcha = Boolean(account.needsOwnerCaptcha) || isCaptchaStatus(account.status);
+          if (account.status !== 'محظور' && !isPendingCaptcha) {
             account.enabled = false;
             account.status = 'غير محقق (جلسة غير مؤكدة)';
             account.checkGeneration = crypto.randomUUID();
@@ -1780,18 +1788,34 @@ class TelegramUi {
     }
 
     let incidentId = null;
+    const configuredChats = Array.from(this.bot?.auth?.chats || []).map(String);
+    let prevDelivered = new Set();
+    let pendingChats = configuredChats.length > 0 ? [...configuredChats] : null;
+
     if (diagnosticReason === ISOLATION_REASONS.CAPTCHA) {
       incidentId = account.captchaIncidentId || `${account.id || username}_${account.captchaDetectedAt || 'current'}`;
       this.notifiedCaptchaIncidents ||= new Set();
       this.inFlightAlerts ||= new Set();
 
-      // Suppress if already successfully notified or currently in-flight
+      // Suppress if already successfully notified to all chats or currently in-flight
       if (this.notifiedCaptchaIncidents.has(incidentId) || account.lastNotifiedCaptchaIncidentId === incidentId) {
         return null;
       }
       if (this.inFlightAlerts.has(incidentId)) {
         return null;
       }
+
+      if (account.captchaIncidentId === incidentId && Array.isArray(account.captchaDeliveredChats)) {
+        prevDelivered = new Set(account.captchaDeliveredChats.map(String));
+      }
+      if (configuredChats.length > 0) {
+        pendingChats = configuredChats.filter(c => !prevDelivered.has(c));
+        if (pendingChats.length === 0) {
+          this.notifiedCaptchaIncidents.add(incidentId);
+          return null;
+        }
+      }
+
       this.inFlightAlerts.add(incidentId);
     }
 
@@ -1801,7 +1825,7 @@ class TelegramUi {
 
     try {
       if (this.notify) {
-        notifyResult = await this.notify(message);
+        notifyResult = await this.notify(message, pendingChats ? { targetChatIds: pendingChats } : undefined);
       }
     } catch (err) {
       notifyError = err;
@@ -1816,35 +1840,58 @@ class TelegramUi {
     }
 
     // Verify actual delivery success before marking state delivered!
-    let deliveryConfirmed = false;
+    // Require verified Telegram Bot API response with ok:true and valid message_id per chat.
+    const confirmedChatIds = [];
     if (Array.isArray(notifyResult)) {
-      // allSettled results from runner.js: must have at least one fulfilled delivery
-      deliveryConfirmed = notifyResult.some(r => r.status === 'fulfilled' && (r.value?.ok === true || r.value?.message_id != null));
+      for (let i = 0; i < notifyResult.length; i++) {
+        const item = notifyResult[i];
+        if (item && item.status === 'fulfilled') {
+          const val = item.value;
+          const hasReceipt = val && typeof val === 'object' && (val.ok === true || val.message_id != null || val.result?.message_id != null);
+          const messageId = val?.message_id ?? val?.result?.message_id;
+          if (hasReceipt && (typeof messageId === 'number' || typeof messageId === 'string')) {
+            const chatId = String(val.chat_id || val.result?.chat?.id || item.chat_id || (pendingChats && pendingChats[i]) || `chat_${i}`);
+            confirmedChatIds.push(chatId);
+          }
+        }
+      }
     } else if (notifyResult && typeof notifyResult === 'object') {
-      deliveryConfirmed = notifyResult.ok === true || notifyResult.message_id != null;
-    } else if (notifyResult === undefined || notifyResult === null) {
-      deliveryConfirmed = Boolean(this.notify);
-    } else {
-      deliveryConfirmed = Boolean(notifyResult);
+      const hasReceipt = (notifyResult.ok === true || notifyResult.message_id != null || notifyResult.result?.message_id != null);
+      const messageId = notifyResult.message_id ?? notifyResult.result?.message_id;
+      if (hasReceipt && (typeof messageId === 'number' || typeof messageId === 'string')) {
+        const chatId = String(notifyResult.chat_id || notifyResult.result?.chat?.id || (pendingChats && pendingChats[0]) || 'default');
+        confirmedChatIds.push(chatId);
+      }
     }
 
-    if (!deliveryConfirmed) {
+    if (confirmedChatIds.length === 0) {
       return null; // Delivery was not acknowledged by Telegram API; do not mark as sent to allow retry
     }
 
     if (diagnosticReason === ISOLATION_REASONS.CAPTCHA && incidentId) {
-      this.notifiedCaptchaIncidents.add(incidentId);
+      const newDelivered = Array.from(new Set([...prevDelivered, ...confirmedChatIds]));
+      const allComplete = configuredChats.length > 0
+        ? configuredChats.every(c => newDelivered.includes(c))
+        : true;
+
       if (this.bot?.store?.update) {
         try {
           await this.bot.store.update(s => {
             const a = (s.accounts || []).find(acc => acc.id === account.id);
             if (a) {
-              a.lastNotifiedCaptchaIncidentId = incidentId;
+              a.captchaDeliveredChats = newDelivered;
               a.lastCaptchaAlertAt = Date.now();
+              if (allComplete) {
+                a.lastNotifiedCaptchaIncidentId = incidentId;
+              }
             }
             return s;
           });
         } catch {}
+      }
+
+      if (allComplete) {
+        this.notifiedCaptchaIncidents.add(incidentId);
       }
     }
 

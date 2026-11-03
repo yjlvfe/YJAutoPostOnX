@@ -1088,3 +1088,26 @@ Following previous test passes (369/369), production stability encountered post-
 - **Verification Results**:
   - Python tests: **207/207 PASS** (100%).
   - Node.js tests: **445/445 PASS** across 146 test suites (100%). Total: 652 passing tests. All 53 tasks preserved with all approvals strictly PENDING.
+
+### PR #27 Review Round 4 Fixes — Live CAPTCHA Routing, Per-Chat Verified Receipts & Atomic Orphan Lock Fencing (2026-11-03)
+
+- **Fix P0-A — Live CAPTCHA Routing via Durable Alert Gate**:
+  - Wired `handleAccountFailure()` in `Bot/src/runner.js` to route live publisher CAPTCHA isolations directly through `TelegramUi.prototype.sendIsolationAlert()`.
+  - Propagated freshly generated `captchaIncidentId` to in-memory account reference for immediate binding.
+  - Formatted human-only CAPTCHA instructions (`حل التحقق من X بنفسك عبر الموقع/التطبيق الرسمي`); halts without live X POST.
+- **Fix P0-B — Verified Telegram Delivery Receipts & Per-Chat State Tracking**:
+  - Completely eliminated `deliveryConfirmed = Boolean(this.notify)` in `Bot/src/telegramUi.js`.
+  - Strictly required valid Telegram Bot API receipt (`ok === true` and valid `message_id`) per intended chat.
+  - Implemented per-chat delivery accounting via `account.captchaDeliveredChats` in SQLite: dual-admin setup tracks each chat separately and retries ONLY pending chats without duplicating confirmed alerts.
+- **Fix P0-C — Unverified Session Check Preservation of Pending Challenge State**:
+  - Hardened `recordAccountCheck()` in `Bot/src/telegramUi.js` to preserve `needsOwnerCaptcha`, CAPTCHA status, and `checkGeneration` during routine unverified/unknown session checks (`auth_session_unverified`).
+  - Proved that subsequent owner verification CAS (`accmanage:verify_captcha`) cleanly succeeds and leaves account disabled pending explicit manual owner enable.
+- **Fix P1-D — Atomic Inode/Token-Fenced Orphan Lock Recovery**:
+  - Replaced path-level unlink with atomic POSIX rename in `ForensicLogger._withLogLock()`.
+  - Competing reclaimers can never delete an active holder's lock; non-winning contenders receive `ENOENT` and continue backoff.
+- **Fix P1-E — Test Hygiene & Complete Suite Verification**:
+  - Eliminated test ticker leaks in `telegramUi.js` by adding `autoStartTicker` option and gracefully handling destroyed stores.
+  - Ran complete 450/450 Node.js suite and 207/207 Python suite with zero failures.
+- **Verification Results**:
+  - Python tests: **207/207 PASS** (100%).
+  - Node.js tests: **450/450 PASS** across 150 test suites (100%). Total: 657 passing tests. All 53 tasks preserved with all approvals strictly PENDING.

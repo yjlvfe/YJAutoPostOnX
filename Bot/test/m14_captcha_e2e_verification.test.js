@@ -298,7 +298,11 @@ describe('M14: CAPTCHA State Machine & Human Verification E2E Tests', () => {
     const notifications = [];
     const ui = new TelegramUi({
       bot: { store, transport: {} },
-      notify: async msg => notifications.push(msg)
+      autoStartTicker: false,
+      notify: async msg => {
+        notifications.push(msg);
+        return { ok: true, message_id: 100 + notifications.length };
+      }
     });
 
     const acc = {

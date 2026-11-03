@@ -351,8 +351,26 @@ class ForensicLogger {
                 else if (killErr.code === 'EPERM') isAlive = true;
               }
               if (!isAlive) {
-                // Holder is confirmed dead (ESRCH)! Safe to reclaim orphaned lock
-                await fsp.unlink(lockFile).catch(() => {});
+                // Holder is confirmed dead (ESRCH)!
+                // Safely reclaim orphaned lock without stale-unlink races:
+                // Use atomic rename to claim the specific orphan file.
+                // If two contenders attempt this concurrently, only ONE can succeed.
+                // Contender B will fail with ENOENT and will NOT delete a new holder's lock!
+                const reclaimFile = `${lockFile}.reclaim.${process.pid}.${crypto.randomUUID()}`;
+                try {
+                  await fsp.rename(lockFile, reclaimFile);
+                  const reclaimedRaw = await fsp.readFile(reclaimFile, 'utf8').catch(() => null);
+                  const reclaimedInfo = reclaimedRaw ? JSON.parse(reclaimedRaw) : null;
+                  if (reclaimedInfo && reclaimedInfo.token === lockInfo.token) {
+                    await fsp.unlink(reclaimFile).catch(() => {});
+                  } else {
+                    // Token changed before rename; file was replaced by a new holder!
+                    // Restore it immediately!
+                    await fsp.rename(reclaimFile, lockFile).catch(() => {});
+                  }
+                } catch {
+                  // Rename failed (e.g. ENOENT): another contender already reclaimed or acquired it.
+                }
               }
               // If holder is alive, NEVER revoke or unlink, even if elapsed time > 30s!
             }
