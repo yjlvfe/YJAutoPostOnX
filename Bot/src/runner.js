@@ -569,16 +569,28 @@ async function run({
               acc.enabled = false;
               acc.status = failure === 'captcha' ? 'كابتشا' : 'محظور';
               if (failure === 'captcha') {
+                // A new incident must never inherit delivery receipts from the previous CAPTCHA.
+                // Repeated reports of the same unresolved challenge retain the same incident ID.
+                const isNewIncident = !acc.needsOwnerCaptcha || !acc.captchaIncidentId;
                 acc.needsOwnerCaptcha = true;
-                acc.captchaDetectedAt = Date.now();
+                if (isNewIncident) {
+                  acc.captchaDetectedAt = Date.now();
+                  acc.captchaIncidentId = crypto.randomUUID();
+                  acc.captchaDeliveredChats = [];
+                  acc.captchaDeliveredIncidentId = acc.captchaIncidentId;
+                  delete acc.lastNotifiedCaptchaIncidentId;
+                  delete acc.lastCaptchaAlertAt;
+                }
                 acc.captchaCode = xErrorCode || 326;
                 acc.captchaReason = rejectionReason || reason || 'security_challenge_detected';
-                acc.captchaIncidentId = crypto.randomUUID();
                 account.needsOwnerCaptcha = acc.needsOwnerCaptcha;
                 account.captchaDetectedAt = acc.captchaDetectedAt;
                 account.captchaCode = acc.captchaCode;
                 account.captchaReason = acc.captchaReason;
                 account.captchaIncidentId = acc.captchaIncidentId;
+                account.captchaDeliveredChats = [...(acc.captchaDeliveredChats || [])];
+                account.captchaDeliveredIncidentId = acc.captchaDeliveredIncidentId;
+                account.lastNotifiedCaptchaIncidentId = acc.lastNotifiedCaptchaIncidentId;
               }
               acc.checkGeneration = crypto.randomUUID();
               account.checkGeneration = acc.checkGeneration;
@@ -593,9 +605,16 @@ async function run({
               }
             } else if (failure === 'auth_session_unverified') {
               acc.enabled = false;
-              acc.status = 'غير محقق (جلسة غير مؤكدة)';
               acc.unverifiedReason = reason || 'auth_session_unverified';
-              acc.checkGeneration = crypto.randomUUID();
+              // Unverified authentication is not evidence that a pending CAPTCHA was solved.
+              // Keep the owner-only gate intact, including its generation and incident ID.
+              if (acc.needsOwnerCaptcha) {
+                account.needsOwnerCaptcha = true;
+                account.captchaIncidentId = acc.captchaIncidentId;
+              } else {
+                acc.status = 'غير محقق (جلسة غير مؤكدة)';
+                acc.checkGeneration = crypto.randomUUID();
+              }
               accountResult.isolated = true;
               accountResult.status = acc.status;
             } else if (isKnownParserError || isContentReject) {
