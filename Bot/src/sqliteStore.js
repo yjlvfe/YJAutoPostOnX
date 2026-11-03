@@ -48,9 +48,27 @@ function isTestEnvironment() {
   );
 }
 
+function isTargetingProd(filePath) {
+  if (!filePath) return false;
+  const prodCanonical = getCanonicalProdDbPath();
+  try {
+    const resolved = path.resolve(filePath);
+    if (resolved === prodCanonical) return true;
+    if (fs.existsSync(resolved)) {
+      if (fs.realpathSync(resolved) === prodCanonical) return true;
+    }
+    const dir = path.dirname(resolved);
+    if (fs.existsSync(dir)) {
+      const canonicalKey = path.join(fs.realpathSync(dir), path.basename(resolved));
+      if (canonicalKey === prodCanonical) return true;
+    }
+  } catch {}
+  return false;
+}
+
 function assertMutationAllowed(key) {
-  if (isTestEnvironment() && !process.env.ALLOW_PROD_DB_WRITE_IN_TEST) {
-    if (key === getCanonicalProdDbPath()) {
+  if (isTestEnvironment()) {
+    if (isTargetingProd(key)) {
       const err = new Error('PROD_DB_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating the production database (state.sqlite). Use an isolated temporary database in a temporary test directory.');
       err.code = 'PROD_DB_MUTATION_FORBIDDEN_IN_TEST';
       throw err;
@@ -81,9 +99,11 @@ class SqliteStore {
     this.lastSlowReadLog = 0;
     // Resolve aliases of the parent directory so different instances share a queue.
     const directory = path.dirname(this.file);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    fs.chmodSync(directory, 0o700);
-    this.key = path.join(fs.realpathSync(directory), path.basename(this.file));
+    if (!isTestEnvironment() || !isTargetingProd(this.file)) {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      fs.chmodSync(directory, 0o700);
+    }
+    this.key = path.join(fs.existsSync(directory) ? fs.realpathSync(directory) : directory, path.basename(this.file));
   }
 
   _open() {

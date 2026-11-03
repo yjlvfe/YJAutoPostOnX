@@ -529,11 +529,12 @@ async function run({
         retryAfterSeconds,
         rawError,
         xErrorCode,
-        xResponseKind
+        xResponseKind,
+        rejectionReason
       }) => {
         const isPermanent = ['banned', 'captcha'].includes(failure);
         const isKnownParserError = isKnownTwikitParserFailure({ failure, rawError });
-        const isContentReject = isXContentRejection({ failure, xErrorCode, xResponseKind });
+        const isContentReject = isXContentRejection({ failure, xErrorCode, xResponseKind, rejectionReason });
         const isRateLimit = failure === 'rate_limit' || Boolean(retryAfterSeconds) || reason === 'rate_limit';
         const isTransportOrVpn = failure === 'network_proxy_error' ||
           /network_proxy_error/i.test(String(failure || '')) ||
@@ -1027,7 +1028,8 @@ async function run({
               reason: result.reason || 'publish_confirmation_missing',
               rawError: result.rawError,
               xErrorCode: result.xErrorCode,
-              xResponseKind: result.xResponseKind
+              xResponseKind: result.xResponseKind,
+              rejectionReason: result.rejectionReason
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;

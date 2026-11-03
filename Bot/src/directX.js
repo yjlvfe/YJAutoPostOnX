@@ -4,6 +4,7 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { acquireSession } = require('./sessionGuard');
 
 const activeProcesses = new Set();
 function cleanupActiveProcesses() {
@@ -78,16 +79,27 @@ class DirectXAdapter {
       throw Object.assign(new Error('Configured account identity is invalid'), { code: 'DIRECT_X_AUTH_IDENTITY_INVALID' });
     }
     if (signal?.aborted) throw Object.assign(new Error('Open cancelled'), { code: 'DIRECT_X_STOPPED' });
+    const lease = acquireSession({ accountId: selected.id });
     const session = { accountId: String(selected.id), identity: null, closed: false, state: 'opening' };
-    // Env is intentionally allowlisted: proxy and Python import injection variables
-    // from the parent must not affect the isolated interpreter or transport.
-    const child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
-      stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
-    });
+    let child;
+    try {
+      // Env is intentionally allowlisted: proxy and Python import injection variables
+      // from the parent must not affect the isolated interpreter or transport.
+      child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
+        stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
+      });
+      lease.pid = child.pid;
+    } catch (spawnError) {
+      lease.release();
+      throw spawnError;
+    }
     activeProcesses.add(child);
-    child.once('exit', () => activeProcesses.delete(child));
+    child.once('exit', () => {
+      activeProcesses.delete(child);
+      lease.release();
+    });
     const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', () => { if (!child.pid) resolve(); }); });
-    const state = { child, exited, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null };
+    const state = { child, exited, buffer: '', pending: null, dead: false, used: false, busy: false, identity: null, lease };
     this.sessions.set(session, state);
     child.stderr.on('data', () => {}); // Never forward Python traces / HTTP bodies.
     child.stdin.on('error', () => this._failed(state));
@@ -297,6 +309,7 @@ class DirectXAdapter {
       } else {
         await state.exited;
       }
+      state.lease?.release();
     }
   }
 }
