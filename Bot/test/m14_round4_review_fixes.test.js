@@ -1,4 +1,6 @@
 'use strict';
+const { DatabaseSync } = require('node:sqlite');
+const { withForensicMutex, mutexDbPath } = require('../src/forensicMutex');
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -368,9 +370,37 @@ describe('M14 Round 4: Verified Review Blocker Regression Tests', () => {
   /* P1-D: Atomic Inode/Token-Fenced Orphan Lock Recovery Race                  */
   /* -------------------------------------------------------------------------- */
 
-  describe('P1-D: Fenced Orphan Lock Recovery (3-Process Contention)', () => {
-    it('1. concurrent orphan reclaimers do NOT steal a newly acquired lock', async () => {
+  describe('P1-D: SQLite-fenced orphan recovery', () => {
+    it('1. three concurrent contenders cannot overlap during orphan reclamation', async () => {
       const logger1 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
+      const logger2 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
+      const logger3 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
+      await logger1._withLogLock(async () => {}); // initialize SQLite registry
+      const db = new DatabaseSync(mutexDbPath(logPath));
+      db.prepare('INSERT INTO forensic_mutex (id, owner_pid, owner_start, owner_token) VALUES (1, ?, ?, ?)')
+        .run(99999999, '0', 'orphaned_token');
+      db.close();
+
+      let active = 0;
+      let maxActive = 0;
+      let completed = 0;
+      await Promise.all([logger1, logger2, logger3].map(logger =>
+        logger._withLogLock(async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise(resolve => setTimeout(resolve, 50));
+          active -= 1;
+          completed += 1;
+        })
+      ));
+      assert.strictEqual(maxActive, 1, 'Mutual exclusion must hold even when stale owner is reclaimed');
+      assert.strictEqual(completed, 3);
+      const check = new DatabaseSync(mutexDbPath(logPath));
+      assert.strictEqual(check.prepare('SELECT COUNT(*) AS n FROM forensic_mutex').get().n, 0);
+      check.close();
+    });
+  });
+});
       const logger2 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
       const logger3 = new ForensicLogger({ dataDir: tempDir, logFile: logPath });
 
