@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
+const { logStructured, sanitizeError, sanitizeString, sanitizeValue, extractErrorCode } = require('./structuredLogger');
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const BURNED_SUBNET_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -47,10 +47,10 @@ class ForensicLogger {
       subnet,
       httpStatus: typeof event.httpStatus === 'number' ? event.httpStatus : null,
       xErrorCode: typeof event.xErrorCode === 'number' ? event.xErrorCode : null,
-      xErrorMessage: event.xErrorMessage ? String(event.xErrorMessage) : null,
-      endpoint: event.endpoint ? String(event.endpoint) : null,
-      rawResponseSnippet: event.rawResponseSnippet ? String(event.rawResponseSnippet).slice(0, 1000) : null,
-      details: event.details || null
+      xErrorMessage: event.xErrorMessage ? sanitizeString(String(event.xErrorMessage)).slice(0, 512) : null,
+      endpoint: event.endpoint ? sanitizeString(String(event.endpoint)).slice(0, 256) : null,
+      rawResponseSnippet: event.rawResponseSnippet ? sanitizeString(String(event.rawResponseSnippet)).slice(0, 1000) : null,
+      details: event.details ? sanitizeValue(event.details) : null
     };
 
     // 1. Persist to store (state.forensicLogs) with auto-prune
