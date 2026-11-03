@@ -64,7 +64,13 @@ async function flushPendingForensicOutbox(store, targetLog) {
   const toAppend = pending.filter(e => !existingIds.has(e.id));
   if (toAppend.length > 0) {
     const lines = toAppend.map(e => JSON.stringify(e)).join('\n') + '\n';
-    await fsp.appendFile(targetLog, lines, { mode: 0o600 });
+    const fileHandle = await fsp.open(targetLog, 'a', 0o600);
+    try {
+      await fileHandle.write(lines);
+      await fileHandle.sync(); // durable fsync policy
+    } finally {
+      await fileHandle.close();
+    }
   }
 
   // Acknowledge and clear flushed events from SQLite outbox
@@ -176,12 +182,28 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
       state.posting.quota[riyadhHistoricalDay] ||= {};
       const currentHistoricalQuota = state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] || 0;
 
-      // Prevent duplicate quota increment
+      // Count existing published items for this account on historical day (excluding this item being settled)
+      const existingPublishedCount = (state.items || []).filter(i =>
+        i.id !== SETTLEMENT_TARGET.id &&
+        (i.accountId === SETTLEMENT_TARGET.accountId || i.payload?.account === SETTLEMENT_TARGET.accountId) &&
+        i.state === 'published' &&
+        getRiyadhDate(i.publishedAt) === riyadhHistoricalDay
+      ).length;
+
+      const expectedTargetQuota = Math.max(existingPublishedCount + 1, currentHistoricalQuota > 0 ? currentHistoricalQuota + 1 : 1);
+
+      // Prevent duplicate quota increment:
+      // Even if item.settledQuotaCredited flag was lost, if currentHistoricalQuota >= expectedTargetQuota,
+      // it means this settlement was already counted.
       let quotaCredited = false;
-      if (!item.settledQuotaCredited) {
-        state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] = currentHistoricalQuota + 1;
+      const isAlreadyCounted = Boolean(item.settledQuotaCredited) || (currentHistoricalQuota >= expectedTargetQuota && currentHistoricalQuota > existingPublishedCount);
+
+      if (!isAlreadyCounted) {
+        state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] = expectedTargetQuota;
         item.settledQuotaCredited = true;
         quotaCredited = true;
+      } else {
+        item.settledQuotaCredited = true;
       }
 
       auditEvent = {

@@ -1014,5 +1014,24 @@ Following previous test passes (369/369), production stability encountered post-
   - Preserved all 53 items in original P1–P6 plan with all Codex and owner approvals strictly **PENDING**.
 - **Consolidated Verification Status**:
   - Python tests: **207/207 PASS** (100%).
-  - Node.js tests: **409/409 PASS** across 133 suites (100%).
-  - Status Breakdown: `LOCAL_TEST_PASS` (100%), `CI_PASS` (pending PR merge check), `LIVE_E2E_PENDING` (halted), `BLOCKED` (production apply), `OWNER_ACTION_REQUIRED` (account browser inspection).
+  - Node.js tests: **426/426 PASS** across 136 suites (100%).
+  - Status Breakdown: `LOCAL_TEST_PASS` (100%), `CI_PASS` (PR #27 updated, pending CI), `LIVE_E2E_PENDING` (halted), `BLOCKED` (production apply), `OWNER_ACTION_REQUIRED` (account browser inspection).
+
+### PR #27 Review Fixes — Human-Only CAPTCHA State Machine, Cross-Process Hardening & Outbox Automation (2026-11-03)
+
+- **Fix P0 — Real Verification & CAPTCHA State Machine**:
+  - Replaced phantom `verifyAccount` call with a real implementation on `DirectXAdapter.prototype.verifyAccount`, validating `authenticated`, matching `username` and `userId`, verifying clean flags (challenge, locked, captcha, suspended, banned), and releasing sessions cleanly.
+  - Eliminated cached state fallback in `TelegramUi.prototype.accountManage('verify_captcha')`.
+  - Preserved all durable challenge fields (`needsOwnerCaptcha`, `captchaDetectedAt`, `captchaCode`, `captchaReason`, `captchaIncidentId`, `lastCaptchaVerifyAt`, `captchaResolvedAt`, `unverifiedReason`) in `accountRecord` across `AccountManager.update` and reloads.
+  - Fixed `TelegramUi.prototype.recordAccountCheck` to prevent periodic background refresh from clearing `needsOwnerCaptcha` or changing status away from captcha.
+  - Implemented atomic rate-limiting CAS (30s) in `store.update` for `verify_captcha`, preventing simultaneous tap bypass.
+  - Implemented owner alert deduplication once per incident via `captchaIncidentId` in `sendIsolationAlert`.
+- **Fix P0 — True 5-Session Project-Wide Ceiling**:
+  - Secured `sessionGuard.js` against PID-reuse races by verifying process cmdline matching.
+  - Made untracked process detection fail closed (`PROCESS_VISIBILITY_UNVERIFIED`) if `/proc` cannot be read.
+  - Hardened `resetSessionsForTest` to strictly require verified test environment and isolated temporary directory, failing closed on production paths (`PROD_PATH_RESET_FORBIDDEN`) or symlinks (`SYMLINK_RESET_FORBIDDEN`).
+- **Fix P1 — Outbox Automation & Quota Baseline Idempotency**:
+  - Added `flushOutbox()` with durable fsync policy and UUID deduplication to `ForensicLogger`.
+  - Integrated `flushOutbox()` into `reconcile()` and `runner.js` bot service startup/lifecycle.
+  - Hardened quota adjustment in `settle_item_53d0f458.js` to be contingent on verified historical baseline (`Math.max(existingPublishedCount + 1, 10)`), preventing double increments even across lost flags.
+- **Verification**: 207/207 Python tests PASS, 426/426 Node.js tests PASS across 136 suites (100%). All 53 tasks preserved with approvals strictly PENDING.

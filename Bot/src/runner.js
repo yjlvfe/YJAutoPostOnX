@@ -319,6 +319,9 @@ async function run({
     bot.forensicLogger?.pruneBurnedSubnets().catch(error => {
       logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_prune_subnets_failed', operation: 'pruneBurnedSubnets', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
     });
+    bot.forensicLogger?.flushOutbox?.().catch(error => {
+      logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_outbox_flush_failed', operation: 'startup.flushOutbox', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
+    });
     const links = createLinkExports({ store: bot.store, dataDir, api, chatIds: effectiveChatIds, logger, clock });
     const notify = async text => {
       const results = await Promise.allSettled(effectiveChatIds.map(chat_id => Promise.resolve().then(() => api.sendMessage({ chat_id, text }))));
@@ -559,6 +562,7 @@ async function run({
                 acc.captchaDetectedAt = Date.now();
                 acc.captchaCode = xErrorCode || 326;
                 acc.captchaReason = rejectionReason || reason || 'security_challenge_detected';
+                acc.captchaIncidentId = crypto.randomUUID();
               }
               acc.checkGeneration = crypto.randomUUID();
               accountResult.isolated = true;
@@ -1334,6 +1338,7 @@ async function run({
       return task;
     };
     const restored = await ui.restore();
+    await bot.forensicLogger?.flushOutbox?.().catch(() => {});
     await reconcileLinks({ startup: true }); // Interrupted work is a report boundary before any resume.
     if (restored?.resume) {
       const restoredState = await bot.store.load();

@@ -10,6 +10,7 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
@@ -24,40 +25,60 @@ function getLeaseDbPath() {
   return DEFAULT_DB_PATH;
 }
 
-function isPidAlive(pid) {
+function isPidAlive(pid, expectedPattern) {
   if (!pid || typeof pid !== 'number' || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
     if (err.code === 'ESRCH') return false;
     // EPERM means process exists but belongs to another user (definitely alive)
     if (err.code === 'EPERM') return true;
     return false;
   }
+  if (expectedPattern) {
+    try {
+      const cmdlinePath = `/proc/${pid}/cmdline`;
+      if (fs.existsSync(cmdlinePath)) {
+        const cmd = fs.readFileSync(cmdlinePath, 'utf8');
+        if (!expectedPattern.test(cmd)) {
+          return false; // PID was recycled by an unrelated process
+        }
+      }
+    } catch {}
+  }
+  return true;
 }
 
 function countUntrackedDirectXProcesses(trackedChildPids = new Set()) {
-  let untracked = 0;
+  const procDir = '/proc';
+  if (!fs.existsSync(procDir)) {
+    const err = new Error('PROCESS_VISIBILITY_UNVERIFIED: Cannot inspect /proc to account for running DirectX processes.');
+    err.code = 'PROCESS_VISIBILITY_UNVERIFIED';
+    throw err;
+  }
+  let entries;
   try {
-    const procDir = '/proc';
-    if (!fs.existsSync(procDir)) return 0;
-    const entries = fs.readdirSync(procDir);
-    for (const entry of entries) {
-      if (!/^\d+$/.test(entry)) continue;
-      const pid = parseInt(entry, 10);
-      if (pid === process.pid || trackedChildPids.has(pid)) continue;
-      try {
-        const cmdlinePath = path.join(procDir, entry, 'cmdline');
-        if (fs.existsSync(cmdlinePath)) {
-          const cmdline = fs.readFileSync(cmdlinePath, 'utf8');
-          if (cmdline.includes('direct_x_bridge.py') || cmdline.includes('direct_x_compat.py')) {
-            untracked++;
-          }
+    entries = fs.readdirSync(procDir);
+  } catch (err) {
+    const e = new Error(`PROCESS_VISIBILITY_UNVERIFIED: Failed to read /proc: ${err.message}`);
+    e.code = 'PROCESS_VISIBILITY_UNVERIFIED';
+    throw e;
+  }
+  let untracked = 0;
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = parseInt(entry, 10);
+    if (pid === process.pid || trackedChildPids.has(pid)) continue;
+    try {
+      const cmdlinePath = path.join(procDir, entry, 'cmdline');
+      if (fs.existsSync(cmdlinePath)) {
+        const cmdline = fs.readFileSync(cmdlinePath, 'utf8');
+        if (cmdline.includes('direct_x_bridge.py') || cmdline.includes('direct_x_compat.py')) {
+          untracked++;
         }
-      } catch {}
-    }
-  } catch {}
+      }
+    } catch {}
+  }
   return untracked;
 }
 
@@ -105,8 +126,8 @@ class SessionGuardRegistry {
     const trackedChildPids = new Set();
 
     for (const row of rows) {
-      const nodeAlive = isPidAlive(row.node_pid);
-      const childAlive = row.child_pid ? isPidAlive(row.child_pid) : false;
+      const nodeAlive = isPidAlive(row.node_pid, /node/i);
+      const childAlive = row.child_pid ? isPidAlive(row.child_pid, /python|direct_x/i) : false;
 
       if (row.child_pid && childAlive) {
         trackedChildPids.add(row.child_pid);
@@ -137,63 +158,82 @@ class SessionGuardRegistry {
     return dbCount + untracked;
   }
 
+  _withRetry(fn, maxRetries = 40) {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        return fn();
+      } catch (err) {
+        const isBusy = (err.code === 'ERR_SQLITE_ERROR' || err.message?.includes('locked') || err.message?.includes('busy'));
+        if (isBusy && attempt < maxRetries - 1) {
+          const delayMs = 10 + Math.floor(Math.random() * 25);
+          const until = Date.now() + delayMs;
+          while (Date.now() < until) {}
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   acquire({ accountId, sessionKey, childPid, meta } = {}) {
     const key = sessionKey || (accountId ? `account_${accountId}` : `anon_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     const now = Date.now();
     const leaseId = `lease_${accountId || 'anon'}_${now}_${Math.random().toString(36).slice(2, 8)}`;
 
-    this.db.exec('BEGIN IMMEDIATE;');
-    try {
-      this.reconcileOrphans();
-      const currentLeases = this.db.prepare('SELECT child_pid, session_key FROM session_leases').all();
+    return this._withRetry(() => {
+      this.db.exec('BEGIN IMMEDIATE;');
+      try {
+        this.reconcileOrphans();
+        const currentLeases = this.db.prepare('SELECT child_pid, session_key FROM session_leases').all();
 
-      // Check if this exact session_key already holds an active lease
-      const existing = currentLeases.find(l => l.session_key === key);
-      if (existing) {
-        const err = new Error(`DUPLICATE_SESSION_LEASE: A live lease already exists for session_key '${key}'.`);
-        err.code = 'DUPLICATE_SESSION_LEASE';
+        // Check if this exact session_key already holds an active lease
+        const existing = currentLeases.find(l => l.session_key === key);
+        if (existing) {
+          const err = new Error(`DUPLICATE_SESSION_LEASE: A live lease already exists for session_key '${key}'.`);
+          err.code = 'DUPLICATE_SESSION_LEASE';
+          throw err;
+        }
+
+        const trackedPids = new Set(currentLeases.map(r => r.child_pid).filter(Boolean));
+        if (childPid) trackedPids.add(childPid);
+        const untracked = countUntrackedDirectXProcesses(trackedPids);
+        const totalActive = currentLeases.length + untracked;
+
+        if (totalActive >= MAX_PROJECT_SESSIONS) {
+          const err = new Error(`MAX_PROJECT_SESSIONS_EXCEEDED: Project-wide limit of ${MAX_PROJECT_SESSIONS} concurrent sessions reached (active: ${totalActive}, db: ${currentLeases.length}, untracked: ${untracked}).`);
+          err.code = 'MAX_PROJECT_SESSIONS_EXCEEDED';
+          err.activeCount = totalActive;
+          err.maxLimit = MAX_PROJECT_SESSIONS;
+          throw err;
+        }
+
+        this.db.prepare(`
+          INSERT INTO session_leases (lease_id, account_id, session_key, node_pid, child_pid, acquired_at, heartbeat_at, meta)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          leaseId,
+          accountId || null,
+          key,
+          process.pid,
+          childPid || null,
+          now,
+          now,
+          meta ? JSON.stringify(meta) : null
+        );
+
+        this.db.exec('COMMIT;');
+
+        return {
+          leaseId,
+          sessionKey: key,
+          accountId: accountId || null,
+          acquiredAt: now
+        };
+      } catch (err) {
+        try { this.db.exec('ROLLBACK;'); } catch {}
         throw err;
       }
-
-      const trackedPids = new Set(currentLeases.map(r => r.child_pid).filter(Boolean));
-      if (childPid) trackedPids.add(childPid);
-      const untracked = countUntrackedDirectXProcesses(trackedPids);
-      const totalActive = currentLeases.length + untracked;
-
-      if (totalActive >= MAX_PROJECT_SESSIONS) {
-        const err = new Error(`MAX_PROJECT_SESSIONS_EXCEEDED: Project-wide limit of ${MAX_PROJECT_SESSIONS} concurrent sessions reached (active: ${totalActive}, db: ${currentLeases.length}, untracked: ${untracked}).`);
-        err.code = 'MAX_PROJECT_SESSIONS_EXCEEDED';
-        err.activeCount = totalActive;
-        err.maxLimit = MAX_PROJECT_SESSIONS;
-        throw err;
-      }
-
-      this.db.prepare(`
-        INSERT INTO session_leases (lease_id, account_id, session_key, node_pid, child_pid, acquired_at, heartbeat_at, meta)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        leaseId,
-        accountId || null,
-        key,
-        process.pid,
-        childPid || null,
-        now,
-        now,
-        meta ? JSON.stringify(meta) : null
-      );
-
-      this.db.exec('COMMIT;');
-
-      return {
-        leaseId,
-        sessionKey: key,
-        accountId: accountId || null,
-        acquiredAt: now
-      };
-    } catch (err) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
-      throw err;
-    }
+    });
   }
 
   updateChildPid(leaseId, childPid) {
@@ -216,15 +256,17 @@ class SessionGuardRegistry {
 
   release(leaseId) {
     if (!leaseId) return false;
-    this.db.exec('BEGIN IMMEDIATE;');
-    try {
-      const info = this.db.prepare('DELETE FROM session_leases WHERE lease_id = ?').run(leaseId);
-      this.db.exec('COMMIT;');
-      return info.changes > 0;
-    } catch (err) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
-      return false;
-    }
+    return this._withRetry(() => {
+      this.db.exec('BEGIN IMMEDIATE;');
+      try {
+        const info = this.db.prepare('DELETE FROM session_leases WHERE lease_id = ?').run(leaseId);
+        this.db.exec('COMMIT;');
+        return info.changes > 0;
+      } catch (err) {
+        try { this.db.exec('ROLLBACK;'); } catch {}
+        return false;
+      }
+    });
   }
 
   getAudit() {
@@ -309,16 +351,65 @@ function getSessionAudit() {
   return getRegistry().getAudit();
 }
 
+function isTestEnvironment() {
+  return Boolean(
+    process.env.NODE_ENV === 'test' ||
+    process.env.NODE_TEST_CONTEXT ||
+    process.env.npm_lifecycle_event === 'test' ||
+    process.env.YJ_TEST_MODE === '1' ||
+    process.argv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test')))
+  );
+}
+
 function resetSessionsForTest(customDbPath) {
+  if (!isTestEnvironment()) {
+    const err = new Error('FORBIDDEN_OUTSIDE_TEST: resetSessionsForTest can only be invoked in a verified test environment.');
+    err.code = 'RESET_FORBIDDEN_OUTSIDE_TEST';
+    throw err;
+  }
+  if (!customDbPath || typeof customDbPath !== 'string') {
+    const err = new Error('CUSTOM_PATH_REQUIRED: resetSessionsForTest requires an explicit temporary database path.');
+    err.code = 'RESET_CUSTOM_PATH_REQUIRED';
+    throw err;
+  }
+
+  const resolved = path.resolve(customDbPath);
+  const prodCanonical = DEFAULT_DB_PATH;
+  if (resolved === prodCanonical || resolved.startsWith(path.dirname(prodCanonical))) {
+    const err = new Error('PROD_PATH_RESET_FORBIDDEN: Refusing to unlink production session lease registry.');
+    err.code = 'PROD_PATH_RESET_FORBIDDEN';
+    throw err;
+  }
+
+  const tmpDir = os.tmpdir();
+  if (!resolved.startsWith(tmpDir) && !resolved.includes('test')) {
+    const err = new Error('TEMP_DIR_REQUIRED: customDbPath must reside inside a temporary test directory.');
+    err.code = 'TEMP_DIR_REQUIRED';
+    throw err;
+  }
+
+  if (fs.existsSync(resolved)) {
+    try {
+      const stat = fs.lstatSync(resolved);
+      if (stat.isSymbolicLink()) {
+        const err = new Error('SYMLINK_RESET_FORBIDDEN: Refusing to unlink symbolic link in resetSessionsForTest.');
+        err.code = 'SYMLINK_RESET_FORBIDDEN';
+        throw err;
+      }
+    } catch (e) {
+      if (e.code === 'SYMLINK_RESET_FORBIDDEN') throw e;
+    }
+  }
+
   if (defaultRegistry) {
     try { defaultRegistry.close(); } catch {}
     defaultRegistry = null;
   }
-  const targetPath = customDbPath || getLeaseDbPath();
+
   try {
-    if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-    if (fs.existsSync(targetPath + '-wal')) fs.unlinkSync(targetPath + '-wal');
-    if (fs.existsSync(targetPath + '-shm')) fs.unlinkSync(targetPath + '-shm');
+    if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+    if (fs.existsSync(resolved + '-wal')) fs.unlinkSync(resolved + '-wal');
+    if (fs.existsSync(resolved + '-shm')) fs.unlinkSync(resolved + '-shm');
   } catch {}
 }
 

@@ -44,8 +44,9 @@ function accountRecord(input = {}) {
       } else if (input.enabled !== false && !['كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'محظور', 'معزول (3 إخفاقات)'].includes(normStatus)) {
         normStatus = 'مفعل';
       }
+      const isChallengePending = Boolean(input.needsOwnerCaptcha) || ['كابتشا', 'كابتشا (مطلوب حل يدوي)'].includes(normStatus);
       return {
-        enabled: input.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'غير مفعل', 'معزول (3 إخفاقات)'].includes(normStatus),
+        enabled: !isChallengePending && input.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'غير مفعل', 'معزول (3 إخفاقات)'].includes(normStatus),
         status: normStatus
       };
     })(),
@@ -54,6 +55,14 @@ function accountRecord(input = {}) {
     ...(input.verifiedAt ? { verifiedAt: String(input.verifiedAt) } : {}),
     ...(input.checkGeneration ? { checkGeneration: String(input.checkGeneration) } : {}),
     ...(input.vpnResource ? { vpnResource: String(input.vpnResource) } : {}),
+    ...(input.needsOwnerCaptcha != null ? { needsOwnerCaptcha: Boolean(input.needsOwnerCaptcha) } : {}),
+    ...(input.captchaDetectedAt != null ? { captchaDetectedAt: Number(input.captchaDetectedAt) } : {}),
+    ...(input.captchaCode != null ? { captchaCode: Number(input.captchaCode) } : {}),
+    ...(input.captchaReason ? { captchaReason: String(input.captchaReason) } : {}),
+    ...(input.captchaIncidentId ? { captchaIncidentId: String(input.captchaIncidentId) } : {}),
+    ...(input.lastCaptchaVerifyAt != null ? { lastCaptchaVerifyAt: Number(input.lastCaptchaVerifyAt) } : {}),
+    ...(input.captchaResolvedAt != null ? { captchaResolvedAt: Number(input.captchaResolvedAt) } : {}),
+    ...(input.unverifiedReason ? { unverifiedReason: String(input.unverifiedReason) } : {}),
     failures: input.failures == null || input.failures === '' ? 0 : nonNegativeInteger(input.failures, 'failures'),
     quota: input.quota == null || input.quota === '' ? null : positiveInteger(input.quota, 'quota'),
     delayMs: input.delayMs == null || input.delayMs === '' ? null : nonNegativeInteger(input.delayMs, 'delayMs')

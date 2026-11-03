@@ -323,6 +323,9 @@ class ForensicLogger {
         if (Array.isArray(state.forensicLogs)) {
           storeLogs.push(...state.forensicLogs);
         }
+        if (Array.isArray(state.pendingForensicOutbox)) {
+          storeLogs.push(...state.pendingForensicOutbox);
+        }
       } catch (err) {
         logStructured(null, {
           level: 'error',
@@ -396,6 +399,9 @@ class ForensicLogger {
       try {
         await this.store.update(state => {
           state.forensicLogs = reconciled;
+          if (Array.isArray(state.pendingForensicOutbox)) {
+            state.pendingForensicOutbox = [];
+          }
           return state;
         });
         updatedStore = true;
@@ -441,6 +447,49 @@ class ForensicLogger {
       updatedStore,
       updatedFile
     };
+  }
+
+  async flushOutbox() {
+    assertForensicMutationAllowed(this.dataDir);
+    if (!this.store || !this.logFile) return { flushed: 0, newlyAppended: 0 };
+    const state = await this.store.load();
+    const pending = state.pendingForensicOutbox || [];
+    if (!Array.isArray(pending) || pending.length === 0) return { flushed: 0, newlyAppended: 0 };
+
+    const existingIds = new Set();
+    try {
+      const content = await fsp.readFile(this.logFile, 'utf8');
+      for (const line of content.split('\n').filter(Boolean)) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && parsed.id) existingIds.add(parsed.id);
+        } catch {}
+      }
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    const toAppend = pending.filter(e => e && e.id && !existingIds.has(e.id));
+    if (toAppend.length > 0) {
+      const dir = path.dirname(this.logFile);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const lines = toAppend.map(e => JSON.stringify(e)).join('\n') + '\n';
+      const fileHandle = await fsp.open(this.logFile, 'a', 0o600);
+      try {
+        await fileHandle.write(lines);
+        await fileHandle.sync();
+      } finally {
+        await fileHandle.close();
+      }
+    }
+
+    const flushedIds = new Set(pending.map(e => e.id));
+    await this.store.update(s => {
+      s.pendingForensicOutbox = (s.pendingForensicOutbox || []).filter(e => !flushedIds.has(e.id));
+      return s;
+    });
+
+    return { flushed: pending.length, newlyAppended: toAppend.length };
   }
 }
 

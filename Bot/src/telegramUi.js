@@ -884,8 +884,9 @@ class TelegramUi {
         }
       }
       if (refresh && session && healthy && ip && result.authenticated === true && !failure) {
-        account.status = account.enabled === false ? 'غير مفعل' : 'مفعل';
-        if (account.needsOwnerCaptcha) account.needsOwnerCaptcha = false;
+        if (!account.needsOwnerCaptcha && !['كابتشا', 'كابتشا (مطلوب حل يدوي)'].includes(account.status)) {
+          account.status = account.enabled === false ? 'غير مفعل' : 'مفعل';
+        }
       }
       onApplied?.(structuredClone(account));
       if (session) checks.session = { checkedAt, source, isolated, authenticated: isolated && result.authenticated === true, username: /^[A-Za-z0-9_]{1,15}$/.test(result.username || '') ? result.username : null,
@@ -1484,37 +1485,67 @@ class TelegramUi {
         return { notFound: true };
       }
 
-      // Rate limiting: strictly at least 30 seconds between attempts
-      const now = Date.now();
-      if (account.lastCaptchaVerifyAt && (now - account.lastCaptchaVerifyAt) < 30_000) {
-        const remainingSec = Math.ceil((30_000 - (now - account.lastCaptchaVerifyAt)) / 1000);
+      // Atomic Rate limiting CAS within store.update: strictly at least 30 seconds between attempts
+      let rateLimited = false;
+      let remainingSec = 0;
+      await this.bot.store.update(s => {
+        const a = (s.accounts || []).find(acc => acc.id === targetId);
+        if (!a) return s;
+        const now = Date.now();
+        if (a.lastCaptchaVerifyAt && (now - a.lastCaptchaVerifyAt) < 30_000) {
+          rateLimited = true;
+          remainingSec = Math.ceil((30_000 - (now - a.lastCaptchaVerifyAt)) / 1000);
+          return s;
+        }
+        a.lastCaptchaVerifyAt = now;
+        return s;
+      });
+
+      if (rateLimited) {
         await acknowledge(`يرجى الانتظار ${remainingSec} ثانية قبل إعادة التحقق.`, true);
         return { rateLimited: true };
       }
-
-      await this.bot.store.update(s => {
-        const a = (s.accounts || []).find(acc => acc.id === targetId);
-        if (a) a.lastCaptchaVerifyAt = now;
-        return s;
-      });
 
       await acknowledge('جاري فحص حالة الاعتماد لدى X (قراءة فقط)...');
 
       let verificationSuccess = false;
       let checkError = null;
+      let verResult = null;
+
       try {
-        if (this.bot.directXAdapter && typeof this.bot.directXAdapter.verifyAccount === 'function') {
-          const res = await this.bot.directXAdapter.verifyAccount(account);
-          if (res && res.authenticated === true && !res.challenge && !res.locked && !res.captcha && !res.suspended) {
-            verificationSuccess = true;
-          } else {
-            checkError = res?.rejectionReason || res?.accountFailure || 'challenge_still_active';
+        if (this.isolatedVerifier && typeof this.isolatedVerifier.verify === 'function') {
+          verResult = await this.isolatedVerifier.verify(account, { persistResult: false });
+        } else if (this.bot.directXAdapter && typeof this.bot.directXAdapter.verifyAccount === 'function') {
+          let proxy = account.proxy;
+          if (!proxy && this.bot.vpnManager?.acquireReadRoute) {
+            const route = await this.bot.vpnManager.acquireReadRoute(account.id);
+            proxy = route.proxy;
           }
+          verResult = await this.bot.directXAdapter.verifyAccount({ account, proxy });
         } else {
-          verificationSuccess = Boolean(account.authenticated === true && !account.needsOwnerCaptcha);
+          // If neither verifier is available, we MUST NOT fall back to cached authenticated state!
+          checkError = 'verifier_unavailable';
         }
       } catch (err) {
-        checkError = err.message;
+        checkError = err.message || 'verification_exception';
+      }
+
+      if (verResult) {
+        const isAuth = verResult.authenticated === true;
+        const expectedUser = (account.username || account.handle || '').replace(/^@/, '').toLowerCase();
+        const actualUser = (verResult.username || '').replace(/^@/, '').toLowerCase();
+        const usernameMatch = !expectedUser || (actualUser && actualUser === expectedUser);
+        const expectedUserId = account.userId ? String(account.userId) : null;
+        const actualUserId = verResult.userId ? String(verResult.userId) : null;
+        const userIdMatch = !expectedUserId || (actualUserId && actualUserId === expectedUserId);
+        const flagsClear = !verResult.challenge && !verResult.locked && !verResult.captcha &&
+                           !verResult.suspended && !verResult.banned && !verResult.accountFailure;
+
+        if (isAuth && usernameMatch && userIdMatch && flagsClear) {
+          verificationSuccess = true;
+        } else {
+          checkError = verResult.accountFailure || verResult.reason || (!usernameMatch || !userIdMatch ? 'identity_mismatch' : 'challenge_still_active');
+        }
       }
 
       if (verificationSuccess) {
@@ -1522,12 +1553,21 @@ class TelegramUi {
           const a = (s.accounts || []).find(acc => acc.id === targetId);
           if (a) {
             a.status = 'غير مفعل';
+            a.enabled = false;
             a.needsOwnerCaptcha = false;
             a.captchaResolvedAt = Date.now();
+            delete a.captchaIncidentId;
+            delete a.captchaCode;
+            delete a.captchaReason;
             a.checkGeneration = crypto.randomUUID();
           }
           return s;
         });
+        if (this.notifiedCaptchaIncidents) {
+          for (const key of this.notifiedCaptchaIncidents) {
+            if (key.startsWith(`${targetId}_`)) this.notifiedCaptchaIncidents.delete(key);
+          }
+        }
         const updated = await this.bot.store.load();
         const updatedAcc = updated.accounts?.find(a => a.id === targetId);
         if (messageId && updatedAcc) {
@@ -1538,7 +1578,7 @@ class TelegramUi {
         await this.bot.transport.sendMessage(id.chat, `✅ نجح التحقق من حل الكابتشا للحساب @${account.username || account.label}!\n\nتم ضبط حالة الحساب إلى «غير مفعل». يمكنك الآن الضغط على «تفعيل» لتفعيله يدوياً عند الرغبة.`);
         return { verified: true, status: 'غير مفعل' };
       } else {
-        await this.bot.transport.sendMessage(id.chat, `⚠️ لم يكتمل حل التحقق للحساب @${account.username || account.label} بعد.\n\nلا يزال الحساب مقيداً أو يطلب التحقق من X (${checkError || 'challenge_pending'}). يرجى التأكد من حل الكابتشا عبر الموقع الرسمي لـ X.`);
+        await this.bot.transport.sendMessage(id.chat, `⚠️ لم يكتمل حل التحقق للحساب @${account.username || account.label} بعد.\n\nلا يزال الحساب مقيداً أو يطلب التحقق من X (${checkError || 'challenge_pending'}). يرجى التأكد من حل الكابتشا عبر الموقع الرسمي لـ X ثم إعادة المحاولة.`);
         return { verified: false, error: checkError };
       }
     }
@@ -1693,13 +1733,23 @@ class TelegramUi {
     let diagnosticReason = reason;
     if (account.status === 'محظور' || String(reason).includes('banned')) {
       diagnosticReason = ISOLATION_REASONS.BANNED;
-    } else if (account.status === 'كابتشا' || String(reason).includes('captcha')) {
+    } else if (account.status === 'كابتشا' || String(reason).includes('captcha') || account.needsOwnerCaptcha) {
       diagnosticReason = ISOLATION_REASONS.CAPTCHA;
     } else if (String(reason).includes('cookie') || String(reason).includes('session')) {
       diagnosticReason = ISOLATION_REASONS.COOKIE_REJECTED;
     } else if (failures >= 3 || account.status === 'معزول (3 إخفاقات)') {
       diagnosticReason = ISOLATION_REASONS.STRIKES_EXCEEDED;
     }
+
+    if (diagnosticReason === ISOLATION_REASONS.CAPTCHA) {
+      this.notifiedCaptchaIncidents ||= new Set();
+      const incidentId = account.captchaIncidentId || `${account.id || username}_${account.captchaDetectedAt || 'current'}`;
+      if (this.notifiedCaptchaIncidents.has(incidentId)) {
+        return null;
+      }
+      this.notifiedCaptchaIncidents.add(incidentId);
+    }
+
     const message = buildIsolationMessage({ username, reason: diagnosticReason, otherActiveCount });
     if (this.notify) {
       await this.notify(message);
