@@ -453,6 +453,29 @@ def uncertain(reason):
     return {'status': 'ambiguous', 'published': False, 'posted': False, 'ambiguous': True, 'reason': reason}
 
 
+
+def upstream_error_details(exc):
+    """Allowlist diagnostics from an exception; NEVER serialize raw_json/cookies."""
+    if exc is None:
+        return {}
+    code = getattr(exc, 'code', None)
+    if code is None:
+        code = getattr(exc, 'error_code', None)
+    message = getattr(exc, 'x_error_message', None)
+    http_status = getattr(exc, 'http_status', None)
+    result = {}
+    if isinstance(code, (str, int)) and not isinstance(code, bool):
+        result['xErrorCode'] = code
+    kind = getattr(exc, 'x_response_kind', None)
+    if kind in ('graphql_errors', 'http_or_transport_failure'):
+        result['xResponseKind'] = kind
+    if isinstance(message, str):
+        result['xErrorMessage'] = message[:512]
+    if type(http_status) is int:
+        result['httpStatus'] = http_status
+    return result
+
+
 class DirectSession:
     def __init__(self, client, account):
         self.client = client
@@ -1005,6 +1028,7 @@ class DirectSession:
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
                     'rawError': str(exc)[:2048],
+                    **upstream_error_details(exc),
                 }
 
             # Dispatch crossed the fence — the tweet MAY have posted but the
@@ -1066,6 +1090,8 @@ class DirectSession:
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
                     'rawError': str(fetch_exc)[:2048],
+                    'verificationError': str(fetch_exc)[:512],
+                    **upstream_error_details(exc),
                 }
 
             if account_failure == 'rate_limit':
@@ -1081,6 +1107,7 @@ class DirectSession:
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
                     'rawError': str(exc)[:2048],
+                    **upstream_error_details(exc),
                 }
 
             result = uncertain('publish_confirmation_missing')
@@ -1096,6 +1123,7 @@ class DirectSession:
                 if isinstance(timeline_res, dict) and timeline_res.get('fetchError') else None
             )
             result['rawError'] = str(exc)[:2048]
+            result.update(upstream_error_details(exc))
             return result
 
 
