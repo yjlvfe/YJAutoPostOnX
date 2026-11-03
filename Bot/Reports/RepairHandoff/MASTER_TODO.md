@@ -309,3 +309,13 @@ The original ChatGPT TODO (2026-11-01 v1.2) contains **33 FINDINGs in P1(5), P2(
 - P0-C: Preserved pending CAPTCHA challenge status, `needsOwnerCaptcha`, and `checkGeneration` in `recordAccountCheck()` during unverified session checks (`auth_session_unverified`), preventing background refreshes from corrupting pending owner verification CAS.
 - P1-D: Resolved orphan lock reclamation race in `ForensicLogger._withLogLock()` by replacing path-level unlink with atomic POSIX rename to private reclaim file, ensuring competing reclaimers cannot delete active locks.
 - P1-E: Eliminated test ticker leaks in `telegramUi.js` by adding `autoStartTicker` option and gracefully handling destroyed stores; ran full test suite with 100% pass: 207/207 Python, 450/450 Node.js across 150 suites (657 tests total). All 53 original items preserved with Codex and owner approvals held strictly **PENDING**.
+
+**M14 PR #27 Final VPS Acceptance & Non-Production Handoff Note (2026-11-03; append only):**
+- Candidate HEAD `d60cdf212d04f93a5e91bd639cf5642a3540c8b1` fully verified with all ChatGPT edits in place: `Bot/src/forensicMutex.js` (SQLite transactional mutex, owner PID/starttime/token CAS, `node:sqlite`), `Bot/src/forensicLogger.js`, `Bot/src/accounts.js`, `Bot/src/runner.js`, `Bot/src/telegramUi.js`, and `Bot/test/m14_round5_direct_code_fixes.test.js`.
+- Verified critical-section nonoverlap across 5 independent OS Node processes (`active === 1` strictly enforced).
+- Verified CAPTCHA alert deduplication and per-incident scoping: incident B alerts both admin chats even if previous incident A was delivered, while repeat checks of B do not spam.
+- Verified background-detected CAPTCHA creates fresh incident, alerts both chats once, and does not corrupt owner verification CAS.
+- Completed full test execution in isolated worktree and test fixtures: 207/207 Python tests (100% PASS in 0.764s), 453/453 Node.js tests across 151 suites (100% PASS in 61.4s). Total: 660 tests pass.
+- Verified GitHub CI 5/5 checks pass for HEAD `d60cdf212d04f93a5e91bd639cf5642a3540c8b1`.
+- Production read-only safety verified: service stopped, 0 live POSTs, 3 accounts disabled, 30 ambiguous items quarantined, state.sqlite untouched (8,376,320 bytes), 5 VPN containers healthy, other VPS projects untouched.
+- Exit state: **READY_FOR_OWNER_MERGE_REVIEW**. All 53 original items preserved with all approvals strictly **PENDING**.

@@ -1111,3 +1111,28 @@ Following previous test passes (369/369), production stability encountered post-
 - **Verification Results**:
   - Python tests: **207/207 PASS** (100%).
   - Node.js tests: **450/450 PASS** across 150 test suites (100%). Total: 657 passing tests. All 53 tasks preserved with all approvals strictly PENDING.
+
+### M14 PR #27 Final VPS Acceptance & Non-Production Handoff (2026-11-03)
+
+- **Candidate HEAD Verification**:
+  - Verified candidate HEAD `d60cdf212d04f93a5e91bd639cf5642a3540c8b1` on branch `fix/m14-human-captcha-real-session-guard-and-recovery` with all edits in place.
+  - Verified GitHub Actions workflows `41700928889` (audit) and `41700928924` (release) completed successfully with all 5 checks passing.
+- **Architectural Verifications**:
+  - `Bot/src/forensicMutex.js`: Proved transactional SQLite mutex with owner PID birth-time (`/proc/<pid>/stat` field 22) fencing and `node:sqlite` DatabaseSync. Verified 5 independent OS Node processes serialize with zero critical section overlap.
+  - `Bot/src/telegramUi.js` & `runner.js`: Proved that incident receipts are scoped per incident via `captchaDeliveredIncidentId` and `captchaDeliveredChats`. A new incident B alerts both admin chats once, repeated checks of B do not spam, and verified Bot API receipts (`ok: true`, valid `message_id`) are required.
+  - `Bot/src/telegramUi.js`: Proved that routine unverified session refreshes preserve pending CAPTCHA challenge status, `needsOwnerCaptcha`, incident ID, and `checkGeneration`, ensuring owner verification CAS succeeds cleanly.
+  - `Bot/src/sessionGuard.js`: Proved host-wide 5-session ceiling enforced via shared `session_leases.sqlite` registry with `/proc` verification.
+- **Automated Test Results**:
+  - Python test suite: **207 / 207 PASS** (100% in 0.764s).
+  - Node.js test suite: **453 / 453 PASS** across 151 test suites (100% in 61.4s).
+  - Total automated tests: **660 / 660 PASS** (100%).
+- **Production Safety Audit**:
+  - `yj-telegram-bot.service` active with `cycleState: stopped`. Zero live X POSTs.
+  - 3 accounts (`@kaniabq`, `@marcosvhv`, `@menalobq`) remain disabled.
+  - Exactly 30 ambiguous items quarantined; item `53d0` preserved without production settlement.
+  - Production database `state.sqlite` size exactly 8,376,320 bytes; integrity check ok.
+  - Exactly 5 NordVPN project containers healthy (ports 18801-18805); host cap of 7 containers host-wide strictly respected.
+  - All other VPS projects (`BinanceChecker`, `MyWalletChecker`, `YJDownloadVideo`, `9router`) untouched.
+- **Handoff Decision**:
+  - Acceptance status: **READY_FOR_OWNER_MERGE_REVIEW**.
+  - All 53 original P1–P6 tasks preserved with all approvals strictly PENDING. Merge of PR #27 and production deployment remain strictly pending explicit owner approval.
