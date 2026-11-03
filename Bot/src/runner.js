@@ -15,6 +15,7 @@ const { VpnSlotManager } = require('./dockerVpn');
 const { riyadhDay, accountCapacity, quotaAdmission } = require('./quota');
 const { normalizeSubnet } = require('./forensicLogger');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
+const { isKnownTwikitParserFailure } = require('./knownTwikitParserFailure');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -509,9 +510,11 @@ async function run({
         session,
         failure,
         reason,
-        retryAfterSeconds
+        retryAfterSeconds,
+        rawError
       }) => {
         const isPermanent = ['banned', 'captcha'].includes(failure);
+        const isKnownParserError = isKnownTwikitParserFailure({ failure, rawError });
         const isRateLimit = failure === 'rate_limit' || Boolean(retryAfterSeconds) || reason === 'rate_limit';
         const isTransportOrVpn = failure === 'network_proxy_error' ||
           /network_proxy_error/i.test(String(failure || '')) ||
@@ -539,6 +542,11 @@ async function run({
                 const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
                 if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
               }
+            } else if (isKnownParserError) {
+              // A Twikit profile decode exception is a library failure, not a
+              // failure of this X account. Quarantine the dispatched item and
+              // retain existing strikes rather than incrementing the account.
+              accountResult.failures = acc.failures || 0;
             } else if (isRateLimit) {
               // Rate limit: cooling only, no strike increment
             } else if (isTransportOrVpn) {
@@ -647,7 +655,7 @@ async function run({
         bot.forensicLogger?.record({
           eventType: accountResult.isolated
             ? (accountResult.status === 'كابتشا' ? 'account_captcha' : accountResult.status === 'محظور' ? 'account_banned' : 'account_isolated_3_failures')
-            : isRateLimit ? 'account_rate_limited' : isTransportOrVpn ? 'transport_or_vpn_error' : 'account_failure_strike',
+            : isKnownParserError ? 'twikit_profile_parse_error_no_strike' : isRateLimit ? 'account_rate_limited' : isTransportOrVpn ? 'transport_or_vpn_error' : 'account_failure_strike',
           accountId,
           username: account?.username,
           slot: session?.slot,
@@ -655,7 +663,7 @@ async function run({
           exitIp: session?.exitIp,
           subnet: currentSubnet,
           xErrorMessage: reason,
-          details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated }
+          details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated, libraryParseFailure: isKnownParserError }
         }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
 
         if (accountResult.isolated) {
@@ -914,7 +922,8 @@ async function run({
               claim,
               session,
               failure: 'ambiguous',
-              reason: result.reason || 'publish_confirmation_missing'
+              reason: result.reason || 'publish_confirmation_missing',
+              rawError: result.rawError
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
@@ -1001,7 +1010,8 @@ async function run({
               claim,
               session,
               failure: 'ambiguous',
-              reason: err.code || err.message || 'exception_after_dispatch'
+              reason: err.code || err.message || 'exception_after_dispatch',
+              rawError: err.message
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
