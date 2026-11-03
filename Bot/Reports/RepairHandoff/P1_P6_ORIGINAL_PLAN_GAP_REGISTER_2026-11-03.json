@@ -18,7 +18,7 @@
     "P5": 2,
     "P6": 4
   },
-  "git_main": "8b49f3590fe2c332547b64c57af8603599608b54",
+  "git_main": "7e1453bb0796c72966f556addd8291076925145c",
   "codex": "PENDING_ALL",
   "signoffs": {
     "P1": "PENDING",
@@ -34,8 +34,8 @@
       "phase": "P1",
       "id": "ADD-P1-01",
       "title": "جرد جميع المنشورات الغامضة (~30 في آخر لوحة) وتصنيف مصير كل itemId دون إعادة جماعية",
-      "implementation": "OPEN",
-      "tests": "NOT_RUN",
+      "implementation": "AUDITED_QUARANTINED",
+      "tests": "PASS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
       "acceptance": "دليل حالة كل عنصر + استعادة ذرية فقط عند إثبات عدم النشر"
@@ -44,8 +44,8 @@
       "phase": "P1",
       "id": "ADD-P1-02",
       "title": "تمييز رفض GraphQL المؤكد من نتيجة ما بعد dispatch غير المحسومة",
-      "implementation": "PARTIAL_MERGED",
-      "tests": "VPS_E2E_PENDING",
+      "implementation": "MERGED_PR21",
+      "tests": "PASS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
       "acceptance": "إثبات سياسة إعادة/حجر آمنة دون POST مكرر"
@@ -144,8 +144,8 @@
       "phase": "P4",
       "id": "ADD-P4-02",
       "title": "نقل أكواد ورسائل GraphQL/HTTP وكشف خطأ التحقق من Python إلى Node وSQLite",
-      "implementation": "MERGED_PR19",
-      "tests": "CI_GREEN_VPS_E2E_PENDING",
+      "implementation": "MERGED_PR21",
+      "tests": "PASS",
       "codex": "PENDING",
       "ownerSignoff": "PENDING",
       "acceptance": "أسباب X الأصلية لكل فشل دون أسرار في اللوج"

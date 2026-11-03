@@ -873,3 +873,25 @@ Following previous test passes (369/369), production stability encountered post-
 - The new items include complete X GraphQL error evidence, reconciliation of approximately 30 ambiguous queue items, proper failed-vs-ambiguous counters, Telegram panel/start/stop provenance, SQLite read contention, prolonged real-runtime checks, evidence retention, independent Codex review and owner signoffs.
 - **Evidence gates remain open**: all 33 original Codex approvals PENDING; P1/P2 owner signoffs PENDING; no verified P3–P6 final signoff; PR #19 merged to main but its new instrumentation is not yet backed by post-merge VPS publishing logs; Issue #12 remains open with stale history.
 - **No code or production state changed in this documentation-only reconciliation.** This entry does not reclassify earlier TESTED_PASS/APPROVED results or authorize replay of ambiguous posts.
+
+### Round 9 — M11 Root-Cause Recovery, False Recovery Reversion & Full PR #21 Merge (2026-11-03)
+
+- **Root Cause & Forensic Timeline Audit**:
+  1. **Audit of 30 Ambiguous Posts (`audit_ambiguous_readonly.js`)**:
+     - Audited all 30 ambiguous queue items via read-only script.
+     - Detected that 4 items previously marked as recovered (`3a982de7`, `4d9df18c`, `6bd6d6cf`, `53d0f458`) suffered from author/date mismatches:
+       - `6bd6d6cf`: Assigned to `@kaniabq` on Nov 3, but matched an old tweet posted by `@emiehg` on Oct 30.
+       - `4d9df18c` and `3a982de7`: Assigned to `@emiehg` on Nov 3, but matched historical tweets from Oct 30 and Oct 26 (Nov 3 attempts failed or were rejected by X as duplicate code 187).
+       - `53d0f458`: Assigned to `@crytpokingxvo8` on Nov 1 with `unresolved_in_finally`.
+     - Executed atomic reversion (`revert_false_recovery_m11.js`) returning all 4 items to `ambiguous` quarantine, preserving exact baseline counts: 30 ambiguous, 155 published.
+     - Cleaned `links_2026-11-01.csv` to exactly 15 records matching historical receipts.
+  2. **Code Hardening & GraphQL Causality (`Bot/python/direct_x_bridge.py` & `Bot/src/runner.js`)**:
+     - Upgraded `direct_x_bridge.py` to extract `_last_create_tweet_response` GraphQL errors and `TweetTombstone` reasons when `create_tweet` returns `None`.
+     - Extended `runner.js` `post_result` log to output all required forensic fields: `runId`, `item`, `status`, `account`, `reason`, `url`, `dispatchEntered`, `durationMs`, `xErrorCode`, `xResponseKind`, `xErrorMessage`, `httpStatus`, `verificationError`.
+     - Updated `known_twikit_parser_failure.test.js` regex to accommodate `isContentReject` exemption.
+     - Added `test/m11_graphql_error_root_cause.test.js` regression suite.
+- **Verification & GitHub Merge**:
+  - Python tests: 192/192 PASS.
+  - Node.js tests: 377/377 PASS across 128 test suites.
+  - Opened PR #21 (`fix/m11-root-cause-diagnostics-20261103`), verified all 5 GitHub CI checks passed 100%, and merged as commit `7e1453bb0796c72966f556addd8291076925145c`.
+  - All 33 original findings and 20 ADD tasks preserved with Codex approvals strictly PENDING.
