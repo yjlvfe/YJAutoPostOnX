@@ -334,6 +334,18 @@ async function run({
             sanitizedError: sanitizeError(res.reason),
             details: { chatId: effectiveChatIds[i] }
           });
+        } else {
+          logStructured(logger, {
+            level: 'info',
+            component: 'runner',
+            event: 'notify_send_success',
+            operation: 'sendMessage',
+            result: 'delivered_to_telegram_api',
+            details: {
+              chatId: effectiveChatIds[i],
+              messageId: res.value?.message_id ?? null
+            }
+          });
         }
       }
       return results;
@@ -862,10 +874,31 @@ async function run({
           if (publishAdapterFactory && !(adapter instanceof DirectXAdapter) && adapter.supportsDispatchCallback !== true) await onDispatch({ accountId });
           // Queue routing is runner metadata, not a direct-X content field.
           const directPayload = { ...item.payload }; delete directPayload.account;
+          const publishStartedAt = Date.now();
           const result = await attempt.wait(() => adapter.publish({ session, payload: adapter instanceof DirectXAdapter ? directPayload : item.payload, confirmPublish: true, signal: attempt.signal, onDispatch }));
           if (result.accountFailure) await ui.recordAccountCheck(accountId, { accountFailure: result.accountFailure }, { session: true, expectedAccount: account });
           if (result.published && !dispatchEntered) throw Object.assign(new Error('Missing dispatch fence'), { code: 'DISPATCH_FENCE_MISSING' });
           const newState = classifyPublishOutcome(result, dispatchEntered);
+          logStructured(logger, {
+            level: newState === 'ambiguous' ? 'warn' : 'info',
+            component: 'runner',
+            event: 'publish_attempt_observation',
+            runId: run.runId,
+            accountId,
+            queueItemId: item.id,
+            operation: 'DirectX.publish',
+            result: newState,
+            durationMs: Date.now() - publishStartedAt,
+            errorCode: result.xErrorCode || result.reason || null,
+            sanitizedError: result.rawError ? sanitizeError(result.rawError) : null,
+            details: {
+              dispatchEntered,
+              bridgeStatus: result.status || null,
+              textUtf16Length: typeof directPayload.text === 'string' ? directPayload.text.length : null,
+              textCodePoints: typeof directPayload.text === 'string' ? Array.from(directPayload.text).length : null,
+              verifiedNotPosted: result.verifiedNotPosted === true
+            }
+          });
           const publishedAt = new Date(clock()).toISOString();
           let transitioned = false;
           await bot.store.update(s => {
