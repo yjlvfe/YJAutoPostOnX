@@ -16,6 +16,7 @@ const { riyadhDay, accountCapacity, quotaAdmission } = require('./quota');
 const { normalizeSubnet } = require('./forensicLogger');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const { isKnownTwikitParserFailure } = require('./knownTwikitParserFailure');
+const { isXContentRejection } = require('./xFailureClassification');
 const { recordUnsuccessfulAttempt } = require('./attemptOutcomes');
 const { classifyPublishOutcome } = require('./publishOutcome');
 
@@ -527,10 +528,12 @@ async function run({
         reason,
         retryAfterSeconds,
         rawError,
-        xErrorCode
+        xErrorCode,
+        xResponseKind
       }) => {
         const isPermanent = ['banned', 'captcha'].includes(failure);
         const isKnownParserError = isKnownTwikitParserFailure({ failure, rawError });
+        const isContentReject = isXContentRejection({ failure, xErrorCode, xResponseKind });
         const isRateLimit = failure === 'rate_limit' || Boolean(retryAfterSeconds) || reason === 'rate_limit';
         const isTransportOrVpn = failure === 'network_proxy_error' ||
           /network_proxy_error/i.test(String(failure || '')) ||
@@ -558,10 +561,9 @@ async function run({
                 const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
                 if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
               }
-            } else if (isKnownParserError) {
-              // A Twikit profile decode exception is a library failure, not a
-              // failure of this X account. Quarantine the dispatched item and
-              // retain existing strikes rather than incrementing the account.
+            } else if (isKnownParserError || isContentReject) {
+              // A parser error or a GraphQL content rejection is not an
+              // account failure. Still quarantine the post after dispatch.
               accountResult.failures = acc.failures || 0;
             } else if (isRateLimit) {
               // Rate limit: cooling only, no strike increment
@@ -619,7 +621,11 @@ async function run({
           !isCooling(a)
         );
 
-        if (accountResult.isolated) {
+        if (isContentReject) {
+          // Do not cool or rotate an otherwise healthy account for a
+          // content-specific rejection; the affected item stays quarantined.
+          cooling.delete(accountId);
+        } else if (accountResult.isolated) {
           cooling.delete(accountId);
           vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
         } else if (isRateLimit) {
@@ -673,7 +679,7 @@ async function run({
         bot.forensicLogger?.record({
           eventType: accountResult.isolated
             ? (accountResult.status === 'كابتشا' ? 'account_captcha' : accountResult.status === 'محظور' ? 'account_banned' : 'account_isolated_3_failures')
-            : isKnownParserError ? 'twikit_profile_parse_error_no_strike' : isRateLimit ? 'account_rate_limited' : isTransportOrVpn ? 'transport_or_vpn_error' : 'account_failure_strike',
+            : isKnownParserError ? 'twikit_profile_parse_error_no_strike' : isContentReject ? 'x_content_rejection_no_strike' : isRateLimit ? 'account_rate_limited' : isTransportOrVpn ? 'transport_or_vpn_error' : 'account_failure_strike',
           accountId,
           username: account?.username,
           slot: session?.slot,
@@ -682,7 +688,7 @@ async function run({
           subnet: currentSubnet,
           xErrorCode: xErrorCode ?? null,
           xErrorMessage: rawError || reason,
-          details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated, libraryParseFailure: isKnownParserError }
+          details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated, libraryParseFailure: isKnownParserError, xResponseKind: xResponseKind || null, contentRejection: isContentReject }
         }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
 
         if (accountResult.isolated) {
@@ -891,14 +897,18 @@ async function run({
             operation: 'DirectX.publish',
             result: newState,
             durationMs: Date.now() - publishStartedAt,
-            errorCode: result.xErrorCode || result.reason || null,
+            errorCode: result.xErrorCode ?? result.reason ?? null,
             sanitizedError: result.rawError ? sanitizeError(result.rawError) : null,
             details: {
               dispatchEntered,
               bridgeStatus: result.status || null,
               textUtf16Length: typeof directPayload.text === 'string' ? directPayload.text.length : null,
               textCodePoints: typeof directPayload.text === 'string' ? Array.from(directPayload.text).length : null,
-              verifiedNotPosted: result.verifiedNotPosted === true
+              verifiedNotPosted: result.verifiedNotPosted === true,
+              xResponseKind: result.xResponseKind || null,
+              xErrorMessage: result.xErrorMessage || null,
+              httpStatus: Number.isInteger(result.httpStatus) ? result.httpStatus : null,
+              verificationError: result.verificationError || null
             }
           });
           const publishedAt = new Date(clock()).toISOString();
@@ -911,7 +921,23 @@ async function run({
             transitioned = true;
             delete i.attempt;
             i.state = newState; i.reason = result.reason || null;
-            if (newState !== 'published') recordUnsuccessfulAttempt(s, { accountId, outcome: newState === 'ambiguous' ? 'ambiguous' : 'failed', at: clock() });
+            if (newState !== 'published') {
+              // Keep a bounded diagnosis on the durable queue item itself so
+              // incident reviews don't depend only on 7-day forensic retention.
+              i.failureDiagnostic = {
+                observedAt: publishedAt,
+                dispatchEntered: Boolean(dispatchEntered),
+                xResponseKind: result.xResponseKind || null,
+                xErrorCode: result.xErrorCode ?? null,
+                xErrorMessage: (result.xErrorMessage || result.rawError || result.reason)
+                  ? sanitizeError(result.xErrorMessage || result.rawError || result.reason).slice(0, 512) : null,
+                httpStatus: Number.isInteger(result.httpStatus) ? result.httpStatus : null,
+                verificationError: result.verificationError ? sanitizeError(result.verificationError).slice(0, 512) : null
+              };
+              recordUnsuccessfulAttempt(s, { accountId, outcome: newState === 'ambiguous' ? 'ambiguous' : 'failed', at: clock() });
+            } else {
+              delete i.failureDiagnostic;
+            }
             if (['published', 'ambiguous'].includes(newState)) {
               i.accountId = accountId; i.accountUsername = account?.username;
               const minSeconds = Number.isSafeInteger(s.settings?.delayMinSeconds) ? s.settings.delayMinSeconds : 15;
@@ -934,7 +960,11 @@ async function run({
             return s;
           });
           if (!transitioned) break;
-          logger.log(JSON.stringify({ event: 'post_result', item: item.id, status: newState, account: accountId, reason: result.reason || result.status, url: result.url || null }));
+          logger.log(JSON.stringify({
+            event: 'post_result', runId: run.runId, item: item.id, status: newState,
+            account: accountId, reason: result.reason || result.status, url: result.url || null,
+            xErrorCode: result.xErrorCode ?? null, xResponseKind: result.xResponseKind || null
+          }));
           if (newState === 'published') {
             bot.forensicLogger?.record({
               eventType: 'post_success',
@@ -964,8 +994,11 @@ async function run({
               port: session?.port,
               exitIp: session?.exitIp,
               xErrorCode: result.xErrorCode,
-              xErrorMessage: result.rawError || result.reason,
-              details: { itemId: item.id, reason: result.reason, rawError: result.rawError, fetchError: result.fetchError }
+              xErrorMessage: result.xErrorMessage || result.rawError || result.reason,
+              httpStatus: Number.isInteger(result.httpStatus) ? result.httpStatus : null,
+              details: { itemId: item.id, runId: run.runId, reason: result.reason,
+                xResponseKind: result.xResponseKind, rawError: result.rawError,
+                fetchError: result.fetchError, verificationError: result.verificationError }
             }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
             // Preserve the per-item forensic event without spamming Telegram.
             // A single alert is emitted only when the account is isolated.
@@ -978,7 +1011,8 @@ async function run({
               failure: 'ambiguous',
               reason: result.reason || 'publish_confirmation_missing',
               rawError: result.rawError,
-              xErrorCode: result.xErrorCode
+              xErrorCode: result.xErrorCode,
+              xResponseKind: result.xResponseKind
             });
             if (outcome.halt) { halt = true; }
             skipDelay = false;
@@ -1029,6 +1063,15 @@ async function run({
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
               i.state = dispatchEntered || i.attempt?.phase === 'dispatching' ? 'ambiguous' : 'pending';
+              i.failureDiagnostic = {
+                observedAt: new Date(clock()).toISOString(),
+                dispatchEntered: Boolean(dispatchEntered || i.attempt?.phase === 'dispatching'),
+                xResponseKind: err.xResponseKind || 'exception',
+                xErrorCode: err.xErrorCode ?? err.code ?? null,
+                xErrorMessage: err.message ? sanitizeError(err.message).slice(0, 512) : null,
+                httpStatus: Number.isInteger(err.httpStatus) ? err.httpStatus : null,
+                verificationError: err.verificationError ? sanitizeError(err.verificationError).slice(0, 512) : null
+              };
               recordUnsuccessfulAttempt(s, { accountId, outcome: i.state === 'ambiguous' ? 'ambiguous' : 'failed', at: clock() });
               if (i.state === 'ambiguous') {
                 i.accountId = accountId;

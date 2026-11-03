@@ -159,7 +159,13 @@ class DirectXAdapter {
             blocked: false,
             retryable: true,
             verifiedNotPosted: true,
-            reason: result.reason || 'publish_not_posted_on_timeline'
+            reason: result.reason || 'publish_not_posted_on_timeline',
+            rawError: result.rawError,
+            xErrorCode: result.xErrorCode,
+            xErrorMessage: result.xErrorMessage,
+            xResponseKind: result.xResponseKind,
+            verificationError: result.verificationError,
+            httpStatus: result.httpStatus
           };
         }
         if (result.rateLimit === true || result.status === 'rate_limit') {
@@ -173,6 +179,12 @@ class DirectXAdapter {
             accountFailure: 'rate_limit',
             retryAfterSeconds: result.retryAfterSeconds || 60,
             reason: result.reason || 'rate_limit',
+            rawError: result.rawError,
+            xErrorCode: result.xErrorCode,
+            xErrorMessage: result.xErrorMessage,
+            xResponseKind: result.xResponseKind,
+            verificationError: result.verificationError,
+            httpStatus: result.httpStatus,
           };
         }
         if (state.used || result.ambiguous) {
@@ -181,7 +193,11 @@ class DirectXAdapter {
             accountFailure: result.accountFailure,
             rawError: result.rawError,
             xErrorCode: result.xErrorCode,
-            fetchError: result.fetchError
+            fetchError: result.fetchError,
+            xResponseKind: result.xResponseKind,
+            xErrorMessage: result.xErrorMessage,
+            httpStatus: result.httpStatus,
+            verificationError: result.verificationError
           };
         }
         return {
@@ -190,6 +206,10 @@ class DirectXAdapter {
           rawError: result.rawError,
           xErrorCode: result.xErrorCode,
           fetchError: result.fetchError,
+          xResponseKind: result.xResponseKind,
+          xErrorMessage: result.xErrorMessage,
+          httpStatus: result.httpStatus,
+          verificationError: result.verificationError,
           rateLimit: Boolean(result.rateLimit),
           retryAfterSeconds: result.retryAfterSeconds,
           readDiagnostic: readDiagnostic(result.readDiagnostic),

@@ -167,7 +167,8 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
         if isinstance(e, dict):
             if type(e.get('code')) is int:
                 codes.add(e['code'])
-            ext_code = e.get('extensions', {}).get('code')
+            ext = e.get('extensions')
+            ext_code = ext.get('code') if isinstance(ext, dict) else None
             if type(ext_code) is int:
                 codes.add(ext_code)
             if 'bounce_location' in e:
@@ -212,6 +213,34 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
 
     return None
 
+
+
+def _x_error_with_details(exc, payload=None, http_status=None):
+    """Preserve X codes/messages on ALL exception paths, without printing raw JSON."""
+    body = payload if isinstance(payload, dict) else {}
+    errors = body.get('errors') if isinstance(body.get('errors'), list) else []
+    first = next((entry for entry in errors if isinstance(entry, dict)), {})
+    extensions = first.get('extensions')
+    extensions = extensions if isinstance(extensions, dict) else {}
+    code = first.get('code')
+    if code is None:
+        code = extensions.get('code')
+    if isinstance(code, (dict, list, bool)):
+        code = None
+    if code is not None and not isinstance(code, (str, int)):
+        code = None
+    message = first.get('message')
+    message = message[:512] if isinstance(message, str) else None
+
+    exc.raw_json = body  # internal classification only: never dump full payload to logs
+    exc.errors = errors
+    exc.code = code
+    exc.error_code = code
+    exc.x_error_message = message
+    exc.x_response_kind = 'graphql_errors' if errors else 'http_or_transport_failure'
+    if http_status is not None:
+        exc.http_status = http_status
+    return exc
 
 def compatibility_client():
     """Build a local Client subclass; never rewrite third-party classes/methods."""
@@ -317,12 +346,19 @@ def compatibility_client():
             errors = errors if isinstance(errors, list) else []
             failure = classify_x_account_failure(raw_json=raw_json, errors=errors)
             if failure:
-                error = TwitterException('direct_x_account_failure')
+                error = _x_error_with_details(
+                    TwitterException('direct_x_account_failure'),
+                    raw_json, response.status_code
+                )
                 error.account_failure = failure
+                if failure == 'rate_limit':
+                    error.retry_after_seconds = 60
                 raise error
             if response.status_code >= 300:
-                error = TwitterException('direct_x_http_failure')
-                error.http_status = response.status_code
+                error = _x_error_with_details(
+                    TwitterException('direct_x_http_failure'),
+                    raw_json, response.status_code
+                )
                 if response.status_code == 429:
                     error.account_failure = 'rate_limit'
                     import time
@@ -338,14 +374,16 @@ def compatibility_client():
             except ValueError:
                 raise TwitterException('direct_x_invalid_json') from None
             if isinstance(data, dict) and data.get('errors'):
-                first_err = data['errors'][0] if isinstance(data['errors'], list) and data['errors'] else {}
-                err_code = first_err.get('code') or first_err.get('extensions', {}).get('code')
-                err_msg = first_err.get('message', 'direct_x_api_failure')
-                error = TwitterException(f'direct_x_api_failure: [{err_code}] {err_msg}' if err_code is not None else f'direct_x_api_failure: {err_msg}')
-                error.raw_json = data
-                error.errors = data['errors']
-                error.code = err_code
-                error.error_code = err_code
+                first_err = next((e for e in data['errors'] if isinstance(e, dict)), {})
+                extensions = first_err.get('extensions') if isinstance(first_err.get('extensions'), dict) else {}
+                err_code = first_err.get('code')
+                if err_code is None:
+                    err_code = extensions.get('code')
+                err_msg = str(first_err.get('message') or 'direct_x_api_failure')[:512]
+                error = _x_error_with_details(
+                    TwitterException(f'direct_x_api_failure: [{err_code}] {err_msg}'),
+                    data, response.status_code
+                )
                 failure = classify_x_account_failure(raw_json=data, errors=data['errors'])
                 if failure:
                     error.account_failure = failure
@@ -410,18 +448,24 @@ def compatibility_client():
                 richtext_options, edit_tweet_id, limit_mode,
             )
             self._last_create_tweet_response = response
-            if 'errors' in response:
+            if isinstance(response, dict) and response.get('errors'):
                 failure = classify_x_account_failure(raw_json=response, errors=response.get('errors', []))
                 if failure:
-                    error = TwitterException('direct_x_account_failure')
+                    error = _x_error_with_details(
+                        TwitterException('direct_x_account_failure'), response
+                    )
                     error.account_failure = failure
                     if failure == 'rate_limit':
                         error.http_status = 429
+                        error.retry_after_seconds = 60
                     raise error
-                raise_exceptions_from_response(response['errors'])
-                raise CouldNotTweet(
-                    response['errors'][0] if response['errors'] else 'Failed to post a tweet.'
-                )
+                try:
+                    raise_exceptions_from_response(response['errors'])
+                except Exception as exc:
+                    # Retain Twikit's specific exception type, but never lose
+                    # the original GraphQL error code/message during mapping.
+                    raise _x_error_with_details(exc, response) from None
+                raise _x_error_with_details(CouldNotTweet('Failed to post a tweet.'), response)
             if is_note_tweet:
                 result = response['data']['notetweet_create']['tweet_results']
             else:
