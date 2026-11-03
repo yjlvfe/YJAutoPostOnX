@@ -70,4 +70,5 @@ test('panel throttling retains explicit immediate updates on start and stop', ()
   assert.match(ui,/\}, 3000\);\s*this\.ticker\.unref/);
   assert.match(ui,/inHoursStage \? 60000 : 15000/);
   assert.match(ui,/this\.refreshPanels\(true\)/);
+  assert.match(ui,/منشورات غامضة تحتاج مراجعة/);
 });
