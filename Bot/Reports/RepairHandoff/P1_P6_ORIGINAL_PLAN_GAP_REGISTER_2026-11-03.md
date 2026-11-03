@@ -75,3 +75,38 @@
 - [MASTER_TODO.md](MASTER_TODO.md): active repository tracker (its existing lines and statuses are unchanged by this addendum).
 - [PROGRESS_HISTORY.md](PROGRESS_HISTORY.md): historical report ledger (only a new entry was added).
 - PRs: [#13](https://github.com/yjlvfe/YJAutoPostOnX/pull/13), [#14](https://github.com/yjlvfe/YJAutoPostOnX/pull/14), [#15](https://github.com/yjlvfe/YJAutoPostOnX/pull/15), [#16](https://github.com/yjlvfe/YJAutoPostOnX/pull/16), [#17](https://github.com/yjlvfe/YJAutoPostOnX/pull/17), [#18](https://github.com/yjlvfe/YJAutoPostOnX/pull/18), [#19](https://github.com/yjlvfe/YJAutoPostOnX/pull/19).
+
+---
+
+## Round 10 / M11 evidence-linked progress matrix — 2026-11-03
+
+This matrix is **add-only tracking** for all **20** `ADD-Px-xx` records; it is not a replacement for the 33 original findings or their statuses. It distinguishes code merged, reported evidence, and unfinished acceptance. References: PRs #19–#23, latest verified main `0be50e56e33051b7596ff5e4070a8d46ae3ba16d`, and user-provided Round10 evidence ZIP. The ZIP confirms an audit inventory of 30 quarantined items with 30/30 account IDs and no requeue approvals; it does **not** contain a complete independent live X response log for all 30 outcomes.
+
+| ID | Round 10 state | Established evidence | Still required before closure |
+|---|---|---|---|
+| `ADD-P1-01` | جزئي | Round10 inventory 30/30 ambiguous with 0 auto-requeues; 13 missing account associations populated; item 53d0 has strong publish-time evidence. | Resolve each item independently; do not mark recovery done while 30 remain quarantined; identify 53d0 disposition safely. |
+| `ADD-P1-02` | الكود مدمج / إثبات ناقص | PR #21 enhanced CreateTweet/None diagnostics; CI passed; no definitive new live failure evidence in attached ZIP. | Confirm real next X error code/response and guarantee no second POST. |
+| `ADD-P1-03` | الكود مدمج / إثبات ناقص | PR #21 post_result now has run, account, status, dispatch and timing plus GraphQL fields. | Measure real next cycle failed/ambiguous/success and quota with journal reconciliation. |
+| `ADD-P1-04` | تكامل جزئي | Dispatch fence and deferred rate-limit handling merged; earlier 21-post M10 run has evidence. | Post-dispatch rate-limit/late-confirmation fault validation without automatic replay. |
+| `ADD-P2-01` | دليل تشغيل تاريخي | Owner/brother live panel and start receipts reported in M8–M10. | Current long-run dual-panel/start-source receipt and owner signoff. |
+| `ADD-P2-02` | دليل تشغيل تاريخي | M10 telemetry measured publish and SQLite/panel latency. | Correlate next X rejection latency with current logs; distinguish timeline verification overhead. |
+| `ADD-P2-03` | دليل تشغيل تاريخي | M10 final CSV receipts in owner and brother chats reported and previously correlated. | Check terminal CSV/stop after PR #23; no CSV omission for actually published posts. |
+| `ADD-P3-01` | الكود مدمج / إثبات ناقص | Read-only BEGIN deferred behavior previously merged and tested. | Sustained SQLite latency and writer-contention checks across real cycles. |
+| `ADD-P3-02` | جزئي | Round10 inventory 30/30 has accountId, including 13 historically missing; new failureDiagnostic fields merged. | Verify mapping against original raw forensic events; keep attempt provenance and causal diagnostics durable, not just top-level accountId. |
+| `ADD-P3-03` | دليل تشغيل تاريخي | M10 verified 21 posts across five accounts, with full run/CSV record. | Further long-run after PR #23 with restarts, resource and no duplicate posts. |
+| `ADD-P4-01` | دليل تشغيل تاريخي | PR #15 and M8 reports covered Twikit KeyError urls normalization and live posting. | Confirm no regressions with current pinned Python packages in real X runs. |
+| `ADD-P4-02` | الكود مدمج / إثبات ناقص | PR #19/#21 carry GraphQL code/message/status; new source-presence tests and CI green. | Show a genuine new API error end-to-end in sanitized journal and SQLite with exact account/item attribution. |
+| `ADD-P4-03` | الكود مدمج / إثبات ناقص | Codes 186/187 exempted from account strikes in PR #19 by classifier. | Verify real rejection code/strike handling, never exempt ban/captcha/auth failures. |
+| `ADD-P4-04` | مذكور في تقرير Hermes | Round10 Hermes report says five VPN containers healthy and production service active. | Independent long-run VPN/exit-IP and rotation checks with no host IP leak. |
+| `ADD-P5-01` | التشخيص مدمج / العلاج مفتوح | Text length/UTF-16 observations and error code 186 recognition exist in merged code. | Trace overlong output to generator/validation; prevent invalid content before CreateTweet. |
+| `ADD-P5-02` | التشخيص مدمج / العلاج مفتوح | Historical posts may duplicate older X posts; original GraphQL code was not recorded, so 187 is not retro-proven. | Prevent duplicate content upstream; avoid equating historical same-text match with current publish success. |
+| `ADD-P6-01` | ⚠️ خطر يحتاج إصلاح | PR #23 introduced durable id/epoch for audit events, redaction and migration guards; audit tests call prune/reconcile on Bot/data/state.sqlite. | Move destructive/repair tests to isolated temporary SQLite/JSONL; prove independent durability without touching production; handle dual-write partial failures. |
+| `ADD-P6-02` | المراقب مدمج | PR #18 monitor captures through stop and dual CSV receipts; M10 raw journal was correlated to 21 posted items. | Ensure new audit archives carry complete raw journal, exact run scope and evidence retention. |
+| `ADD-P6-03` | مفتوح | All 33 original findings and 20 added tasks still Codex PENDING; owner signoffs not granted. | Run independent Codex review using raw evidence; preserve separate owner acceptance by P phase. |
+| `ADD-P6-04` | جزئي | PRs #20–#23 preserve P1–P6 and 33+20; original master and Round10 report exist; Issue #12 baseline still stale. | Reconcile Issue #12 and approve PR-linked tracking update without rewriting historic statuses. |
+
+**Independent acceptance gates:** Codex **PENDING for all 33 original findings and all 20 ADD follow-ups**; owner acceptance **PENDING / NO_SIGNOFF_EVIDENCE**. Do not convert a local test pass, static source test, GitHub merge, historical proof, or a chatbot report into production signoff.
+
+**Priority forensic caveats:** `53d0f458` has a same-author tweet ID timestamp within ~6 seconds of its dispatch (strong evidence of publication); keep it **non-retryable** while deciding how to reconcile published status, quota and CSV. The other 29 item outcomes remain independently unresolved. The Round10 `m11_round10_forensic_integrity.test.js` calls `ForensicLogger.prune()` and `reconcile()` against `Bot/data/state.sqlite`; it must be isolated to a **temporary test database** before further production test runs. The migration revert script still appends audit events when invoked with `--apply` even when no items changed; requiring an `--apply` switch alone is not full idempotency. The historical CSV is not an authority for X publication.
+
+**Canonical progress tracker:** the adjacent JSON file contains a `round10` object on **every one of the 20 tasks**, with evidence and remaining acceptance; older implementation/test history is untouched.
