@@ -63,6 +63,7 @@ function accountRecord(input = {}) {
     ...(input.lastCaptchaVerifyAt != null ? { lastCaptchaVerifyAt: Number(input.lastCaptchaVerifyAt) } : {}),
     ...(input.lastNotifiedCaptchaIncidentId ? { lastNotifiedCaptchaIncidentId: String(input.lastNotifiedCaptchaIncidentId) } : {}),
     ...(Array.isArray(input.captchaDeliveredChats) ? { captchaDeliveredChats: input.captchaDeliveredChats.map(String) } : {}),
+    ...(input.captchaDeliveredIncidentId ? { captchaDeliveredIncidentId: String(input.captchaDeliveredIncidentId) } : {}),
     ...(input.lastCaptchaAlertAt != null ? { lastCaptchaAlertAt: Number(input.lastCaptchaAlertAt) } : {}),
     ...(input.captchaResolvedAt != null ? { captchaResolvedAt: Number(input.captchaResolvedAt) } : {}),
     ...(input.unverifiedReason ? { unverifiedReason: String(input.unverifiedReason) } : {}),
