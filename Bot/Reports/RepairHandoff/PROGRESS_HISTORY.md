@@ -922,3 +922,14 @@ Following previous test passes (369/369), production stability encountered post-
 - **Approvals & Governance**:
   - All 33 original findings and 20 ADD tasks preserved intact.
   - All 33 Codex review approvals and all owner signoffs remain strictly **PENDING**.
+
+
+### Round 10 M11 — original P1–P6 ADD-status evidence crosswalk (2026-11-03, documentation only)
+
+- Confirmed latest merged GitHub main: `0be50e56e33051b7596ff5e4070a8d46ae3ba16d` (PR #23). Full original history: **33 findings P1–P6 + exactly 20 added ADD tasks**. None deleted, renumbered, or signed off automatically.
+- Verified user-provided Round10 ZIP contains `audit_ambiguous_m11.json` at revision 62118 with **30 ambiguous items, 30/30 account IDs populated, requeueApproved=false for all 30**. This proves the snapshot and account attribution fields, not that all 30 attempts have been resolved by upstream X evidence.
+- Verified PR #23 source includes a fatal guard for the old false-recovery migration, default dry-run for the revert script, `id` and numeric `epoch` on audit events, and tests asserting these features. Five CI jobs passed according to the merged PR's GitHub checks.
+- **New critical test-isolation finding:** `Bot/test/m11_round10_forensic_integrity.test.js` invokes `ForensicLogger.prune()` and `reconcile()` on the real `Bot/data/state.sqlite` path. Such functions may mutate data; test isolation is not proven. This becomes a **blocking outstanding acceptance criterion under ADD-P6-01**, not an approval.
+- **Additional limitation:** `revert_false_recovery_m11.js --apply` appends audit entries even with zero reverted/enriched items; its SQLite then JSONL writes are not a single atomic transaction. Audit durability/idempotency still needs independent fault injection, captured under P6 and P3.
+- `53d0f458`: Snowflake timestamp `2026-11-01T19:50:59.577Z` matches the original `@crytpokingxvo8` dispatch window; X-post evidence is strong but queue reconciliation and historical CSV handling still require independent verification. **Do not requeue/post it again**.
+- Added `round10` evidence and next-action fields to **each of the 20 ADD tasks** in [JSON tracker](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.json), with matching matrix in [Markdown tracker](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.md). All 33 original findings, prior test statuses, and every Codex / owner-signoff gate remain unchanged and `PENDING` where applicable.
