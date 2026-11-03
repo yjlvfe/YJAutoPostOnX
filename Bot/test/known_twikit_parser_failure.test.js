@@ -23,7 +23,7 @@ test('confirmed ban, captcha, and ordinary auth failure are never exempted', () 
 test('production runner guards its strike and forensic persistence path', () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/runner.js'), 'utf8');
   assert.match(source, /const isKnownParserError = isKnownTwikitParserFailure\(\{ failure, rawError \}\)/);
-  assert.match(source, /else if \(isKnownParserError\) \{[\s\S]{0,280}accountResult\.failures = acc\.failures \|\| 0/);
+  assert.match(source, /else if \(isKnownParserError(?: \|\| isContentReject)?\) \{[\s\S]{0,280}accountResult\.failures = acc\.failures \|\| 0/);
   assert.match(source, /twikit_profile_parse_error_no_strike/);
   assert.match(source, /rawError: result\.rawError/);
   assert.match(source, /rawError: err\.message/);

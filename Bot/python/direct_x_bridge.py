@@ -1002,7 +1002,34 @@ class DirectSession:
                 return res
 
             if tweet is None:
-                result = uncertain('create_tweet_returned_none')
+                reason = 'create_tweet_returned_none'
+                last_resp = getattr(self.client, '_last_create_tweet_response', None)
+                x_resp_kind = None
+                x_err_msg = None
+                x_err_code = None
+                if isinstance(last_resp, dict):
+                    errors = last_resp.get('errors')
+                    if isinstance(errors, list) and errors:
+                        first_err = errors[0] if isinstance(errors[0], dict) else {}
+                        x_err_code = first_err.get('code')
+                        x_err_msg = first_err.get('message')
+                        x_resp_kind = 'graphql_errors'
+                    else:
+                        res_data = last_resp.get('data', {}).get('create_tweet', {}).get('tweet_results', {}).get('result', {})
+                        if isinstance(res_data, dict):
+                            typename = res_data.get('__typename')
+                            if typename:
+                                x_resp_kind = f"tweet_result_{typename.lower()}"
+                            tombstone = res_data.get('tombstone', {})
+                            if isinstance(tombstone, dict):
+                                x_err_msg = tombstone.get('text', {}).get('text')
+                result = uncertain(reason)
+                if x_resp_kind:
+                    result['xResponseKind'] = x_resp_kind
+                if x_err_code is not None:
+                    result['xErrorCode'] = x_err_code
+                if x_err_msg:
+                    result['xErrorMessage'] = str(x_err_msg)[:512]
                 if fetch_err_str:
                     result['fetchError'] = fetch_err_str[:2048]
                 return result

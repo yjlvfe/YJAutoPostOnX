@@ -1,0 +1,819 @@
+{
+  "auditKind": "READ_ONLY_AMBIGUOUS_INVENTORY",
+  "revision": 61962,
+  "auditedAt": "2026-11-03T10:22:16.286Z",
+  "total": 30,
+  "autoRequeueAllowed": false,
+  "items": [
+    {
+      "itemId": "47da5e8a-9c24-45ed-ae64-4d3c163a8b9a",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_author_or_id_unverified",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T02:52:26.611Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_author_or_id_unverified"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "8b9481aa-4723-4b0b-bfc4-b7fdff6730e3",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T16:15:25.634Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "10afc79e-7634-4149-acd1-90277ff53b1e",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_author_or_id_unverified",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T07:13:28.250Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_author_or_id_unverified"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "3719dfde-c7b6-446f-a8ba-211f48b92ec2",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_not_posted_on_timeline",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T07:14:00.546Z",
+          "type": "post_error",
+          "code": null,
+          "message": "Attempt ended"
+        },
+        {
+          "at": "2026-11-01T07:14:00.889Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "Attempt ended"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "c1eecbd3-704d-43ba-8306-93a1a15b4350",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": null,
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T16:15:34.854Z",
+          "type": "post_error",
+          "code": null,
+          "message": "Attempt ended"
+        },
+        {
+          "at": "2026-11-01T16:15:35.248Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "Attempt ended"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "a589288f-19af-4cbb-bc24-90a07940c394",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T19:42:43.851Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "5ffd64c2-713c-4768-976d-d8d0b0a1673e",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T19:50:42.665Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "5e5f91ab-2841-4848-a035-4c1c8a8df197",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T19:50:53.389Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "53d0f458-3144-4e89-a1af-202a8893afc6",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "unresolved_in_finally",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T19:50:59.569Z",
+          "type": "post_error",
+          "code": null,
+          "message": "Attempt ended"
+        },
+        {
+          "at": "2026-11-01T19:50:59.946Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "Attempt ended"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "34ed9685-4513-4ff8-afb6-f98e45204f9d",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-01T19:55:14.040Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "f75e4f8d-c5ed-44b0-8aa9-77af63be85dc",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T08:37:03.638Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "bd12d092-4480-4b9f-a41d-0324ec77b317",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T08:41:52.356Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "fa1f2749-8496-4d20-b6e4-d6fad4a5de0b",
+      "state": "ambiguous",
+      "accountId": null,
+      "accountUsername": null,
+      "reason": "publish_author_or_id_unverified",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T08:51:40.079Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_author_or_id_unverified"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "f3a3ff40-eda0-4d8f-9df4-3fd1c024ee23",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T19:10:20.019Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        },
+        {
+          "at": "2026-11-02T19:10:20.542Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "d0f523a4-46fb-47f4-b28a-77253c16ec12",
+      "state": "ambiguous",
+      "accountId": "x-930e0054b395228aefa9",
+      "accountUsername": "crytpokingxvo8",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T19:13:44.288Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        },
+        {
+          "at": "2026-11-02T19:13:44.844Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "37e2e293-35b8-4d78-aed9-d0e79ea1a1ff",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "create_tweet_returned_none",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T19:18:09.667Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        },
+        {
+          "at": "2026-11-02T19:18:10.168Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "9680f8c1-d108-4658-9a53-fa6be6c54593",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "create_tweet_returned_none",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T19:25:38.469Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        },
+        {
+          "at": "2026-11-02T19:25:38.881Z",
+          "type": "account_isolated_3_failures",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "5ebeb53f-db97-4c81-b34c-069d4406d18a",
+      "state": "ambiguous",
+      "accountId": "x-23d02ee683cbc043ff16",
+      "accountUsername": "menalobq",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T20:31:53.715Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        },
+        {
+          "at": "2026-11-02T20:31:54.256Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "99eb4ba0-86b1-47e1-94e8-08682453c749",
+      "state": "ambiguous",
+      "accountId": "x-a55ef01cbf656b2e7410",
+      "accountUsername": "marcosvhv",
+      "reason": "create_tweet_returned_none",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T21:02:13.260Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        },
+        {
+          "at": "2026-11-02T21:02:13.806Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "5b443dce-b8b6-47e1-923a-54a3624bb409",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T21:37:32.432Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        },
+        {
+          "at": "2026-11-02T21:37:33.152Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "99f420e4-9e24-4767-aa84-5351f10ba075",
+      "state": "ambiguous",
+      "accountId": "x-a55ef01cbf656b2e7410",
+      "accountUsername": "marcosvhv",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T21:39:41.449Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        },
+        {
+          "at": "2026-11-02T21:39:41.965Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "364f38bc-0ea7-4118-be5d-c6142b694d58",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-02T21:42:00.644Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        },
+        {
+          "at": "2026-11-02T21:42:01.269Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "087d29f1-050f-4bb5-ab93-23054827e56b",
+      "state": "ambiguous",
+      "accountId": "x-930e0054b395228aefa9",
+      "accountUsername": "crytpokingxvo8",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T02:43:56.391Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T02:43:56.933Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "427391bc-8bdc-4063-ad05-3afd12bc3348",
+      "state": "ambiguous",
+      "accountId": "x-a55ef01cbf656b2e7410",
+      "accountUsername": "marcosvhv",
+      "reason": "create_tweet_returned_none",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T02:45:34.285Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        },
+        {
+          "at": "2026-11-03T02:45:34.849Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "create_tweet_returned_none"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "afccd027-df63-4036-a40b-3bae30677a23",
+      "state": "ambiguous",
+      "accountId": "x-86ef47c7166eaeb29e1a",
+      "accountUsername": "kaniabq",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T02:49:59.829Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T02:50:00.446Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "ae4a1631-0d1e-4081-b4c8-5ba12b318ed4",
+      "state": "ambiguous",
+      "accountId": "x-a55ef01cbf656b2e7410",
+      "accountUsername": "marcosvhv",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T02:57:02.520Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T02:57:03.075Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "3a982de7-76b0-450f-a712-e10861b26dda",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T03:02:34.446Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T03:02:35.020Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "4d9df18c-075e-4e25-97c5-8b524ee5624f",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T04:17:16.377Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T04:17:16.960Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "6bd6d6cf-f275-4ac2-9042-a0886d958c41",
+      "state": "ambiguous",
+      "accountId": "x-86ef47c7166eaeb29e1a",
+      "accountUsername": "kaniabq",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T04:18:17.840Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T04:18:18.400Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    },
+    {
+      "itemId": "5f375ded-885f-4a75-8d16-f1d90ede5917",
+      "state": "ambiguous",
+      "accountId": "x-ab22678a0fc05660b440",
+      "accountUsername": "emiehg",
+      "reason": "publish_confirmation_missing",
+      "attemptRecordedAt": null,
+      "xResponseKind": null,
+      "xErrorCode": null,
+      "xErrorMessage": null,
+      "verificationError": null,
+      "httpStatus": null,
+      "forensicEvents": [
+        {
+          "at": "2026-11-03T04:26:39.379Z",
+          "type": "post_ambiguous",
+          "code": null,
+          "message": "direct_x_api_failure"
+        },
+        {
+          "at": "2026-11-03T04:26:39.958Z",
+          "type": "account_failure_strike",
+          "code": null,
+          "message": "publish_confirmation_missing"
+        }
+      ],
+      "evidenceStatus": "REVIEW_REQUIRED",
+      "requeueApproved": false
+    }
+  ]
+}

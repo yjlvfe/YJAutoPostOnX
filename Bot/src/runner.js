@@ -961,9 +961,20 @@ async function run({
           });
           if (!transitioned) break;
           logger.log(JSON.stringify({
-            event: 'post_result', runId: run.runId, item: item.id, status: newState,
-            account: accountId, reason: result.reason || result.status, url: result.url || null,
-            xErrorCode: result.xErrorCode ?? null, xResponseKind: result.xResponseKind || null
+            event: 'post_result',
+            runId: run.runId,
+            item: item.id,
+            status: newState,
+            account: accountId,
+            reason: result.reason || result.status,
+            url: result.url || null,
+            dispatchEntered: Boolean(dispatchEntered),
+            durationMs: Date.now() - publishStartedAt,
+            xErrorCode: result.xErrorCode ?? null,
+            xResponseKind: result.xResponseKind || null,
+            xErrorMessage: result.xErrorMessage ? sanitizeError(result.xErrorMessage).slice(0, 512) : null,
+            httpStatus: Number.isInteger(result.httpStatus) ? result.httpStatus : null,
+            verificationError: result.verificationError ? sanitizeError(result.verificationError).slice(0, 512) : null
           }));
           if (newState === 'published') {
             bot.forensicLogger?.record({
