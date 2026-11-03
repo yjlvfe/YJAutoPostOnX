@@ -16,6 +16,8 @@ const { riyadhDay, accountCapacity, quotaAdmission } = require('./quota');
 const { normalizeSubnet } = require('./forensicLogger');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const { isKnownTwikitParserFailure } = require('./knownTwikitParserFailure');
+const { recordUnsuccessfulAttempt } = require('./attemptOutcomes');
+const { classifyPublishOutcome } = require('./publishOutcome');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -492,6 +494,7 @@ async function run({
           }
         }
       }
+      let lastRotationSignature = null;
       const excluded = state => {
         for (const [id, value] of cooling) {
           if (accountRevision(state.accounts?.find(a => a.id === id)) !== value.revision || value.until <= clock().getTime()) {
@@ -572,10 +575,12 @@ async function run({
           if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
             if (i.attempt?.phase === 'claimed') {
               i.state = 'pending';
+              recordUnsuccessfulAttempt(s, { accountId, outcome: 'failed', at: clock() });
               delete i.attempt;
               if (i.payload?.account === accountId) delete i.payload.account;
             } else {
               i.state = 'ambiguous';
+              recordUnsuccessfulAttempt(s, { accountId, outcome: 'ambiguous', at: clock() });
               i.reason ||= 'account_failure_after_dispatch';
               i.accountId = accountId;
               i.accountUsername = account?.username;
@@ -698,6 +703,27 @@ async function run({
       }
       const hints = new Map((passSnapshot.items || []).map(i => [i.id, i]));
       const passExcluded = excluded(passSnapshot);
+      // Explain each routing decision once per changed state, not once per
+      // queued post. Ordinary cooling/quota skips are not rotation failures.
+      const rotation = (run.accountIds || []).map(id => {
+        const acc = (passSnapshot.accounts || []).find(a => a.id === id);
+        const quota = acc ? accountCapacity(passSnapshot, acc, clock()).remaining : 0;
+        const pause = cooling.get(id);
+        const reason = !acc ? 'missing_account'
+          : acc.enabled === false ? 'disabled'
+          : ['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(acc.status) || (acc.failures || 0) >= 3 ? 'isolated'
+          : quota <= 0 ? 'quota_exhausted'
+          : passExcluded.has(id) ? 'cooling'
+          : 'eligible';
+        return { accountId: id, reason, remainingQuota: quota === Infinity ? null : quota,
+          coolingUntil: reason === 'cooling' ? pause?.until || null : null };
+      });
+      const rotationSignature = JSON.stringify({ cursor: passSnapshot.telegramUi?.run?.cursor || 0, rotation });
+      if (rotationSignature !== lastRotationSignature) {
+        lastRotationSignature = rotationSignature;
+        logStructured(logger, { level: 'info', component: 'runner', event: 'account_rotation_decision',
+          runId: run.runId, operation: 'cycleLoop.selectAccount', result: 'evaluated', rotation });
+      }
       const itemIdsList = Array.from(itemIds);
       for (let itemIdx = 0; itemIdx < itemIdsList.length; itemIdx++) {
         const itemId = itemIdsList[itemIdx];
@@ -839,15 +865,7 @@ async function run({
           const result = await attempt.wait(() => adapter.publish({ session, payload: adapter instanceof DirectXAdapter ? directPayload : item.payload, confirmPublish: true, signal: attempt.signal, onDispatch }));
           if (result.accountFailure) await ui.recordAccountCheck(accountId, { accountFailure: result.accountFailure }, { session: true, expectedAccount: account });
           if (result.published && !dispatchEntered) throw Object.assign(new Error('Missing dispatch fence'), { code: 'DISPATCH_FENCE_MISSING' });
-          const newState = result.published && result.url
-            ? 'published'
-            : (result.rateLimit || result.accountFailure === 'rate_limit')
-            ? 'pending'
-            : (result.published || result.ambiguous || dispatchEntered)
-            ? 'ambiguous'
-            : ['text_too_long', 'tweet_too_long'].includes(result.reason)
-            ? 'cancelled'
-            : 'pending';
+          const newState = classifyPublishOutcome(result, dispatchEntered);
           const publishedAt = new Date(clock()).toISOString();
           let transitioned = false;
           await bot.store.update(s => {
@@ -858,6 +876,7 @@ async function run({
             transitioned = true;
             delete i.attempt;
             i.state = newState; i.reason = result.reason || null;
+            if (newState !== 'published') recordUnsuccessfulAttempt(s, { accountId, outcome: newState === 'ambiguous' ? 'ambiguous' : 'failed', at: clock() });
             if (['published', 'ambiguous'].includes(newState)) {
               i.accountId = accountId; i.accountUsername = account?.username;
               const minSeconds = Number.isSafeInteger(s.settings?.delayMinSeconds) ? s.settings.delayMinSeconds : 15;
@@ -974,6 +993,7 @@ async function run({
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
               i.state = dispatchEntered || i.attempt?.phase === 'dispatching' ? 'ambiguous' : 'pending';
+              recordUnsuccessfulAttempt(s, { accountId, outcome: i.state === 'ambiguous' ? 'ambiguous' : 'failed', at: clock() });
               if (i.state === 'ambiguous') {
                 i.accountId = accountId;
                 i.accountUsername = account?.username;
@@ -1065,9 +1085,11 @@ async function run({
             if ((i?.state === 'processing' || (i?.state === 'ambiguous' && !i?.reason)) && claim?.token && i.attempt?.token === claim.token) {
               if (i.attempt?.phase === 'claimed' && !dispatchEntered) {
                 i.state = 'pending';
+                recordUnsuccessfulAttempt(s, { accountId, outcome: 'failed', at: clock() });
                 delete i.attempt;
               } else if (i.attempt?.phase === 'dispatching' || dispatchEntered) {
                 i.state = 'ambiguous';
+                recordUnsuccessfulAttempt(s, { accountId, outcome: 'ambiguous', at: clock() });
                 i.reason ||= 'unresolved_in_finally';
                 i.accountId ||= accountId;
                 i.accountUsername ||= account?.username;
