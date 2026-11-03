@@ -863,3 +863,13 @@ Following previous test passes (369/369), production stability encountered post-
   - Added Python test `python/test_compat_user_patch.py` (PASS).
   - All 583 automated master tests passed (100% pass rate in 103s).
   - Restarted `yj-telegram-bot.service` (PID 1374303) and verified live journalctl logs confirming simultaneous `panel_edit_success` for both Chat `528864559` (Message 1572) and Chat `5535435580` (Message 1291).
+
+
+#### Appendix 2026-11-03 — original P1–P6 plan reconciliation (additions only)
+
+- The owner supplied the **unaltered original** 2026-11-01 TODO/JSON tracker: six phases P1(5), P2(4), P3(10), P4(9), P5(3), P6(2), **33 original findings**.
+- Compared this with GitHub's current `MASTER_TODO.md`, previous PRs #11 and #13–#19, and reported live rounds M8–M11. The M milestones represent **production test rounds**, not replacement P phases.
+- Added [20 separately numbered `ADD-Px-xx` follow-ups](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.md), grouped under the **original** P1–P6, plus a JSON tracking register. All existing historical rows/approvals remain untouched.
+- The new items include complete X GraphQL error evidence, reconciliation of approximately 30 ambiguous queue items, proper failed-vs-ambiguous counters, Telegram panel/start/stop provenance, SQLite read contention, prolonged real-runtime checks, evidence retention, independent Codex review and owner signoffs.
+- **Evidence gates remain open**: all 33 original Codex approvals PENDING; P1/P2 owner signoffs PENDING; no verified P3–P6 final signoff; PR #19 merged to main but its new instrumentation is not yet backed by post-merge VPS publishing logs; Issue #12 remains open with stale history.
+- **No code or production state changed in this documentation-only reconciliation.** This entry does not reclassify earlier TESTED_PASS/APPROVED results or authorize replay of ambiguous posts.

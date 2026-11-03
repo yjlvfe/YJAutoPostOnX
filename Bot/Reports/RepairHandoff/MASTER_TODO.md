@@ -261,3 +261,13 @@ Execute full long-run production verification of the automated posting engine on
 - `APPROVED`: Codex approved the implementation.
 - `NEEDS_FIX`: Codex identified defects requiring revision.
 - `VERIFIED`: Final end-to-end verification completed and certified.
+
+---
+
+## Append-only original P1–P6 TODO gap register (2026-11-03)
+
+The original ChatGPT TODO (2026-11-01 v1.2) contains **33 FINDINGs in P1(5), P2(4), P3(10), P4(9), P5(3), P6(2)**. These historical P stages must not be replaced by GitHub's later internal phase labels or the M1–M11 production milestones.
+
+**20 additional follow-up tasks** discovered since November 1 are maintained separately in [P1–P6 original-plan gap register](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.md) and its [machine-readable JSON](P1_P6_ORIGINAL_PLAN_GAP_REGISTER_2026-11-03.json). This is an addition only: existing 33 findings and historical statuses above are unchanged.
+
+**Pending approvals:** Codex review remains **PENDING for 33/33** original findings; phase P1/P2 user signoffs remain **PENDING**; P3–P6 have **no independent final-signoff evidence** in reviewed artifacts. Production evidence for post-PR #19 M11 remains pending. The approximately 30 ambiguous posts require item-by-item reconciliation; no automatic replay is authorized. [Issue #12](https://github.com/yjlvfe/YJAutoPostOnX/issues/12) is still open with an outdated PR #11 baseline.
