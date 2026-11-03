@@ -44,7 +44,15 @@ function isPidAlive(pid, expectedPattern) {
           return false; // PID was recycled by an unrelated process
         }
       }
-    } catch {}
+    } catch (err) {
+      if (err.code === 'EACCES' || err.code === 'EPERM') {
+        // Permission barrier: fail closed by assuming alive so we never prematurely release or orphan
+        return true;
+      }
+      if (err.code === 'ENOENT') {
+        return false;
+      }
+    }
   }
   return true;
 }
@@ -72,12 +80,18 @@ function countUntrackedDirectXProcesses(trackedChildPids = new Set()) {
     try {
       const cmdlinePath = path.join(procDir, entry, 'cmdline');
       if (fs.existsSync(cmdlinePath)) {
-        const cmdline = fs.readFileSync(cmdlinePath, 'utf8');
-        if (cmdline.includes('direct_x_bridge.py') || cmdline.includes('direct_x_compat.py')) {
+        const cmd = fs.readFileSync(cmdlinePath, 'utf8');
+        if (cmd.includes('direct_x_bridge.py') || cmd.includes('direct_x_compat.py')) {
           untracked++;
         }
       }
-    } catch {}
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        const e = new Error(`PROCESS_VISIBILITY_UNVERIFIED: Cannot inspect cmdline for process ${entry}: ${err.message}`);
+        e.code = 'PROCESS_VISIBILITY_UNVERIFIED';
+        throw e;
+      }
+    }
   }
   return untracked;
 }
@@ -90,24 +104,28 @@ class SessionGuardRegistry {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     this.db = new DatabaseSync(this.dbPath);
-    this.db.exec('PRAGMA journal_mode = WAL;');
-    this.db.exec('PRAGMA busy_timeout = 5000;');
+    this._withRetry(() => {
+      this.db.exec('PRAGMA journal_mode = WAL;');
+      this.db.exec('PRAGMA busy_timeout = 5000;');
+    });
     this._initSchema();
   }
 
   _initSchema() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS session_leases (
-        lease_id TEXT PRIMARY KEY,
-        account_id TEXT,
-        session_key TEXT UNIQUE,
-        node_pid INTEGER NOT NULL,
-        child_pid INTEGER,
-        acquired_at INTEGER NOT NULL,
-        heartbeat_at INTEGER NOT NULL,
-        meta TEXT
-      );
-    `);
+    this._withRetry(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS session_leases (
+          lease_id TEXT PRIMARY KEY,
+          account_id TEXT,
+          session_key TEXT UNIQUE,
+          node_pid INTEGER NOT NULL,
+          child_pid INTEGER,
+          acquired_at INTEGER NOT NULL,
+          heartbeat_at INTEGER NOT NULL,
+          meta TEXT
+        );
+      `);
+    });
   }
 
   close() {
@@ -158,16 +176,20 @@ class SessionGuardRegistry {
     return dbCount + untracked;
   }
 
-  _withRetry(fn, maxRetries = 40) {
+  _withRetry(fn, maxRetries = 100) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         return fn();
       } catch (err) {
         const isBusy = (err.code === 'ERR_SQLITE_ERROR' || err.message?.includes('locked') || err.message?.includes('busy'));
         if (isBusy && attempt < maxRetries - 1) {
-          const delayMs = 10 + Math.floor(Math.random() * 25);
-          const until = Date.now() + delayMs;
-          while (Date.now() < until) {}
+          const delayMs = 15 + Math.floor(Math.random() * 35);
+          try {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+          } catch {
+            const until = Date.now() + delayMs;
+            while (Date.now() < until) {}
+          }
           continue;
         }
         throw err;
@@ -381,24 +403,51 @@ function resetSessionsForTest(customDbPath) {
     throw err;
   }
 
-  const tmpDir = os.tmpdir();
-  if (!resolved.startsWith(tmpDir) && !resolved.includes('test')) {
+  // Enforce that path resides strictly inside system temporary directory
+  const realTmpDir = fs.realpathSync(os.tmpdir());
+  let targetDir = path.dirname(resolved);
+  let canonicalTargetDir;
+  try {
+    canonicalTargetDir = fs.realpathSync(targetDir);
+  } catch {
+    canonicalTargetDir = targetDir;
+  }
+
+  if (!canonicalTargetDir.startsWith(realTmpDir) && !resolved.startsWith(realTmpDir)) {
     const err = new Error('TEMP_DIR_REQUIRED: customDbPath must reside inside a temporary test directory.');
     err.code = 'TEMP_DIR_REQUIRED';
     throw err;
   }
 
-  if (fs.existsSync(resolved)) {
-    try {
-      const stat = fs.lstatSync(resolved);
-      if (stat.isSymbolicLink()) {
-        const err = new Error('SYMLINK_RESET_FORBIDDEN: Refusing to unlink symbolic link in resetSessionsForTest.');
-        err.code = 'SYMLINK_RESET_FORBIDDEN';
-        throw err;
+  // Check target file and every parent directory component for symlinks to prevent traversal
+  let current = resolved;
+  while (current && current !== path.dirname(current)) {
+    if (fs.existsSync(current)) {
+      try {
+        const lstat = fs.lstatSync(current);
+        if (lstat.isSymbolicLink()) {
+          const err = new Error('SYMLINK_RESET_FORBIDDEN: Refusing to unlink target with symbolic link in path.');
+          err.code = 'SYMLINK_RESET_FORBIDDEN';
+          throw err;
+        }
+      } catch (e) {
+        if (e.code === 'SYMLINK_RESET_FORBIDDEN') throw e;
       }
-    } catch (e) {
-      if (e.code === 'SYMLINK_RESET_FORBIDDEN') throw e;
     }
+    current = path.dirname(current);
+  }
+
+  // Extra check: ensure realpath does not point to production database
+  let realTarget;
+  try {
+    realTarget = fs.realpathSync(resolved);
+  } catch {
+    realTarget = resolved;
+  }
+  if (realTarget === prodCanonical || realTarget.startsWith(path.dirname(prodCanonical))) {
+    const err = new Error('PROD_PATH_RESET_FORBIDDEN: Refusing to unlink production session lease registry.');
+    err.code = 'PROD_PATH_RESET_FORBIDDEN';
+    throw err;
   }
 
   if (defaultRegistry) {

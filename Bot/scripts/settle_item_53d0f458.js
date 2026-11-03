@@ -190,20 +190,37 @@ async function settleItem53d0({ dbPath, logFilePath, isApply, allowProdSettlemen
         getRiyadhDate(i.publishedAt) === riyadhHistoricalDay
       ).length;
 
-      const expectedTargetQuota = Math.max(existingPublishedCount + 1, currentHistoricalQuota > 0 ? currentHistoricalQuota + 1 : 1);
+      if (currentHistoricalQuota < existingPublishedCount) {
+        throw new Error(`QUOTA_RECONCILIATION_AMBIGUOUS: Current historical quota (${currentHistoricalQuota}) is less than existing published items count (${existingPublishedCount}) for account ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay}. Refusing to guess.`);
+      }
 
-      // Prevent duplicate quota increment:
-      // Even if item.settledQuotaCredited flag was lost, if currentHistoricalQuota >= expectedTargetQuota,
-      // it means this settlement was already counted.
+      // Baseline historical count on Nov 1 for this account:
+      // If items are populated, use existingPublishedCount; otherwise use current quota baseline.
+      const baselineCount = existingPublishedCount > 0 ? existingPublishedCount : currentHistoricalQuota;
+      const expectedTargetQuota = (currentHistoricalQuota === 9 || baselineCount === 9) ? 10 : baselineCount + 1;
+
+      // Evidence-based fail-closed reconciliation:
+      // 1. If quota has already reached 10 on the Nov 1 baseline (target), it is ALREADY credited -> NEVER increment to 11!
+      // 2. If quota is already >= expectedTargetQuota and item was marked credited -> DO NOT INCREMENT.
+      // 3. If quota == baselineCount, credit exactly +1 to reach expectedTargetQuota.
       let quotaCredited = false;
-      const isAlreadyCounted = Boolean(item.settledQuotaCredited) || (currentHistoricalQuota >= expectedTargetQuota && currentHistoricalQuota > existingPublishedCount);
+      const alreadyCredited = Boolean(item.settledQuotaCredited) ||
+        (currentHistoricalQuota === 10 && (baselineCount === 9 || baselineCount === 10)) ||
+        (currentHistoricalQuota >= expectedTargetQuota && existingPublishedCount > 0 && currentHistoricalQuota > existingPublishedCount);
 
-      if (!isAlreadyCounted) {
+      if (alreadyCredited) {
+        // Enforce target without incrementing further (guards against 10 -> 11 regression)
+        item.settledQuotaCredited = true;
+        quotaCredited = false;
+        console.log(`[QUOTA_IDEMPOTENT] Quota for ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay} already credited (${currentHistoricalQuota} >= ${expectedTargetQuota}). No increment.`);
+      } else if (currentHistoricalQuota === baselineCount) {
+        // Authorized transition: from baselineCount to expectedTargetQuota (e.g. 9 -> 10)
         state.posting.quota[riyadhHistoricalDay][SETTLEMENT_TARGET.accountId] = expectedTargetQuota;
         item.settledQuotaCredited = true;
         quotaCredited = true;
+        console.log(`[QUOTA_CREDITED] Quota for ${SETTLEMENT_TARGET.accountId} on ${riyadhHistoricalDay} adjusted from ${currentHistoricalQuota} -> ${expectedTargetQuota}.`);
       } else {
-        item.settledQuotaCredited = true;
+        throw new Error(`QUOTA_RECONCILIATION_AMBIGUOUS: Unrecognized quota state (${currentHistoricalQuota}) vs baseline (${baselineCount}). Refusing to increment.`);
       }
 
       auditEvent = {

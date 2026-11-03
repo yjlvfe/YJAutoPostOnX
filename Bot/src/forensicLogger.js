@@ -61,15 +61,19 @@ function normalizeSubnet(ip) {
 }
 
 class ForensicLogger {
-  constructor({ store, dataDir, maxAgeMs = SEVEN_DAYS_MS, clock = Date.now } = {}) {
+  constructor({ store, dataDir, logFile, maxAgeMs = SEVEN_DAYS_MS, clock = Date.now } = {}) {
     this.store = store || null;
     this.dataDir = dataDir ? path.resolve(dataDir) : null;
     this.maxAgeMs = maxAgeMs;
     this.clock = clock;
-    this.logFile = dataDir ? path.join(dataDir, 'logs', 'forensic.jsonl') : null;
+    this.logFile = logFile ? path.resolve(logFile) : (dataDir ? path.join(dataDir, 'logs', 'forensic.jsonl') : null);
     if (this.logFile) {
       const dir = path.dirname(this.logFile);
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      try {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        }
+      } catch {}
     }
   }
 
@@ -313,183 +317,241 @@ class ForensicLogger {
     return filtered.slice(-limit);
   }
 
-  async reconcile(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
-    assertForensicMutationAllowed(this.dataDir);
-    const cutoff = now - this.maxAgeMs;
-    const storeLogs = [];
-    if (this.store) {
+  async _withLogLock(fn) {
+    if (!this.logFile) return fn();
+    const lockFile = `${this.logFile}.lock`;
+    const dir = path.dirname(lockFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const now = Date.now();
+    const timeout = 10000;
+    let acquired = false;
+    let lockHandle = null;
+    while (Date.now() - now < timeout) {
       try {
-        const state = await this.store.load();
-        if (Array.isArray(state.forensicLogs)) {
-          storeLogs.push(...state.forensicLogs);
-        }
-        if (Array.isArray(state.pendingForensicOutbox)) {
-          storeLogs.push(...state.pendingForensicOutbox);
-        }
+        lockHandle = await fsp.open(lockFile, 'wx', 0o600);
+        acquired = true;
+        break;
       } catch (err) {
-        logStructured(null, {
-          level: 'error',
-          component: 'forensic_logger',
-          event: 'forensic_reconcile_store_error',
-          operation: 'reconcile_load_store',
-          result: 'failed',
-          errorCode: extractErrorCode(err),
-          sanitizedError: sanitizeError(err)
-        });
+        if (err.code === 'EEXIST') {
+          try {
+            const stat = await fsp.stat(lockFile);
+            if (Date.now() - stat.mtimeMs > 30000) {
+              await fsp.unlink(lockFile).catch(() => {});
+            }
+          } catch {}
+          await new Promise(r => setTimeout(r, 20 + Math.floor(Math.random() * 30)));
+          continue;
+        }
+        throw err;
       }
     }
+    if (!acquired) {
+      throw Object.assign(new Error('FORENSIC_LOG_LOCK_TIMEOUT: Could not acquire lock for forensic log.'), { code: 'FORENSIC_LOG_LOCK_TIMEOUT' });
+    }
+    try {
+      return await fn();
+    } finally {
+      if (lockHandle) {
+        try { await lockHandle.close(); } catch {}
+      }
+      try { await fsp.unlink(lockFile); } catch {}
+    }
+  }
 
-    const fileLogs = [];
-    if (this.logFile) {
-      try {
-        const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
-          if (err.code !== 'ENOENT') {
-            logStructured(null, {
-              level: 'warn',
-              component: 'forensic_logger',
-              event: 'forensic_log_read_failed',
-              operation: 'reconcile_readFile',
-              result: 'failed',
-              errorCode: extractErrorCode(err),
-              sanitizedError: sanitizeError(err)
-            });
+  async reconcile(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
+    assertForensicMutationAllowed(this.dataDir);
+    return this._withLogLock(async () => {
+      const cutoff = now - this.maxAgeMs;
+      const storeLogs = [];
+      if (this.store) {
+        try {
+          const state = await this.store.load();
+          if (Array.isArray(state.forensicLogs)) {
+            storeLogs.push(...state.forensicLogs);
           }
-          return '';
-        });
-        if (content) {
-          for (const line of content.split('\n').filter(Boolean)) {
-            try { fileLogs.push(JSON.parse(line)); } catch (parseErr) {
+          if (Array.isArray(state.pendingForensicOutbox)) {
+            storeLogs.push(...state.pendingForensicOutbox);
+          }
+        } catch (err) {
+          logStructured(null, {
+            level: 'error',
+            component: 'forensic_logger',
+            event: 'forensic_reconcile_store_error',
+            operation: 'reconcile_load_store',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        }
+      }
+
+      const fileLogs = [];
+      if (this.logFile) {
+        try {
+          const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
+            if (err.code !== 'ENOENT') {
               logStructured(null, {
                 level: 'warn',
                 component: 'forensic_logger',
-                event: 'corrupt_log_line_skipped',
-                operation: 'reconcile_parse',
-                result: 'skipped',
-                suppressionReason: 'corrupt_json',
-                errorCode: 'JSON_PARSE_ERROR',
-                sanitizedError: sanitizeError(parseErr)
+                event: 'forensic_log_read_failed',
+                operation: 'reconcile_readFile',
+                result: 'failed',
+                errorCode: extractErrorCode(err),
+                sanitizedError: sanitizeError(err)
               });
             }
+            return '';
+          });
+          if (content) {
+            for (const line of content.split('\n').filter(Boolean)) {
+              try { fileLogs.push(JSON.parse(line)); } catch (parseErr) {
+                logStructured(null, {
+                  level: 'warn',
+                  component: 'forensic_logger',
+                  event: 'corrupt_log_line_skipped',
+                  operation: 'reconcile_parse',
+                  result: 'skipped',
+                  suppressionReason: 'corrupt_json',
+                  errorCode: 'JSON_PARSE_ERROR',
+                  sanitizedError: sanitizeError(parseErr)
+                });
+              }
+            }
           }
+        } catch (err) {
+          logStructured(null, {
+            level: 'error',
+            component: 'forensic_logger',
+            event: 'forensic_reconcile_file_error',
+            operation: 'reconcile_load_file',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
         }
-      } catch (err) {
-        logStructured(null, {
-          level: 'error',
-          component: 'forensic_logger',
-          event: 'forensic_reconcile_file_error',
-          operation: 'reconcile_load_file',
-          result: 'failed',
-          errorCode: extractErrorCode(err),
-          sanitizedError: sanitizeError(err)
-        });
       }
-    }
 
-    const map = new Map();
-    for (const log of [...storeLogs, ...fileLogs]) {
-      if (!log || !log.id) continue;
-      if (typeof log.epoch === 'number' && log.epoch < cutoff) continue;
-      map.set(log.id, log);
-    }
+      const map = new Map();
+      for (const log of [...storeLogs, ...fileLogs]) {
+        if (!log || !log.id) continue;
+        if (typeof log.epoch === 'number' && log.epoch < cutoff) continue;
+        map.set(log.id, log);
+      }
 
-    const reconciled = Array.from(map.values()).sort((a, b) => (a.epoch || 0) - (b.epoch || 0));
+      const reconciled = Array.from(map.values()).sort((a, b) => (a.epoch || 0) - (b.epoch || 0));
 
-    let updatedStore = false;
-    if (this.store) {
-      try {
-        await this.store.update(state => {
-          state.forensicLogs = reconciled;
-          if (Array.isArray(state.pendingForensicOutbox)) {
-            state.pendingForensicOutbox = [];
+      // Phase 1: Durably write to JSONL file with temp file, fsync, and atomic rename FIRST
+      let updatedFile = false;
+      if (this.logFile) {
+        try {
+          const dir = path.dirname(this.logFile);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const content = reconciled.map(r => JSON.stringify(r)).join('\n') + (reconciled.length ? '\n' : '');
+          const tempPath = `${this.logFile}.${crypto.randomUUID()}.tmp`;
+          const handle = await fsp.open(tempPath, 'w', 0o600);
+          try {
+            await handle.write(content);
+            await handle.sync();
+          } finally {
+            await handle.close();
           }
-          return state;
-        });
-        updatedStore = true;
-      } catch (err) {
-        logStructured(null, {
-          level: 'error',
-          component: 'forensic_logger',
-          event: 'forensic_reconcile_store_write_error',
-          operation: 'reconcile_write_store',
-          result: 'failed',
-          errorCode: extractErrorCode(err),
-          sanitizedError: sanitizeError(err)
-        });
+          await fsp.rename(tempPath, this.logFile);
+          updatedFile = true;
+        } catch (err) {
+          logStructured(null, {
+            level: 'error',
+            component: 'forensic_logger',
+            event: 'forensic_reconcile_file_write_error',
+            operation: 'reconcile_write_file',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+          throw err; // Fail closed: do NOT acknowledge outbox if file write fails!
+        }
       }
-    }
 
-    let updatedFile = false;
-    if (this.logFile) {
-      try {
-        const content = reconciled.map(r => JSON.stringify(r)).join('\n') + (reconciled.length ? '\n' : '');
-        const tempPath = `${this.logFile}.${crypto.randomUUID()}.tmp`;
-        await fsp.writeFile(tempPath, content, { mode: 0o600 });
-        await fsp.rename(tempPath, this.logFile);
-        updatedFile = true;
-      } catch (err) {
-        logStructured(null, {
-          level: 'error',
-          component: 'forensic_logger',
-          event: 'forensic_reconcile_file_write_error',
-          operation: 'reconcile_write_file',
-          result: 'failed',
-          errorCode: extractErrorCode(err),
-          sanitizedError: sanitizeError(err)
-        });
+      // Phase 2: Acknowledge and clear ONLY the outbox items that were confirmed persisted
+      let updatedStore = false;
+      if (this.store) {
+        try {
+          const persistedIds = new Set(reconciled.map(r => r.id));
+          await this.store.update(state => {
+            state.forensicLogs = reconciled;
+            if (Array.isArray(state.pendingForensicOutbox)) {
+              // Only filter out items that are confirmed in persistedIds
+              state.pendingForensicOutbox = state.pendingForensicOutbox.filter(e => !persistedIds.has(e.id));
+            }
+            return state;
+          });
+          updatedStore = true;
+        } catch (err) {
+          logStructured(null, {
+            level: 'error',
+            component: 'forensic_logger',
+            event: 'forensic_reconcile_store_write_error',
+            operation: 'reconcile_write_store',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        }
       }
-    }
 
-    return {
-      reconciled: true,
-      totalEntries: reconciled.length,
-      storeEntries: storeLogs.length,
-      fileEntries: fileLogs.length,
-      updatedStore,
-      updatedFile
-    };
+      return {
+        reconciled: true,
+        totalEntries: reconciled.length,
+        storeEntries: storeLogs.length,
+        fileEntries: fileLogs.length,
+        updatedStore,
+        updatedFile
+      };
+    });
   }
 
   async flushOutbox() {
     assertForensicMutationAllowed(this.dataDir);
     if (!this.store || !this.logFile) return { flushed: 0, newlyAppended: 0 };
-    const state = await this.store.load();
-    const pending = state.pendingForensicOutbox || [];
-    if (!Array.isArray(pending) || pending.length === 0) return { flushed: 0, newlyAppended: 0 };
+    return this._withLogLock(async () => {
+      const state = await this.store.load();
+      const pending = state.pendingForensicOutbox || [];
+      if (!Array.isArray(pending) || pending.length === 0) return { flushed: 0, newlyAppended: 0 };
 
-    const existingIds = new Set();
-    try {
-      const content = await fsp.readFile(this.logFile, 'utf8');
-      for (const line of content.split('\n').filter(Boolean)) {
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed && parsed.id) existingIds.add(parsed.id);
-        } catch {}
-      }
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
-
-    const toAppend = pending.filter(e => e && e.id && !existingIds.has(e.id));
-    if (toAppend.length > 0) {
-      const dir = path.dirname(this.logFile);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const lines = toAppend.map(e => JSON.stringify(e)).join('\n') + '\n';
-      const fileHandle = await fsp.open(this.logFile, 'a', 0o600);
+      const existingIds = new Set();
       try {
-        await fileHandle.write(lines);
-        await fileHandle.sync();
-      } finally {
-        await fileHandle.close();
+        const content = await fsp.readFile(this.logFile, 'utf8');
+        for (const line of content.split('\n').filter(Boolean)) {
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed && parsed.id) existingIds.add(parsed.id);
+          } catch {}
+        }
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
       }
-    }
 
-    const flushedIds = new Set(pending.map(e => e.id));
-    await this.store.update(s => {
-      s.pendingForensicOutbox = (s.pendingForensicOutbox || []).filter(e => !flushedIds.has(e.id));
-      return s;
+      const toAppend = pending.filter(e => e && e.id && !existingIds.has(e.id));
+      if (toAppend.length > 0) {
+        const dir = path.dirname(this.logFile);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const lines = toAppend.map(e => JSON.stringify(e)).join('\n') + '\n';
+        const fileHandle = await fsp.open(this.logFile, 'a', 0o600);
+        try {
+          await fileHandle.write(lines);
+          await fileHandle.sync();
+        } finally {
+          await fileHandle.close();
+        }
+      }
+
+      const flushedIds = new Set(pending.map(e => e.id));
+      await this.store.update(s => {
+        s.pendingForensicOutbox = (s.pendingForensicOutbox || []).filter(e => !flushedIds.has(e.id));
+        return s;
+      });
+
+      return { flushed: pending.length, newlyAppended: toAppend.length };
     });
-
-    return { flushed: pending.length, newlyAppended: toAppend.length };
   }
 }
 

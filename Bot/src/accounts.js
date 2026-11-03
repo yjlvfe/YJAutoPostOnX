@@ -61,6 +61,8 @@ function accountRecord(input = {}) {
     ...(input.captchaReason ? { captchaReason: String(input.captchaReason) } : {}),
     ...(input.captchaIncidentId ? { captchaIncidentId: String(input.captchaIncidentId) } : {}),
     ...(input.lastCaptchaVerifyAt != null ? { lastCaptchaVerifyAt: Number(input.lastCaptchaVerifyAt) } : {}),
+    ...(input.lastNotifiedCaptchaIncidentId ? { lastNotifiedCaptchaIncidentId: String(input.lastNotifiedCaptchaIncidentId) } : {}),
+    ...(input.lastCaptchaAlertAt != null ? { lastCaptchaAlertAt: Number(input.lastCaptchaAlertAt) } : {}),
     ...(input.captchaResolvedAt != null ? { captchaResolvedAt: Number(input.captchaResolvedAt) } : {}),
     ...(input.unverifiedReason ? { unverifiedReason: String(input.unverifiedReason) } : {}),
     failures: input.failures == null || input.failures === '' ? 0 : nonNegativeInteger(input.failures, 'failures'),

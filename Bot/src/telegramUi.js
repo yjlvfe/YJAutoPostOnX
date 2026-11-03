@@ -1506,6 +1506,13 @@ class TelegramUi {
         return { rateLimited: true };
       }
 
+      // Capture baseline security snapshot for post-verification CAS
+      const capturedIncidentId = account.captchaIncidentId;
+      const capturedCheckGen = account.checkGeneration;
+      const capturedCookieFile = account.cookieFile;
+      const capturedUserId = account.userId ? String(account.userId) : null;
+      const capturedUsername = account.username;
+
       await acknowledge('جاري فحص حالة الاعتماد لدى X (قراءة فقط)...');
 
       let verificationSuccess = false;
@@ -1549,20 +1556,47 @@ class TelegramUi {
       }
 
       if (verificationSuccess) {
+        let staleOrPreempted = false;
+        let preemptReason = null;
+
         await this.bot.store.update(s => {
           const a = (s.accounts || []).find(acc => acc.id === targetId);
-          if (a) {
-            a.status = 'غير مفعل';
-            a.enabled = false;
-            a.needsOwnerCaptcha = false;
-            a.captchaResolvedAt = Date.now();
-            delete a.captchaIncidentId;
-            delete a.captchaCode;
-            delete a.captchaReason;
-            a.checkGeneration = crypto.randomUUID();
+          if (!a) {
+            staleOrPreempted = true;
+            preemptReason = 'account_not_found';
+            return s;
           }
+
+          // Strict Compare-And-Set: verify that NO security challenge, incident, credential, or generation changed!
+          const incidentChanged = a.captchaIncidentId !== capturedIncidentId;
+          const genChanged = a.checkGeneration !== capturedCheckGen;
+          const cookieChanged = a.cookieFile !== capturedCookieFile;
+          const currentUserId = a.userId ? String(a.userId) : null;
+          const userChanged = currentUserId !== capturedUserId || a.username !== capturedUsername;
+          const challengeClearedOrChanged = !a.needsOwnerCaptcha || a.status !== 'كابتشا';
+
+          if (incidentChanged || genChanged || cookieChanged || userChanged || challengeClearedOrChanged) {
+            staleOrPreempted = true;
+            preemptReason = incidentChanged ? 'newer_incident_occurred' : (cookieChanged ? 'cookie_file_modified' : 'state_or_identity_changed');
+            return s;
+          }
+
+          a.status = 'غير مفعل';
+          a.enabled = false;
+          a.needsOwnerCaptcha = false;
+          a.captchaResolvedAt = Date.now();
+          delete a.captchaIncidentId;
+          delete a.captchaCode;
+          delete a.captchaReason;
+          a.checkGeneration = crypto.randomUUID();
           return s;
         });
+
+        if (staleOrPreempted) {
+          await this.bot.transport.sendMessage(id.chat, `⚠️ تم إلغاء نتيجة التحقق للحساب @${account.username || account.label} لأن حادثاً أمنياً جديداً أو تعديلاً في بيانات الحساب قد طرأ أثناء الفحص (${preemptReason}). يرجى مراجعة حالة الحساب.`);
+          return { verified: false, stale: true, reason: preemptReason };
+        }
+
         if (this.notifiedCaptchaIncidents) {
           for (const key of this.notifiedCaptchaIncidents) {
             if (key.startsWith(`${targetId}_`)) this.notifiedCaptchaIncidents.delete(key);
@@ -1588,7 +1622,7 @@ class TelegramUi {
       const state = await this.bot.store.load();
       const account = (state.accounts || []).find(a => a.id === targetId);
       const isOk = account && account.enabled !== false && !['محظور', 'كابتشا'].includes(account.status);
-      await acknowledge(isOk ? `جلسة X صالحة للحساب @${account.username || account.label}` : `حالة الحساب: ${account?.status || 'غير متحققة'}`);
+      await acknowledge(isOk ? `حالة التكوين المحلي للحساب @${account.username || account.label}: مهيأ (فحص تكوين محلي فقط)` : `حالة الحساب المحلية: ${account?.status || 'غير متحققة'}`);
       return { checked: 'session' };
     }
 
@@ -1744,10 +1778,22 @@ class TelegramUi {
     if (diagnosticReason === ISOLATION_REASONS.CAPTCHA) {
       this.notifiedCaptchaIncidents ||= new Set();
       const incidentId = account.captchaIncidentId || `${account.id || username}_${account.captchaDetectedAt || 'current'}`;
-      if (this.notifiedCaptchaIncidents.has(incidentId)) {
+      if (this.notifiedCaptchaIncidents.has(incidentId) || account.lastNotifiedCaptchaIncidentId === incidentId) {
         return null;
       }
       this.notifiedCaptchaIncidents.add(incidentId);
+      if (this.bot?.store?.update) {
+        try {
+          await this.bot.store.update(s => {
+            const a = (s.accounts || []).find(acc => acc.id === account.id);
+            if (a) {
+              a.lastNotifiedCaptchaIncidentId = incidentId;
+              a.lastCaptchaAlertAt = Date.now();
+            }
+            return s;
+          });
+        } catch {}
+      }
     }
 
     const message = buildIsolationMessage({ username, reason: diagnosticReason, otherActiveCount });

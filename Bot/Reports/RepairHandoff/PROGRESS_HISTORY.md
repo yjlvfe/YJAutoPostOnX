@@ -1035,3 +1035,30 @@ Following previous test passes (369/369), production stability encountered post-
   - Integrated `flushOutbox()` into `reconcile()` and `runner.js` bot service startup/lifecycle.
   - Hardened quota adjustment in `settle_item_53d0f458.js` to be contingent on verified historical baseline (`Math.max(existingPublishedCount + 1, 10)`), preventing double increments even across lost flags.
 - **Verification**: 207/207 Python tests PASS, 426/426 Node.js tests PASS across 136 suites (100%). All 53 tasks preserved with approvals strictly PENDING.
+
+### PR #27 Review Round 2 Fixes — Quota Invariant, Outbox Persistence Lock & CAS Stale Preemption (2026-11-03)
+
+- **Fix P0-A — Historical Quota Reconciliation & Baseline Idempotency**:
+  - Re-anchored quota calculation in `Bot/scripts/settle_item_53d0f458.js` to proven Nov 1 baseline.
+  - Eliminated the 10 -> 11 increment bug when flags are missing on ambiguous items.
+  - Enforced that if `currentHistoricalQuota >= 10`, settlement is an idempotent NOOP (`quotaCredited = false`).
+  - Added fail-closed assertion (`QUOTA_RECONCILIATION_AMBIGUOUS`) if current quota contradicts existing published items.
+- **Fix P0-B — Outbox Persistence Before Acknowledgment & Advisory File Mutex**:
+  - Introduced `_withLogLock` advisory lockfile serialization in `Bot/src/forensicLogger.js` to eliminate race conditions between `reconcile` and `flushOutbox`.
+  - In `reconcile()`, shifted JSONL file write with `fileHandle.sync()` and atomic rename into Phase 1 BEFORE SQLite outbox acknowledgment.
+  - If disk write fails, outbox items remain 100% preserved in SQLite and are never dropped.
+  - Phase 2 transactionally clears only confirmed persisted IDs.
+- **Fix P0-C — Compare-And-Set Defense Against Stale CAPTCHA Verifications**:
+  - Implemented pre-verification security snapshot in `Bot/src/telegramUi.js` (`captchaIncidentId`, `checkGeneration`, `cookieFile`, `userId`, `username`).
+  - In post-verification `store.update`, enforced strict CAS asserting that no newer incident B occurred and no credentials or generation changed while verification was in flight.
+  - Stale verifications are rejected (`staleOrPreempted: true`), leaving account disabled and notifying owner.
+- **Fix P1-D — Fail-Closed Visibility & Symlink Safety**:
+  - Hardened `sessionGuard.js` to throw `PROCESS_VISIBILITY_UNVERIFIED` on any non-ENOENT error inspecting `/proc`.
+  - Treated unreadable PIDs in `isPidAlive` as alive under permission barriers to prevent premature lease release.
+  - Secured `resetSessionsForTest` by checking every parent directory component for symlinks (`SYMLINK_RESET_FORBIDDEN`) and enforcing realpath inside `os.tmpdir()`.
+- **Fix P1-E — Accurate Labeling & Durable Alert Deduplication**:
+  - Corrected `check_session` text in `telegramUi.js` to indicate local configuration verification without claiming live network login.
+  - Persisted `lastNotifiedCaptchaIncidentId` and `lastCaptchaAlertAt` in SQLite for durable deduplication across service restarts.
+- **Verification Results**:
+  - Python tests: **207/207 PASS** (100%).
+  - Node.js tests: **434/434 PASS** across 141 test suites (100%). Total: 641 passing tests. All 53 tasks preserved with all approvals strictly PENDING.
