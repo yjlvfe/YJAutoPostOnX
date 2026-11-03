@@ -120,4 +120,55 @@ describe('M14 direct code fixes: separate CAPTCHA incidents and true cross-proce
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+  it('a background-detected CAPTCHA creates a fresh incident, alerts both chats and survives repeated checks', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm14-background-captcha-'));
+    const dbPath = path.join(dir, 'state.sqlite');
+    const chats = ['528864559', '5535435580'];
+    const account = accountRecord({
+      id: 'bg_captcha_acc', username: 'bg_captcha_acc', enabled: false,
+      status: 'غير مفعل', needsOwnerCaptcha: false,
+      captchaDeliveredChats: [...chats],
+      captchaDeliveredIncidentId: 'old_A',
+      lastNotifiedCaptchaIncidentId: 'old_A'
+    });
+    const store = new SqliteStore(dbPath, { accounts: [account] });
+    const calls = [];
+    try {
+      await store.load();
+      const ui = new TelegramUi({
+        bot: { store, auth: { chats: new Set(chats) }, transport: {} },
+        autoStartTicker: false,
+        notify: async (_msg, opts) => {
+          const targets = opts?.targetChatIds || chats;
+          calls.push([...targets]);
+          return targets.map((chat_id, i) => ({
+            status: 'fulfilled',
+            value: { ok: true, message_id: 500 + i, chat_id }
+          }));
+        }
+      });
+      const sample = { isolated: true, authenticated: false, accountFailure: 'captcha', captcha: true };
+      const first = await ui.recordAccountCheck(account.id, sample, { session: true, source: 'x-session', refresh: true });
+      assert.equal(first, true);
+      let current = (await store.load()).accounts.find(a => a.id === account.id);
+      assert.ok(current.captchaIncidentId && current.captchaIncidentId !== 'old_A');
+      const incidentId = current.captchaIncidentId;
+      const generation = current.checkGeneration;
+      assert.equal(current.enabled, false);
+      assert.equal(current.needsOwnerCaptcha, true);
+      assert.equal(current.lastNotifiedCaptchaIncidentId, incidentId);
+      assert.deepEqual(calls, [chats]);
+
+      await ui.recordAccountCheck(account.id, sample, { session: true, source: 'x-session', refresh: true });
+      current = (await store.load()).accounts.find(a => a.id === account.id);
+      assert.equal(current.captchaIncidentId, incidentId, 'same unresolved challenge retains its incident ID');
+      assert.equal(current.checkGeneration, generation, 'background refresh cannot invalidate owner verification CAS');
+      assert.equal(calls.length, 1, 'repeat check must not duplicate delivered alerts');
+      await ui.destroy();
+    } finally {
+      await store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 });
