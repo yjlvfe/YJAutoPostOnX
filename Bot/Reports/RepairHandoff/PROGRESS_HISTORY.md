@@ -757,7 +757,30 @@ Following previous test passes (369/369), production stability encountered post-
   - `Bot/Reports/RepairHandoff/Round6_M8/FINAL_PRODUCTION_VERDICT.md`
 - **Governance**: Codex Review Status strictly maintained as **`PENDING`**. Phase P1 and Phase P2 user approval strictly maintained as **`PENDING`**.
 
-#### Milestone M8 (Post-Merge): Live Production Investigation of Account Rotation Failure & Multi-Chat Panel Synchronization
+#### Milestone M8 (Round 7 - Post-Merge & Live Telegram Operator Verification)
+- **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
+- **Milestone Objectives**:
+  - Review and merge PR #15 (`fix/twikit-parser-ambiguity-strike-20261103`) avoiding account strikes on known Twikit parser failures.
+  - Execute full regression and adversarial fuzz test suites (`adversarial_fuzz_3strikes_rotation.test.js`, `known_twikit_parser_failure.test.js`).
+  - Verify live production publishing on X initiated directly by the operator's real Telegram `🟢 تشغيل` button click.
+  - Track `@emiehg` and `@marcosvhv` rotation, dual-panel real-time updates for owner (`528864559`) and brother (`5535435580`), and SQLite/quota accounting.
+- **Outcomes & Verifications**:
+  - PR #15 reviewed, verified against 587 tests, and merged into `main` (`c649473`).
+  - Fixed UTC midnight boundary comparison in `test/m3_quota_and_fencing_challenge.test.js` using `riyadhDay(i.publishedAt)`.
+  - Operator clicked authentic Telegram `🟢 تشغيل` button (`runId: 49e2041f681a9221a165986e`).
+  - Both Telegram dashboards (Owner Msg `1580`, Brother Msg `1291`) updated simultaneously to `cycleState: "running"` with real-time countdown updates.
+  - Completed **18 live verified posts on X** in this single Telegram session:
+    - `@crytpokingxvo8`: 4 posts
+    - `@emiehg`: 5 posts
+    - `@kaniabq`: 3 posts
+    - `@marcosvhv`: 2 posts
+    - `@menalobq`: 4 posts
+  - Both previously affected accounts (`@emiehg` and `@marcosvhv`) published multiple times without encountering `KeyError: 'urls'` or falling into ambiguous states.
+  - All accounts met and exceeded the $\ge 2$ posts acceptance criteria.
+  - All 18 posts verified with authentic URLs on X, corresponding deductions in SQLite `posting.quota['2026-11-03']`, and 0 quota leaks on ambiguous items.
+  - Service RSS stable at 342.3 MB, 5/5 Docker VPN slots healthy with 0 host IP leaks, other VPS projects unaffected.
+  - Deliverables: `Bot/Reports/RepairHandoff/Round7_PostMerge/LIVE_REAL_TELEGRAM_RUN_EVIDENCE.jsonl` and `ACCOUNT_ROTATION_AND_PANEL_VERIFICATION.md`.
+
 - **Date**: 2026-11-03 (Riyadh Time: UTC+03:00)
 - **Problem Statement**:
   - During live operator run from Telegram (00:35 - 00:42 Riyadh time), 3 accounts published successfully while 2 active accounts (`@emiehg` and `@marcosvhv`) failed to publish and triggered ambiguous quarantines (`publish_confirmation_missing`).
