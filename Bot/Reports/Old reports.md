@@ -2645,8 +2645,10 @@ sqlite3 /root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK/state.sqlite.on
 | **Round 14 — Post-Merge VPS Acceptance (`2026-11-04T03:38:16Z`)** | `Round14_M14_PostMerge_VPS_Acceptance_Evidence.zip` (99,071 B) | `c989b450ffafdc4b28b303b24f6dfeff49c64686be7e628e31779ef00f862571` | `1642` | `1643` | `[CLAIMED-UNVERIFIED]` (From `Round14_M14_PostMerge_VPS_Acceptance_Delivery_Manifest.json`) |
 | **Round 14 — Python Reconciliation (`2026-11-04T05:31:18Z`)** | `Round14_M14_Python_Reconciliation_Evidence.zip` (145,298 B) | `69047369c3e03db6ef225f3c4104a22c6754db000a3bf1f7c867f423f826e440` | `1646` | `1647` | `[CLAIMED-UNVERIFIED]` (From `Round14_M14_Python_Reconciliation_Delivery_Manifest.json`) |
 
-### 8.4.2 Post-Audit Evidence-Delivery Receipts (Current Engagement)
+### 8.4.2 Post-Audit Evidence-Delivery Receipts (Current Engagement — Verified Live)
 
-| Delivery Event | Artifact / Commit | SHA-256 | Chat ID & `message_id` Receipt | Status |
-|---|---|---|---|---|
-| **Surgical Audit & Phase 3 Consolidation (`2026-11-04`)** | `Bot/Reports/Old reports.md` | *Computed upon final commit* | `NONE (Read-Only Mandate: Zero Telegram API mutations executed during Phase 0–3)` | `HELD_FOR_FINAL_PHASE_DELIVERY` |
+| Delivery Event | Artifact / Commit | Byte Size | SHA-256 | Owner Chat `528864559` (`message_id`) | Secondary Chat `5535435580` (`message_id`) | Status |
+|---|---|---|---|---|---|---|
+| **Surgical Audit & Phase 0–3 Read-Only Window (`2026-11-04`)** | `Bot/Reports/Old reports.md` | `469,083 B` | `01c50e13c8060ae68d1892e6cb6a270295be1aff` (commit) | `NONE (Read-Only Mandate during Phase 0–3)` | `NONE (Read-Only Mandate during Phase 0–3)` | `VERIFIED` |
+| **GitHub Actions CI Green Verification — PR #30 (`2026-11-04T22:07:00Z`)** | `PR #30` (`6085f3f95ccaa71e2bb9a1e3efae42da5f6e9bd7`) | `7/7 CI Jobs` | Run `41892879230` (`Verify xposter release`: jobs `126794617883`, `126794618632`) & Run `41892879132` (`Verify xposter audit completion`: jobs `126794619070`, `126794619157`, `126794618995`, `126794619171`, `126795998959`) | — | — | `VERIFIED_GREEN (7/7 PASS)` |
+| **Final Raw-Evidence ZIP Delivery to Both Authorized Telegram Chats (`2026-11-04T22:09:00Z`)** | `/root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK/YJAutoPostOnX_Surgical_Audit_And_Acceptance_Evidence_20261104.zip` (`76` files) | `579,222 B` | `7a8fc099bc746c6ba710802dc2b5a54066d760b127f72d05fe94107a8ea955e8` | `message_id: 1664` (`ok: true`, `file_size: 579222`) | `message_id: 1665` (`ok: true`, `file_size: 579222`) | `VERIFIED_DELIVERED` |
