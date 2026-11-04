@@ -1,0 +1,22 @@
+# YJAutoPostOnX — M14 Python Reconciliation Delivery Manifest
+
+- **Delivered Archive:** `Round14_M14_Python_Reconciliation_Evidence.zip`
+- **Archive Size:** `145298 bytes`
+- **Archive SHA-256:** `69047369c3e03db6ef225f3c4104a22c6754db000a3bf1f7c867f423f826e440` *(Byte-for-byte untouched)*
+- **Manifest SHA-256:** `afbd0b5e004ff7aad54c398ccf1ebcd344950ad36e40c86bd9c24afc8564c09f`
+- **Delivered To:**
+  - Owner (`528864559`): `message_id 1646` (`ok: true`)
+  - Brother (`5535435580`): `message_id 1647` (`ok: true`)
+- **Git Provenance:**
+  - Deployed Main Commit: `21c44df33b8118f91b48e38753fa1006a50c328c`
+  - Docs PR #28: https://github.com/yjlvfe/YJAutoPostOnX/pull/28
+  - Code-Fix PR #29: https://github.com/yjlvfe/YJAutoPostOnX/pull/29
+- **Python Verification:** 208/208 PASS in 0.71s (5/5 clean runs)
+- **Node Verification:** Targeted M14: 69/69 PASS (1.04s) | Full: 444 PASS (7 idle slots)
+- **Docker Invariant:** 4 running NordVPN containers (2 project + 2 other), host cap <= 7
+- **Production Invariants:**
+  - Service Active: PID 2581192
+  - `cycleState`: `stopped`
+  - Active Session Leases: 0
+  - Live X POSTs: 0
+  - Quarantined Ambiguous Items: 30
