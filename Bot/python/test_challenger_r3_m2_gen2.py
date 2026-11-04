@@ -196,6 +196,31 @@ class TestAdversarialTimelineRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res['ambiguous'])
         self.assertEqual(res['reason'], 'publish_author_or_id_unverified')
 
+    async def test_create_tweet_author_mismatch_timeline_trace_id_containing_429_stays_ambiguous(self):
+        """Numeric 429 embedded in a trace ID is not an HTTP 429 status."""
+        mismatched_tweet = SimpleNamespace(
+            id='1122334455',
+            user=SimpleNamespace(id='999999999', screen_name='impostor_user')
+        )
+        self.mock_client.create_tweet = AsyncMock(return_value=mismatched_tweet)
+        self.session.verify_timeline_has_post = AsyncMock(return_value={
+            'status': 'ambiguous',
+            'published': False,
+            'posted': False,
+            'ambiguous': True,
+            'found': False,
+            'reason': 'publish_confirmation_missing',
+            'fetchError': 'unrelated_trace_id_123429987654',
+            'fetchException': None,
+        })
+
+        res = await self.session.publish("Author mismatch with embedded 429 trace", dispatch=lambda: True)
+
+        self.assertEqual(self.session.verify_timeline_has_post.await_count, 1)
+        self.assertFalse(res['published'])
+        self.assertTrue(res['ambiguous'])
+        self.assertEqual(res['reason'], 'publish_author_or_id_unverified')
+
     async def test_create_tweet_author_mismatch_with_mock_client_error_preserves_ambiguous(self):
         """Author mismatch must not be misclassified as rate_limit if client mock has _last_create_tweet_error."""
         mismatched_tweet = SimpleNamespace(
