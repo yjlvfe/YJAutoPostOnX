@@ -8,7 +8,7 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 * Created access-restricted off-repo recovery bundle at `/root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK`: full filesystem archive, Git bundle, SQLite online backups, filesystem inventory and SHA-256 manifest. Verified archive compression, checksums, 64 restored files, Git bundle restoration and both database quick checks.
 * Created dedicated worktree and branch `audit/surgical-20261104`; production checkout remains on main.
 * Indexed reports, archives and test-named files; recorded all 53 historical IDs and their sources with claims unverified. Began read-only audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; coverage remains incomplete.
-* Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, a CAPTCHA/account activation interleaving, and a stale dispatch admission flag after an SQLite revision retry; real-world occurrence and full production reachability remain unverified.
+* Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, a CAPTCHA/account activation interleaving, CAPTCHA state loss during CSV replacement, and a stale dispatch admission flag after an SQLite revision retry; real-world occurrence and full production reachability remain unverified.
 
 # Currently Working On
 
@@ -26,6 +26,7 @@ Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomp
 * Default `npm test` includes a test that can rotate the real VPN slot; do not run the undifferentiated suite on production. A previously reported M11 database warning was not supported by the specific case inspected, which uses a temporary DB; broader safety remains unverified.
 * Source paths can create a missing project VPN container or remove an owned container under specific triggers even with the publishing cycle stopped; execution in the current live service is not established. Preserve the explicit device policy.
 * Python diagnostics overwrote two existing production checkout Python 3.12 `__pycache__` files; the originals exist in the protected snapshot. No code, database, or service was intentionally changed.
+* Official X developer policy was reviewed, but the Automation Rules page returned HTTP 403 and account/API authorization remains unverified; no live X post is authorized by this evidence.
 * TERRA alias inference succeeded via 9router; upstream Terra 6.1 identity is not independently verified. A SessionStart hook failed in that probe.
 * Historical progress follows unchanged and is not current authority.
 
