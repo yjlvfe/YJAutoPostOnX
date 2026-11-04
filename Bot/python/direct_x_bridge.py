@@ -951,7 +951,7 @@ class DirectSession:
                     'rawError': str(client_error)[:2048],
                 }
 
-            if fetch_err_str and ('rate limit' in fetch_err_str.lower() or 'too many requests' in fetch_err_str.lower() or '429' in fetch_err_str):
+            if fetch_err_str and ('rate limit' in fetch_err_str.lower() or 'too many requests' in fetch_err_str.lower() or bool(re.search(r'\b429\b', fetch_err_str))):
                 return {
                     'status': 'rate_limit',
                     'published': False,
