@@ -7,7 +7,8 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 * Inventoried the production checkout, remote PR/CI state, live service, aggregate queue and VPN container baseline. Production HEAD: `21c44df33b8118f91b48e38753fa1006a50c328c`.
 * Created access-restricted off-repo recovery bundle at `/root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK`: full filesystem archive, Git bundle, SQLite online backups, filesystem inventory and SHA-256 manifest. Verified archive compression, checksums, 64 restored files, Git bundle restoration and both database quick checks.
 * Created dedicated worktree and branch `audit/surgical-20261104`; production checkout remains on main.
-* Indexed reports, archives and test-named files; began read-only audit lanes for Telegram/runtime and CI/AppImage. Findings and coverage are preliminary, not acceptance evidence.
+* Indexed reports, archives and test-named files; recorded all 53 historical IDs and their sources with claims unverified. Began read-only audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; coverage remains incomplete.
+* Isolated diagnostics reproduced an evidence-reconciliation failure and two X confirmation/incident-propagation edge cases; real-world occurrence and complete reachability remain unverified.
 
 # Currently Working On
 
@@ -23,6 +24,7 @@ Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomp
 
 * Service is running while publishing cycle is stopped; avoid publishing or changes to service, queues, accounts, credentials and VPN containers. The 30 ambiguous items and `53d0f458-3144-4e89-a1af-202a8893afc6` require protection.
 * Default `npm test` includes a test that can rotate the real VPN slot; do not run the undifferentiated suite on production. A previously reported M11 database warning was not supported by the specific case inspected, which uses a temporary DB; broader safety remains unverified.
+* Source paths can create a missing project VPN container or remove an owned container under specific triggers even with the publishing cycle stopped; execution in the current live service is not established. Preserve the explicit device policy.
 * TERRA alias inference succeeded via 9router; upstream Terra 6.1 identity is not independently verified. A SessionStart hook failed in that probe.
 * Historical progress follows unchanged and is not current authority.
 
