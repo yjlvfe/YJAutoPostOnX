@@ -4,6 +4,7 @@ Does not write to SQLite, does not post, does not mutate accounts.
 """
 import asyncio
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -158,8 +159,8 @@ async def main():
     for m in all_matches:
         print(f"  Item {m['itemId']} -> {m['url']} (@{m['account']})")
     
-    out_file = BOT_DIR / 'Reports' / 'timeline_audit_results.json'
-    out_file.write_text(json.dumps(all_matches, indent=2, ensure_ascii=False))
+    out_file = Path(os.environ.get('TIMELINE_AUDIT_OUTPUT', '/tmp/yj_timeline_audit_results.json'))
+    out_file.write_text(json.dumps(all_matches, indent=2, ensure_ascii=False), encoding='utf-8')
     print(f"Saved results to {out_file}")
 
 if __name__ == '__main__':

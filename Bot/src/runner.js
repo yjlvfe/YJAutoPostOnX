@@ -19,114 +19,53 @@ const { isKnownTwikitParserFailure } = require('./knownTwikitParserFailure');
 const { isXContentRejection } = require('./xFailureClassification');
 const { recordUnsuccessfulAttempt } = require('./attemptOutcomes');
 const { classifyPublishOutcome } = require('./publishOutcome');
+const { SingleInstanceLock } = require('./singleInstance');
+const {
+  isCaptchaStatus,
+  isBannedStatus,
+  isUnverifiedStatus,
+  isAccountInactive,
+  MAX_COOKIE_FILE_BYTES
+} = require('./accounts');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-class SingleInstanceLock {
-  constructor(lockPath, { timeoutMs = 15_000, retryMs = 50, staleMs = 120_000 } = {}) {
-    this.lockPath = path.resolve(lockPath);
-    this.timeoutMs = timeoutMs;
-    this.retryMs = retryMs;
-    this.staleMs = staleMs;
-    this.token = null;
-    this.lastHolderPid = null;
+const MAX_WEIGHTED_TWEET_CHARS = 280;
+const TCO_URL_WEIGHT = 23;
+
+function computeWeightedTweetLength(text) {
+  if (typeof text !== 'string' || !text) return 0;
+  const normalized = text.normalize('NFC');
+  let urlWeight = 0;
+  const withoutUrls = normalized.replace(/https?:\/\/\S+/gi, () => {
+    urlWeight += TCO_URL_WEIGHT;
+    return '';
+  });
+  let charWeight = 0;
+  for (const ch of withoutUrls) {
+    const cp = ch.codePointAt(0);
+    // X twitter-text v3 weight-1 code point ranges
+    const isSingleWeight =
+      (cp >= 0x0000 && cp <= 0x10ff) ||
+      (cp >= 0x2000 && cp <= 0x200d) ||
+      (cp >= 0x2010 && cp <= 0x201f) ||
+      (cp >= 0x2032 && cp <= 0x2037);
+    charWeight += isSingleWeight ? 1 : 2;
   }
+  return urlWeight + charWeight;
+}
 
-  get locked() { return Boolean(this.token); }
-
-  async acquire() {
-    await fs.mkdir(path.dirname(this.lockPath), { recursive: true });
-    const deadline = Date.now() + this.timeoutMs;
-    const token = crypto.randomUUID();
-    while (true) {
-      try {
-        const handle = await fs.open(this.lockPath, 'wx', 0o600);
-        await handle.writeFile(JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() }) + '\n');
-        await handle.close();
-        this.token = token;
-        return async () => this.release(token);
-      } catch (error) {
-        if (error.code !== 'EEXIST') throw error;
-        if (await this.recoverStale()) continue;
-        if (Date.now() >= deadline) {
-          let holderPid = this.lastHolderPid;
-          try {
-            const current = JSON.parse(await fs.readFile(this.lockPath, 'utf8'));
-            if (Number.isInteger(current?.pid) && current.pid > 0) holderPid = current.pid;
-          } catch (err) {
-            logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'lock_read_parse_failed', operation: 'readFile', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err), suppressionReason: 'corrupt_lock_payload' });
-          }
-          const msg = holderPid
-            ? `Telegram runner lock is held by PID ${holderPid}: ${this.lockPath}`
-            : `Telegram runner lock is held: ${this.lockPath}`;
-          const locked = new Error(msg);
-          locked.code = 'INSTANCE_LOCKED';
-          if (holderPid) locked.pid = holderPid;
-          throw locked;
-        }
-        await sleep(Math.min(this.retryMs, Math.max(1, deadline - Date.now())));
-      }
-    }
-  }
-
-  async recoverStale() {
-    let stat;
-    try { stat = await fs.stat(this.lockPath); } catch (error) { return error.code === 'ENOENT'; }
-    let record;
-    try { record = JSON.parse(await fs.readFile(this.lockPath, 'utf8')); } catch (err) {
-      logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'stale_lock_parse_failed', operation: 'recoverStale.parse', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
-      record = null;
-    }
-    let dead = false;
-    if (Number.isInteger(record?.pid) && record.pid > 0) {
-      try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
-      // A long-lived polling service is not stale just because its lock is old.
-      if (!dead) {
-        this.lastHolderPid = record.pid;
-        return false;
-      }
-    }
-    if (!(dead || (!record && Date.now() - stat.mtimeMs >= this.staleMs))) return false;
-    // Atomic recovery: rename to an isolated stale path first to eliminate race conditions
-    const stalePath = `${this.lockPath}.stale.${crypto.randomUUID()}`;
-    try {
-      await fs.rename(this.lockPath, stalePath);
-    } catch (error) {
-      return error.code === 'ENOENT';
-    }
-    try {
-      if (record?.token) {
-        try {
-          const moved = JSON.parse(await fs.readFile(stalePath, 'utf8'));
-          if (moved.token !== record.token) {
-            await fs.rename(stalePath, this.lockPath).catch(err => {
-              logStructured(null, { level: 'error', component: 'single_instance_lock', event: 'stale_lock_restore_failed', operation: 'recoverStale.restore', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
-            });
-            return false;
-          }
-        } catch (err) {
-          logStructured(null, { level: 'warn', component: 'single_instance_lock', event: 'stale_lock_token_read_failed', operation: 'recoverStale.verifyToken', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) });
-        }
-      }
-      await fs.unlink(stalePath);
-      return true;
-    } catch (error) {
-      return error.code === 'ENOENT';
-    }
-  }
-
-  async release(token = this.token) {
-    if (!token || token !== this.token) return false;
-    this.token = null;
-    try {
-      const record = JSON.parse(await fs.readFile(this.lockPath, 'utf8'));
-      if (record.token !== token) return false;
-      await fs.unlink(this.lockPath);
-      return true;
-    } catch (error) {
-      if (error.code === 'ENOENT') return false;
-      throw error;
-    }
+function archiveAttemptRecord(item, extra = {}) {
+  if (!item?.attempt) return;
+  const archived = {
+    ...structuredClone(item.attempt),
+    ...extra
+  };
+  item.archivedAttempt = archived;
+  item.archivedAttempts = Array.isArray(item.archivedAttempts) ? item.archivedAttempts : [];
+  item.archivedAttempts.push(archived);
+  if (item.archivedAttempts.length > 10) {
+    item.archivedAttempts = item.archivedAttempts.slice(-10);
   }
 }
 
@@ -140,13 +79,24 @@ function updateId(update) {
  * transition, so a quota boundary cannot trigger VPN/browser work.
  */
 async function claimCycleItem({ store, itemId, accountId, runId, signal, clock = () => new Date() }) {
-  const result = { claimed: false, reason: 'item_unavailable', token: crypto.randomUUID() };
+  const claimToken = crypto.randomUUID();
+  let result = { claimed: false, reason: 'item_unavailable', token: claimToken };
   await store.update(state => {
+    result = { claimed: false, reason: 'item_unavailable', token: claimToken };
     if (signal?.aborted) { result.reason = 'aborted'; return state; }
     if (state.cycle?.state !== 'running' || state.cycle.runId !== runId) { result.reason = 'cycle_stopped'; return state; }
     const item = (state.items || []).find(entry => entry.id === itemId);
     if (!item || item.state !== 'pending') return state;
-    const account = (state.accounts || []).find(entry => entry.id === accountId && entry.enabled !== false);
+    const account = (state.accounts || []).find(entry =>
+      entry.id === accountId &&
+      entry.enabled !== false &&
+      !entry.needsOwnerCaptcha &&
+      !isCaptchaStatus(entry.status) &&
+      !isBannedStatus(entry.status) &&
+      !isUnverifiedStatus(entry.status) &&
+      entry.status !== 'معزول (3 إخفاقات)' &&
+      (entry.failures || 0) < 3
+    );
     if (!account) { result.reason = 'account_unavailable'; return state; }
     if (item.payload?.account && item.payload.account !== accountId) return state;
     if (accountCapacity(state, account, clock()).remaining <= 0) { result.reason = 'quota_exhausted'; return state; }
@@ -185,7 +135,14 @@ function selectAccount(state, run, item, now = new Date(), excluded = new Set())
   const available = id => {
     const account = (state.accounts || []).find(a => a.id === id && a.enabled !== false);
     if (!account || excluded.has(id)) return false;
-    if (['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(account.status) || (account.failures || 0) >= 3) return false;
+    if (
+      account.needsOwnerCaptcha ||
+      isCaptchaStatus(account.status) ||
+      isBannedStatus(account.status) ||
+      isUnverifiedStatus(account.status) ||
+      account.status === 'معزول (3 إخفاقات)' ||
+      (account.failures || 0) >= 3
+    ) return false;
     return accountCapacity(state, account, now).remaining > 0;
   };
   if (item.payload?.account) return ids.includes(item.payload.account) && available(item.payload.account) ? item.payload.account : null;
@@ -272,6 +229,14 @@ async function run({
   const panelTasks = new Set();
   const trackPanel = promise => { const task = Promise.resolve(promise).catch(error => logger.error(JSON.stringify({ event: 'panel_refresh_failed', code: error.code || 'UNKNOWN' }))); panelTasks.add(task); task.finally(() => panelTasks.delete(task)); return task; };
   const exportTasks = new Set();
+  const forensicTasks = new Set();
+  const trackForensic = promise => {
+    if (!promise || typeof promise.then !== 'function') return promise;
+    const task = Promise.resolve(promise);
+    forensicTasks.add(task);
+    task.finally(() => forensicTasks.delete(task)).catch(() => {});
+    return task;
+  };
   const stop = () => { stopping = true; abortController?.abort(); };
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
@@ -313,15 +278,15 @@ async function run({
     // VPN slot manager — per-account Docker containers
     const vpnSlots = vpnManager || new VpnSlotManager({ store: bot.store, logger: msg => logger.log(JSON.stringify({ event: 'vpn', message: msg })) });
     bot.vpnManager = vpnSlots;
-    bot.forensicLogger?.prune().catch(error => {
+    trackForensic(bot.forensicLogger?.prune().catch(error => {
       logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_prune_failed', operation: 'prune', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
-    });
-    bot.forensicLogger?.pruneBurnedSubnets().catch(error => {
+    }));
+    trackForensic(bot.forensicLogger?.pruneBurnedSubnets().catch(error => {
       logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_prune_subnets_failed', operation: 'pruneBurnedSubnets', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
-    });
-    bot.forensicLogger?.flushOutbox?.().catch(error => {
+    }));
+    trackForensic(bot.forensicLogger?.flushOutbox?.().catch(error => {
       logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_outbox_flush_failed', operation: 'startup.flushOutbox', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
-    });
+    }));
     const links = createLinkExports({ store: bot.store, dataDir, api, chatIds: effectiveChatIds, logger, clock });
     const notify = async (text, { targetChatIds } = {}) => {
       const targetIds = (Array.isArray(targetChatIds) && targetChatIds.length > 0)
@@ -329,10 +294,12 @@ async function run({
         : effectiveChatIds;
       const results = await Promise.allSettled(targetIds.map(chat_id => Promise.resolve().then(async () => {
         const res = await api.sendMessage({ chat_id, text });
+        const messageId = res?.result?.message_id ?? res?.message_id;
+        const validMessageId = Number.isInteger(messageId) && messageId > 0 ? messageId : null;
         return {
           chat_id: String(chat_id),
-          ok: res?.ok === true || res?.result?.message_id != null || res?.message_id != null,
-          message_id: res?.result?.message_id ?? res?.message_id,
+          ok: res?.ok !== false && validMessageId !== null,
+          message_id: validMessageId,
           raw: res
         };
       })));
@@ -349,6 +316,17 @@ async function run({
             sanitizedError: sanitizeError(res.reason),
             details: { chatId: targetIds[i] }
           });
+        } else if (!Number.isInteger(res.value?.message_id) || res.value.message_id <= 0 || res.value?.ok !== true) {
+          logStructured(logger, {
+            level: 'warn',
+            component: 'runner',
+            event: 'notify_send_failed',
+            operation: 'sendMessage',
+            result: 'unconfirmed_receipt',
+            errorCode: 'MISSING_MESSAGE_ID',
+            sanitizedError: 'Telegram sendMessage response did not contain a valid integer message_id',
+            details: { chatId: targetIds[i], messageId: res.value?.message_id ?? null }
+          });
         } else {
           logStructured(logger, {
             level: 'info',
@@ -358,7 +336,7 @@ async function run({
             result: 'delivered_to_telegram_api',
             details: {
               chatId: targetIds[i],
-              messageId: res.value?.message_id ?? null
+              messageId: res.value.message_id
             }
           });
         }
@@ -432,7 +410,21 @@ async function run({
         } catch (error) {
           primaryError = error;
           if (error?.code !== 'ACCOUNT_CHECK_PERSIST_FAILED') {
-            try { await persist({ isolated: false, vpnHealthy: false, authenticated: false }); }
+            const errText = `${error?.code || ''} ${error?.message || ''}`;
+            const isTransient = Boolean(
+              error?.transientError === true ||
+              error?.recoverySafe === true ||
+              ['ATTEMPT_TIMEOUT', 'ATTEMPT_ABORTED', 'VPN_NOT_READY', 'VPN_TRANSIENT_UNAVAILABLE', 'VPN_READINESS_FAILED', 'VPN_MAPPING_CONFLICT', 'DIRECT_X_IDENTITY_READ_UNAVAILABLE', 'MAX_PROJECT_SESSIONS_EXCEEDED', 'DUPLICATE_SESSION_LEASE'].includes(error?.code) ||
+              /vpn|proxy|socks|timeout|readiness|aborted|network|connecterror|econnreset|econnrefused|etimedout|epipe|enotfound|eai_again|rate.?limit|429/i.test(errText)
+            );
+            try {
+              await persist({
+                isolated: false,
+                vpnHealthy: false,
+                authenticated: false,
+                ...(isTransient ? { transientError: true, lastError: sanitizeError(error) } : {})
+              });
+            }
             catch (persistError) { primaryError = persistError; }
           }
           throw primaryError;
@@ -563,6 +555,12 @@ async function run({
         const currentSubnet = session?.exitIp ? normalizeSubnet(session.exitIp) : null;
 
         await bot.store.update(s => {
+          accountResult = {
+            failures: 0,
+            isolated: false,
+            status: null,
+            transportOutage: isTransportOrVpn
+          };
           const acc = s.accounts?.find(a => a.id === accountId);
           if (acc) {
             if (isPermanent) {
@@ -642,13 +640,19 @@ async function run({
 
           // Only the owning claim may be released. Never return a dispatching
           // attempt to pending: X could already have accepted the post.
+          // Preserve explicit owner account pinning (i.payload.account) on pre-dispatch failure!
           const i = s.items?.find(x => x.id === item?.id);
           if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+            archiveAttemptRecord(i, {
+              failedAt: new Date(clock()).toISOString(),
+              failure: failure || null,
+              reason: reason || null,
+              xErrorCode: xErrorCode ?? null
+            });
             if (i.attempt?.phase === 'claimed') {
               i.state = 'pending';
               recordUnsuccessfulAttempt(s, { accountId, outcome: 'failed', at: clock() });
               delete i.attempt;
-              if (i.payload?.account === accountId) delete i.payload.account;
             } else {
               i.state = 'ambiguous';
               recordUnsuccessfulAttempt(s, { accountId, outcome: 'ambiguous', at: clock() });
@@ -670,7 +674,11 @@ async function run({
         const otherActive = (sNow.accounts || []).filter(a =>
           a.id !== accountId &&
           a.enabled !== false &&
-          !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)'].includes(a.status) &&
+          !a.needsOwnerCaptcha &&
+          !isCaptchaStatus(a.status) &&
+          !isBannedStatus(a.status) &&
+          !isUnverifiedStatus(a.status) &&
+          !isAccountInactive(a.status) &&
           (a.failures || 0) < 3 &&
           (run.accountIds || []).includes(a.id) &&
           accountCapacity(sNow, a, clock()).remaining > 0 &&
@@ -683,9 +691,6 @@ async function run({
           cooling.delete(accountId);
         } else if (accountResult.isolated) {
           cooling.delete(accountId);
-          if (failure !== 'captcha' && failure !== 'banned') {
-            vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
-          }
         } else if (isRateLimit) {
           const delayMs = Math.min(900000, Math.max(60000, (retryAfterSeconds || 60) * 1000));
           const entry = {
@@ -702,7 +707,6 @@ async function run({
             return s;
           });
         } else if (isTransportOrVpn) {
-          vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.transport.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
           const delayMs = 30000;
           const entry = {
             failures: accountResult.failures,
@@ -734,9 +738,9 @@ async function run({
           });
         }
 
-        bot.forensicLogger?.record({
+        trackForensic(bot.forensicLogger?.record({
           eventType: accountResult.isolated
-            ? (accountResult.status === 'كابتشا' ? 'account_captcha' : accountResult.status === 'محظور' ? 'account_banned' : 'account_isolated_3_failures')
+            ? (isCaptchaStatus(accountResult.status) ? 'account_captcha' : accountResult.status === 'محظور' ? 'account_banned' : 'account_isolated_3_failures')
             : isKnownParserError ? 'twikit_profile_parse_error_no_strike' : isContentReject ? 'x_content_rejection_no_strike' : isRateLimit ? 'account_rate_limited' : isTransportOrVpn ? 'transport_or_vpn_error' : 'account_failure_strike',
           accountId,
           username: account?.username,
@@ -747,7 +751,7 @@ async function run({
           xErrorCode: xErrorCode ?? null,
           xErrorMessage: rawError || reason,
           details: { itemId: item?.id, failure, failures: accountResult.failures, isolated: accountResult.isolated, libraryParseFailure: isKnownParserError, xResponseKind: xResponseKind || null, contentRejection: isContentReject }
-        }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+        }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) })));
 
         if (accountResult.isolated) {
           if (accountResult.status === 'كابتشا' || failure === 'captcha' || account.needsOwnerCaptcha) {
@@ -822,7 +826,7 @@ async function run({
         const pause = cooling.get(id);
         const reason = !acc ? 'missing_account'
           : acc.enabled === false ? 'disabled'
-          : ['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(acc.status) || (acc.failures || 0) >= 3 ? 'isolated'
+          : acc.needsOwnerCaptcha || isCaptchaStatus(acc.status) || isBannedStatus(acc.status) || isUnverifiedStatus(acc.status) || acc.status === 'معزول (3 إخفاقات)' || (acc.failures || 0) >= 3 ? 'isolated'
           : quota <= 0 ? 'quota_exhausted'
           : passExcluded.has(id) ? 'cooling'
           : 'eligible';
@@ -872,6 +876,56 @@ async function run({
             break;
           }
           claimedInPass = true;
+          const weightedLen = computeWeightedTweetLength(item.payload?.text || '');
+          if (weightedLen > MAX_WEIGHTED_TWEET_CHARS) {
+            const rejectedAt = new Date(clock()).toISOString();
+            await bot.store.update(s => {
+              const i = (s.items || []).find(x => x.id === itemId);
+              if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+                archiveAttemptRecord(i, {
+                  failedAt: rejectedAt,
+                  failure: 'content_rejected',
+                  reason: 'tweet_text_too_long',
+                  xErrorCode: 186
+                });
+                delete i.attempt;
+                i.state = 'cancelled';
+                i.reason = 'tweet_text_too_long';
+                i.failureDiagnostic = {
+                  observedAt: rejectedAt,
+                  dispatchEntered: false,
+                  rejectionReason: 'tweet_text_too_long',
+                  xResponseKind: 'pre_dispatch_validation',
+                  xErrorCode: 186,
+                  xErrorMessage: `Tweet text weighted length (${weightedLen}) exceeds ${MAX_WEIGHTED_TWEET_CHARS} limit`,
+                  httpStatus: null,
+                  verificationError: null
+                };
+                recordUnsuccessfulAttempt(s, { accountId, outcome: 'failed', at: clock() });
+                if (s.posting) s.posting.publishingAt = null;
+              }
+              return s;
+            });
+            logger.log(JSON.stringify({
+              event: 'post_result',
+              runId: run.runId,
+              item: item.id,
+              status: 'cancelled',
+              account: accountId,
+              reason: 'tweet_text_too_long',
+              url: null,
+              dispatchEntered: false,
+              durationMs: 0,
+              xErrorCode: 186,
+              xResponseKind: 'pre_dispatch_validation',
+              xErrorMessage: `Tweet text weighted length (${weightedLen}) exceeds ${MAX_WEIGHTED_TWEET_CHARS} limit`,
+              httpStatus: null,
+              verificationError: null
+            }));
+            skipDelay = true;
+            retry = false;
+            break;
+          }
           let vpn;
           try {
             vpn = await attempt.wait(() => vpnSlots.ensure(accountId, { signal: attempt.signal }));
@@ -894,6 +948,7 @@ async function run({
             await bot.store.update(s => {
               const i = s.items.find(x => x.id === itemId);
               if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+                archiveAttemptRecord(i, { failedAt: new Date(clock()).toISOString(), reason: 'cycle_aborted_pre_open' });
                 i.state = 'pending';
                 delete i.attempt;
               }
@@ -921,6 +976,7 @@ async function run({
             await bot.store.update(s => {
               const i = s.items.find(x => x.id === item.id);
               if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
+                archiveAttemptRecord(i, { failedAt: new Date(clock()).toISOString(), reason: 'cycle_aborted_pre_dispatch' });
                 i.state = 'pending';
                 delete i.attempt;
               }
@@ -943,7 +999,7 @@ async function run({
             if (outcome.halt) { halt = true; }
             skipDelay = outcome.skipDelay;
             retry = false;
-            if (!dispatchEntered) preDispatchTransfer = !outcome.halt;
+            if (!dispatchEntered && !item.payload?.account) preDispatchTransfer = !outcome.halt;
             break;
           } else {
           let dispatchCalled = false;
@@ -953,8 +1009,17 @@ async function run({
             let dispatchReady = false;
             dispatchEntered = true; // Failed durable acknowledgement may have committed.
             await attempt.wait(() => bot.store.update(s => {
+              dispatchReady = false;
               const i = s.items.find(x => x.id === itemId);
-              const a = s.accounts.find(x => x.id === accountId && x.enabled !== false);
+              const a = s.accounts.find(x =>
+                x.id === accountId &&
+                x.enabled !== false &&
+                !x.needsOwnerCaptcha &&
+                !isCaptchaStatus(x.status) &&
+                !isBannedStatus(x.status) &&
+                !isUnverifiedStatus(x.status) &&
+                x.status !== 'معزول (3 إخفاقات)'
+              );
               if (!attempt.signal.aborted && s.cycle?.state === 'running' && s.cycle.runId === run.runId &&
                 i?.state === 'processing' && i.attempt?.phase === 'claimed' && i.attempt?.token === claim.token &&
                 i.attempt.runId === run.runId && i.attempt.accountId === accountId &&
@@ -1005,13 +1070,14 @@ async function run({
           const publishedAt = new Date(clock()).toISOString();
           let transitioned = false;
           await bot.store.update(s => {
+            transitioned = false;
             const i = s.items.find(x => x.id === item.id);
             if (!i || i.state !== 'processing' || !i.attempt || !claim?.token || i.attempt.token !== claim.token) return s;
             s.posting ||= {};
             s.posting.publishingAt = null;
             transitioned = true;
             if (i.attempt) {
-              i.archivedAttempt = structuredClone(i.attempt);
+              archiveAttemptRecord(i, { settledAt: publishedAt, outcomeState: newState });
             }
             delete i.attempt;
             i.state = newState; i.reason = result.reason || null;
@@ -1072,7 +1138,7 @@ async function run({
             verificationError: result.verificationError ? sanitizeError(result.verificationError).slice(0, 512) : null
           }));
           if (newState === 'published') {
-            bot.forensicLogger?.record({
+            trackForensic(bot.forensicLogger?.record({
               eventType: 'post_success',
               accountId,
               username: account?.username,
@@ -1080,7 +1146,7 @@ async function run({
               port: session?.port,
               exitIp: session?.exitIp,
               details: { itemId: item.id, url: result.url }
-            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_success.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_success.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) })));
             cooling.delete(accountId);
             await bot.store.update(s => {
               if (s.posting?.cooling) delete s.posting.cooling[accountId];
@@ -1092,7 +1158,7 @@ async function run({
             if (onPostPersisted) await onPostPersisted({ itemId: item.id, accountId, publishedAt, url: result.url, stop: () => ui.stop() });
             if (run.stopAfterSuccess) { await ui.stop(); halt = true; }
           } else if (newState === 'ambiguous') {
-            bot.forensicLogger?.record({
+            trackForensic(bot.forensicLogger?.record({
               eventType: 'post_ambiguous',
               accountId,
               username: account?.username,
@@ -1105,7 +1171,7 @@ async function run({
               details: { itemId: item.id, runId: run.runId, reason: result.reason,
                 xResponseKind: result.xResponseKind, rawError: result.rawError,
                 fetchError: result.fetchError, verificationError: result.verificationError }
-            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) })));
             // Preserve the per-item forensic event without spamming Telegram.
             // A single alert is emitted only when the account is isolated.
             const outcome = await handleAccountFailure({
@@ -1144,7 +1210,7 @@ async function run({
             if (outcome.halt) { halt = true; }
             skipDelay = outcome.skipDelay;
             retry = false;
-            if (!dispatchEntered) preDispatchTransfer = !outcome.halt;
+            if (!dispatchEntered && !item.payload?.account) preDispatchTransfer = !outcome.halt;
             break;
           } else if (newState === 'pending') { retry = true; }
           else if (newState === 'cancelled') { skipDelay = true; }
@@ -1152,7 +1218,7 @@ async function run({
         } catch (err) {
           if (err.readDiagnostic?.httpStatus === 429) retryAfterMs = Math.min(900000, Math.max(60000, (err.readDiagnostic.retryAfterSeconds || 60) * 1000));
           logger.error(JSON.stringify({ event: 'post_error', item: item.id, code: err.code || 'UNKNOWN', readPhase: ['user_state','settings','profile','bridge'].includes(err.readDiagnostic?.phase) ? err.readDiagnostic.phase : undefined, httpStatus: Number.isInteger(err.readDiagnostic?.httpStatus) ? err.readDiagnostic.httpStatus : undefined }));
-          bot.forensicLogger?.record({
+          trackForensic(bot.forensicLogger?.record({
             eventType: 'post_error',
             accountId,
             username: account?.username,
@@ -1165,12 +1231,15 @@ async function run({
             endpoint: err.readDiagnostic?.phase || 'CreateTweet',
             rawResponseSnippet: err.rawBody || err.readDiagnostic?.snippet,
             details: { itemId: item.id }
-          }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_error.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+          }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_error.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) })));
           await bot.store.update(s => {
             const i = s.items.find(x => x.id === item.id);
             if (i?.state === 'processing' && claim?.token && i.attempt?.token === claim.token) {
               if (i.attempt) {
-                i.archivedAttempt = structuredClone(i.attempt);
+                archiveAttemptRecord(i, {
+                  failedAt: new Date(clock()).toISOString(),
+                  errorCode: err.code || err.xErrorCode || null
+                });
               }
               i.state = dispatchEntered || i.attempt?.phase === 'dispatching' ? 'ambiguous' : 'pending';
               i.failureDiagnostic = {
@@ -1198,7 +1267,7 @@ async function run({
             return s;
           });
           if (dispatchEntered) {
-            bot.forensicLogger?.record({
+            trackForensic(bot.forensicLogger?.record({
               eventType: 'post_ambiguous',
               accountId,
               username: account?.username,
@@ -1208,7 +1277,7 @@ async function run({
               xErrorCode: err.code || err.xErrorCode,
               xErrorMessage: err.message,
               details: { itemId: item.id, reason: 'exception_after_dispatch' }
-            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous_dispatch.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+            }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'post_ambiguous_dispatch.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) })));
             // Dispatch crossed the irreversible boundary — the post may have
             // been published. Isolate it as ambiguous but let the cycle continue
             // with remaining items instead of freezing the entire run.
@@ -1247,7 +1316,7 @@ async function run({
             if (outcome.halt) { halt = true; }
             skipDelay = outcome.skipDelay;
             retry = false;
-            if (!dispatchEntered) preDispatchTransfer = !outcome.halt;
+            if (!dispatchEntered && !item.payload?.account) preDispatchTransfer = !outcome.halt;
             break;
           }
           else if (['ATTEMPT_TIMEOUT', 'ATTEMPT_ABORTED', 'DISPATCH_REJECTED', 'DISPATCH_FENCE_MISSING'].includes(err.code)) halt = true;
@@ -1274,6 +1343,7 @@ async function run({
           await bot.store.update(s => {
             const i = s.items.find(x => x.id === itemId);
             if ((i?.state === 'processing' || (i?.state === 'ambiguous' && !i?.reason)) && claim?.token && i.attempt?.token === claim.token) {
+              archiveAttemptRecord(i, { failedAt: new Date(clock()).toISOString(), reason: 'settled_in_finally' });
               if (i.attempt?.phase === 'claimed' && !dispatchEntered) {
                 i.state = 'pending';
                 recordUnsuccessfulAttempt(s, { accountId, outcome: 'failed', at: clock() });
@@ -1284,6 +1354,7 @@ async function run({
                 i.reason ||= 'unresolved_in_finally';
                 i.accountId ||= accountId;
                 i.accountUsername ||= account?.username;
+                delete i.attempt;
               }
               if (s.posting) s.posting.publishingAt = null;
             }
@@ -1314,7 +1385,11 @@ async function run({
           const otherActive = (sNow.accounts || []).filter(a =>
             a.id !== accountId &&
             a.enabled !== false &&
-            !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
+            !a.needsOwnerCaptcha &&
+            !isCaptchaStatus(a.status) &&
+            !isBannedStatus(a.status) &&
+            !isUnverifiedStatus(a.status) &&
+            !isAccountInactive(a.status) &&
             (a.failures || 0) < 3 &&
             (run.accountIds || []).includes(a.id) &&
             accountCapacity(sNow, a, clock()).remaining > 0 &&
@@ -1409,7 +1484,7 @@ async function run({
       return task;
     };
     const restored = await ui.restore();
-    await bot.forensicLogger?.flushOutbox?.().catch(() => {});
+    await trackForensic(bot.forensicLogger?.flushOutbox?.().catch(() => {}));
     await reconcileLinks({ startup: true }); // Interrupted work is a report boundary before any resume.
     if (restored?.resume) {
       const restoredState = await bot.store.load();
@@ -1437,12 +1512,16 @@ async function run({
           if (schedule.enabled && isDue(schedule, now)) {
             const parts = riyadhDateParts(now);
             const day = `${parts.year}-${parts.month}-${parts.day}`;
-            let due = false;
-            await bot.store.update(current => {
-              if (current.uiScheduleDay !== day) { current.uiScheduleDay = day; due = true; }
-              return current;
-            });
-            if (due) await ui.startScheduled();
+            const currentSnap = await bot.store.load();
+            if (currentSnap.uiScheduleDay !== day) {
+              const res = await ui.startScheduled();
+              if (res?.started === true) {
+                await bot.store.update(current => {
+                  current.uiScheduleDay = day;
+                  return current;
+                });
+              }
+            }
           }
         } catch (scheduleErr) {
           logger.error(JSON.stringify({ event: 'schedule_check_error', message: scheduleErr.message }));
@@ -1526,7 +1605,10 @@ async function run({
                 let result;
                 if (raw.message.document) {
                   const file = await api.getFile({ file_id: raw.message.document.file_id });
-                  const content = await api.downloadFile(file.file_path);
+                  if (file.file_size != null && file.file_size > MAX_COOKIE_FILE_BYTES) {
+                    throw Object.assign(new Error('COOKIE_FILE_TOO_LARGE: حجم ملف الكوكيز يتجاوز 1 ميجابايت.'), { code: 'COOKIE_FILE_TOO_LARGE' });
+                  }
+                  const content = await api.downloadFile(file.file_path, { maxBytes: MAX_COOKIE_FILE_BYTES });
                   result = await bot.cookies.storeContent(`cred-${require('node:crypto').randomUUID()}`, content.toString('utf8'));
                 } else {
                   result = await bot.cookies.store(`cred-${require('node:crypto').randomUUID()}`, request.command.args[1]);
@@ -1622,13 +1704,49 @@ async function run({
     }
     logger.log(JSON.stringify({ event: 'telegram_stopped' }));
   } finally {
-    await watchdog?.close();
-    await ui?.destroy();
     process.removeListener('SIGTERM', stop);
     process.removeListener('SIGINT', stop);
     try {
-      await ui?.stop();
-      await ui?.job;
+      try {
+        await watchdog?.close();
+      } catch (watchdogErr) {
+        logStructured(logger, {
+          level: 'warn',
+          component: 'runner',
+          event: 'shutdown_watchdog_close_failed',
+          operation: 'watchdog.close',
+          result: 'failed',
+          errorCode: extractErrorCode(watchdogErr),
+          sanitizedError: sanitizeError(watchdogErr)
+        });
+      }
+      try {
+        await ui?.destroy();
+      } catch (uiDestroyErr) {
+        logStructured(logger, {
+          level: 'warn',
+          component: 'runner',
+          event: 'shutdown_ui_destroy_failed',
+          operation: 'ui.destroy',
+          result: 'failed',
+          errorCode: extractErrorCode(uiDestroyErr),
+          sanitizedError: sanitizeError(uiDestroyErr)
+        });
+      }
+      try {
+        await ui?.stop();
+        await ui?.job;
+      } catch (uiStopErr) {
+        logStructured(logger, {
+          level: 'warn',
+          component: 'runner',
+          event: 'shutdown_ui_stop_failed',
+          operation: 'ui.stop',
+          result: 'failed',
+          errorCode: extractErrorCode(uiStopErr),
+          sanitizedError: sanitizeError(uiStopErr)
+        });
+      }
       const exportResults = await Promise.allSettled([...exportTasks]);
       for (const res of exportResults) {
         if (res.status === 'rejected') {
@@ -1657,6 +1775,20 @@ async function run({
           });
         }
       }
+      const forensicResults = await Promise.allSettled([...forensicTasks]);
+      for (const res of forensicResults) {
+        if (res.status === 'rejected') {
+          logStructured(logger, {
+            level: 'warn',
+            component: 'runner',
+            event: 'shutdown_forensic_task_failed',
+            operation: 'shutdown',
+            result: 'failed',
+            errorCode: extractErrorCode(res.reason),
+            sanitizedError: sanitizeError(res.reason)
+          });
+        }
+      }
     } finally {
       try { await bot?.store?.close?.(); } finally { await release(); }
     }
@@ -1668,4 +1800,13 @@ return Boolean(error?.ambiguous || ['TELEGRAM_TIMEOUT', 'TELEGRAM_INVALID_RESPON
 }
 
 if (require.main === module) run().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { run, SingleInstanceLock, updateId, isAmbiguousTelegramError };
+module.exports = {
+  run,
+  SingleInstanceLock,
+  updateId,
+  isAmbiguousTelegramError,
+  claimCycleItem,
+  selectAccount,
+  computeWeightedTweetLength,
+  MAX_WEIGHTED_TWEET_CHARS
+};

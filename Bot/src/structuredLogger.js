@@ -31,6 +31,8 @@ function sanitizeString(str) {
   return sanitized;
 }
 
+const SENSITIVE_KEY_PATTERN = /token|cookie|password|secret|auth|key|ct0|twid|kdt|credential|bearer/i;
+
 function sanitizeValue(value, depth = 0) {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string') return sanitizeString(value);
@@ -43,7 +45,7 @@ function sanitizeValue(value, depth = 0) {
   if (typeof value === 'object') {
     const cleaned = {};
     for (const [k, v] of Object.entries(value)) {
-      if (/token|cookie|password|secret|auth|key/i.test(k) && typeof v === 'string') {
+      if (SENSITIVE_KEY_PATTERN.test(k) && v !== null && v !== undefined) {
         cleaned[k] = '[REDACTED]';
       } else {
         cleaned[k] = sanitizeValue(v, depth + 1);
@@ -68,7 +70,10 @@ function extractErrorCode(err) {
   return null;
 }
 
-function formatStructuredLog(input = {}) {
+function formatStructuredLog(eventOrInput = {}, extra = null) {
+  const input = typeof eventOrInput === 'string'
+    ? { ...(extra && typeof extra === 'object' ? extra : {}), event: eventOrInput }
+    : (eventOrInput && typeof eventOrInput === 'object' ? eventOrInput : {});
   const now = input.timestamp || new Date().toISOString();
   const errorObj = input.error || null;
   const sanitizedErr = input.sanitizedError ?? (errorObj ? sanitizeError(errorObj) : null);
@@ -92,7 +97,7 @@ function formatStructuredLog(input = {}) {
     suppressionReason: input.suppressionReason != null ? sanitizeString(String(input.suppressionReason)) : null
   };
 
-  // Merge extra fields safely (sanitizing strings and objects)
+  // Merge extra fields safely (sanitizing sensitive top-level keys, strings, and objects)
   const standardKeys = new Set([
     'timestamp', 'level', 'component', 'event', 'runId', 'accountId',
     'queueItemId', 'attemptId', 'operation', 'result', 'durationMs',
@@ -101,7 +106,11 @@ function formatStructuredLog(input = {}) {
 
   for (const [key, val] of Object.entries(input)) {
     if (!standardKeys.has(key)) {
-      record[key] = sanitizeValue(val);
+      if (SENSITIVE_KEY_PATTERN.test(key) && val !== null && val !== undefined) {
+        record[key] = '[REDACTED]';
+      } else {
+        record[key] = sanitizeValue(val);
+      }
     }
   }
 
@@ -197,6 +206,7 @@ function createStructuredLogger(component, { logger = console, defaultContext = 
 }
 
 module.exports = {
+  SENSITIVE_KEY_PATTERN,
   sanitizeString,
   sanitizeError,
   sanitizeValue,

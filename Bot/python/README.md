@@ -129,10 +129,12 @@ the authority; the adapter cannot deduplicate external callers by itself.
 
 The independent patch supports current/legacy ondemand webpack chunk lookup,
 optional transaction-ID degradation, and missing non-identity user description
-fields. If X changes the private API, it may stop working. A missing transaction
-header never counts as identity proof. Migration redirect failures are blocked,
-not bypassed; no direct fallback. Browser onboarding/session verifier replacement
-is separate runner integration work.
+fields (via an idempotent process-scoped `twikit.user.User.__init__` normalization
+wrapper `_compat_user_data` in the isolated single-account bridge process). If X
+changes the private API, it may stop working. A missing transaction header never
+counts as identity proof. Migration redirect failures are blocked, not bypassed;
+no direct fallback. Browser onboarding/session verifier replacement is separate
+runner integration work.
 
 Tests use fixture identities/payloads and intercepted HTTP/socket I/O. They test
 actual Twikit bootstrap/create_tweet and HTTPX/SOCKS internals, plus real child

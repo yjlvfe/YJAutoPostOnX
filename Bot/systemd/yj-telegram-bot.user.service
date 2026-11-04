@@ -2,6 +2,8 @@
 Description=YJ AutoPost Telegram bot runtime (per-user checkout)
 After=network-online.target
 Wants=network-online.target
+# Prevent concurrent user-scope and system-scope polling instances (P05-T01)
+Conflicts=yj-telegram-bot.service
 
 [Service]
 Type=simple
@@ -21,7 +23,7 @@ ProtectHome=false
 ReadWritePaths=%h/Projects/YJAutoPostOnX/Bot/data
 UMask=0077
 
-# This user unit is installed and enabled for the owning user's boot target.
+# This user unit is manual-only when the system unit yj-telegram-bot.service is active.
 # Do not start or restart it as part of static verification; use a bounded,
 # separately named smoke unit only when an operator explicitly approves one.
 

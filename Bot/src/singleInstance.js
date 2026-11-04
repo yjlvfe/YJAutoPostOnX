@@ -1,11 +1,29 @@
 'use strict';
 
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function getProcessStartTime(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const statPath = `/proc/${pid}/stat`;
+    if (!fsSync.existsSync(statPath)) return null;
+    const content = fsSync.readFileSync(statPath, 'utf8');
+    const closeParen = content.lastIndexOf(')');
+    if (closeParen === -1) return null;
+    // Field 22 (starttime) is index 19 after ')' (which ends field 2).
+    const fields = content.slice(closeParen + 2).trim().split(/\s+/);
+    const starttime = fields[19];
+    return starttime && /^\d+$/.test(starttime) ? starttime : null;
+  } catch {
+    return null;
+  }
+}
 
 function isConflict409(error) {
   if (!error) return false;
@@ -29,7 +47,7 @@ class SingleInstanceLock {
     initialBackoffMs = 1000,
     maxBackoffMs = 30_000
   } = {}) {
-    this.lockPath = path.resolve(lockPath);
+    this.lockPath = lockPath ? path.resolve(lockPath) : null;
     this.timeoutMs = timeoutMs;
     this.retryMs = retryMs;
     this.staleMs = staleMs;
@@ -46,13 +64,20 @@ class SingleInstanceLock {
   }
 
   async acquire() {
+    if (!this.lockPath) throw new Error('SingleInstanceLock requires a lockPath to acquire');
     await fs.mkdir(path.dirname(this.lockPath), { recursive: true });
     const deadline = Date.now() + this.timeoutMs;
     const token = crypto.randomUUID();
+    const starttime = getProcessStartTime(process.pid);
     while (true) {
       try {
         const handle = await fs.open(this.lockPath, 'wx', 0o600);
-        await handle.writeFile(JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() }) + '\n');
+        await handle.writeFile(JSON.stringify({
+          pid: process.pid,
+          ...(starttime != null ? { starttime } : {}),
+          token,
+          acquiredAt: new Date().toISOString()
+        }) + '\n');
         await handle.close();
         this.token = token;
         return async () => this.release(token);
@@ -81,6 +106,7 @@ class SingleInstanceLock {
   }
 
   async recoverStale() {
+    if (!this.lockPath) return false;
     let stat;
     try { stat = await fs.stat(this.lockPath); } catch (error) { return error.code === 'ENOENT'; }
     let record;
@@ -91,6 +117,12 @@ class SingleInstanceLock {
     let dead = false;
     if (Number.isInteger(record?.pid) && record.pid > 0) {
       try { process.kill(record.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
+      if (!dead && record.starttime != null) {
+        const currentStartTime = getProcessStartTime(record.pid);
+        if (currentStartTime != null && String(currentStartTime) !== String(record.starttime)) {
+          dead = true; // Holder PID was recycled by a newer process
+        }
+      }
       // A long-lived polling service is not stale just because its lock is old.
       if (!dead) {
         this.lastHolderPid = record.pid;
@@ -127,7 +159,7 @@ class SingleInstanceLock {
   }
 
   async release(token = this.token) {
-    if (!token || token !== this.token) return false;
+    if (!this.lockPath || !token || token !== this.token) return false;
     this.token = null;
     try {
       const record = JSON.parse(await fs.readFile(this.lockPath, 'utf8'));
@@ -135,7 +167,8 @@ class SingleInstanceLock {
       await fs.unlink(this.lockPath);
       return true;
     } catch (error) {
-      return error.code === 'ENOENT';
+      if (error.code === 'ENOENT') return false;
+      throw error;
     }
   }
 
@@ -177,18 +210,19 @@ class SingleInstanceLock {
       backoffMs
     }));
 
-    // Check if the conflicting instance has died or released its lock
-    await this.recoverStale().catch(err => {
-      logStructured(logger, {
-        level: 'warn',
-        component: 'single_instance_lock',
-        event: 'recover_stale_failed',
-        operation: 'handleConflict409.recoverStale',
-        result: 'failed',
-        errorCode: extractErrorCode(err),
-        sanitizedError: sanitizeError(err)
+    if (this.lockPath) {
+      await this.recoverStale().catch(err => {
+        logStructured(logger, {
+          level: 'warn',
+          component: 'single_instance_lock',
+          event: 'recover_stale_failed',
+          operation: 'handleConflict409.recoverStale',
+          result: 'failed',
+          errorCode: extractErrorCode(err),
+          sanitizedError: sanitizeError(err)
+        });
       });
-    });
+    }
 
     await sleepFn(backoffMs);
 
@@ -236,17 +270,19 @@ class SingleInstanceLock {
           backoffMs
         }));
 
-        await this.recoverStale().catch(err => {
-          logStructured(logger, {
-            level: 'warn',
-            component: 'single_instance_lock',
-            event: 'recover_stale_failed',
-            operation: 'executeWithConflictBackoff.recoverStale',
-            result: 'failed',
-            errorCode: extractErrorCode(err),
-            sanitizedError: sanitizeError(err)
+        if (this.lockPath) {
+          await this.recoverStale().catch(err => {
+            logStructured(logger, {
+              level: 'warn',
+              component: 'single_instance_lock',
+              event: 'recover_stale_failed',
+              operation: 'executeWithConflictBackoff.recoverStale',
+              result: 'failed',
+              errorCode: extractErrorCode(err),
+              sanitizedError: sanitizeError(err)
+            });
           });
-        });
+        }
         await sleepFn(backoffMs);
         retryCount += 1;
       }
@@ -255,12 +291,13 @@ class SingleInstanceLock {
 }
 
 async function executeWithConflictBackoff(fn, options = {}) {
-  const dummyLock = new SingleInstanceLock('/tmp/dummy.lock', options);
-  return dummyLock.executeWithConflictBackoff(fn, options);
+  const lockInstance = new SingleInstanceLock(options.lockPath || null, options);
+  return lockInstance.executeWithConflictBackoff(fn, options);
 }
 
 module.exports = {
   SingleInstanceLock,
   isConflict409,
-  executeWithConflictBackoff
+  executeWithConflictBackoff,
+  getProcessStartTime
 };

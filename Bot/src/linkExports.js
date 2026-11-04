@@ -90,21 +90,30 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
     });
   }
 
+  const MAX_LINK_HISTORY = 200;
+
   // A terminal obligation belongs to a session-stop event, not to individual
   // new rows. Even a failed session owes today's previously confirmed history.
   async function enqueueTerminal(run) {
-    if (!run?.runId) return;
+    if (!run?.runId) return { queued: false, suppressed: false, reason: 'missing_run_id' };
+    let outcome = { queued: false, suppressed: false, reason: null };
     await store.update(state => {
+      outcome = { queued: false, suppressed: false, reason: null };
       const pending = state.telegramUi?.pendingReport;
       const day = dayOf(run.endedAt || (pending?.runId === run.runId && pending.endedAt) || clock());
       state.linkOutbox ||= [];
       state.linkTerminalEvents ||= [];
       // Do not publish a terminal report if its terminal-state commit failed.
-      if (['running', 'stopping'].includes(state.cycle?.state) && state.cycle.runId === run.runId) return state;
+      if (['running', 'stopping'].includes(state.cycle?.state) && state.cycle.runId === run.runId) {
+        outcome = { queued: false, suppressed: false, reason: 'cycle_still_active' };
+        return state;
+      }
       if (state.telegramUi?.pendingReport?.runId === run.runId) delete state.telegramUi.pendingReport;
+      let queuedAny = false;
+      let suppressedAny = false;
       for (const destination of destinations) {
         // Idempotency per (destination, runId): prevent duplicate sends on replay of same runId
-        const existingEvent = (state.linkTerminalEvents || []).find(event => event.runId === run.runId && event.chatId === destination);
+        const existingEvent = (state.linkTerminalEvents || []).find(event => event.runId === run.runId && String(event.chatId) === destination);
         const alreadyDelivered = (state.linkDeliveries || []).some(entry =>
           entry.runId === run.runId && String(entry.chatId) === destination && entry.ok
         );
@@ -113,16 +122,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
         );
 
         if (existingEvent || alreadyDelivered || alreadyOutbox) {
-          state.linkTerminalEvents.push({
-            runId: run.runId,
-            chatId: destination,
-            day,
-            reconciled: true,
-            suppressed: true,
-            reason: 'duplicate_run_id',
-            contentHash: null,
-            itemIds: []
-          });
+          suppressedAny = true;
           logStructured(logger, {
             level: 'info',
             component: 'link_exports',
@@ -149,6 +149,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
             entry.runId === run.runId && String(entry.chatId) === destination && entry.kind === 'empty'
           );
           if (!hasEmptyOutbox) {
+            queuedAny = true;
             state.linkOutbox.push({
               outboxId: randomUUID(),
               runId: run.runId,
@@ -170,13 +171,26 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
         const content = csv(rows);
         const contentHash = crypto.createHash('sha256').update(content).digest('hex');
 
+        queuedAny = true;
         state.linkTerminalEvents.push({ runId: run.runId, chatId: destination, day, reconciled: false, contentHash });
         state.linkOutbox.push({ outboxId: randomUUID(), runId: run.runId, terminalId: run.runId, day,
           kind: 'document', chatId: destination, itemIds: rows.map(row => row.id), rows: structuredClone(rows),
           contentHash, status: 'pending', attempts: 0, createdAt: new Date(clock()).toISOString() });
       }
+      if (state.linkTerminalEvents.length > MAX_LINK_HISTORY) {
+        state.linkTerminalEvents = state.linkTerminalEvents.slice(-MAX_LINK_HISTORY);
+      }
+      if (Array.isArray(state.linkDeliveries) && state.linkDeliveries.length > MAX_LINK_HISTORY) {
+        state.linkDeliveries = state.linkDeliveries.slice(-MAX_LINK_HISTORY);
+      }
+      if (suppressedAny && !queuedAny) {
+        outcome = { queued: false, suppressed: true, reason: 'duplicate_run_id' };
+      } else {
+        outcome = { queued: queuedAny, suppressed: false, reason: null };
+      }
       return state;
     });
+    return outcome;
   }
 
   async function deliver(outboxId, { idleOnly = false } = {}) {
@@ -184,6 +198,8 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
     const deliveryId = randomUUID();
     let contentHash = null;
     await store.update(state => {
+      entry = undefined;
+      contentHash = null;
       if (idleOnly && ['running', 'stopping'].includes(state.cycle?.state)) return state;
       const current = (state.linkOutbox || []).find(record => record.outboxId === outboxId);
       if (!current || !destinations.includes(String(current.chatId)) || !['pending', 'retry'].includes(current.status)) return state;
@@ -200,6 +216,9 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
       current.contentHash = contentHash;
       state.linkDeliveries.push({ deliveryId, outboxId, runId: current.runId, day: current.day, kind: current.kind,
         chatId: current.chatId, itemIds: current.itemIds, contentHash, attempted: true, ok: false, attemptedAt: current.attemptedAt });
+      if (state.linkDeliveries.length > MAX_LINK_HISTORY) {
+        state.linkDeliveries = state.linkDeliveries.slice(-MAX_LINK_HISTORY);
+      }
       entry = structuredClone(current);
       return state;
     });
@@ -345,6 +364,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
   async function drain(options) {
     const lease = randomUUID(); let acquired = !options?.idleOnly;
     if (options?.idleOnly) await store.update(state => {
+      acquired = false;
       if (['running', 'stopping'].includes(state.cycle?.state) || state.linkExportLease) return state;
       state.linkExportLease = lease; acquired = true; return state;
     });
@@ -377,6 +397,7 @@ function createLinkExports({ store, dataDir, api, chatId, chatIds, logger = cons
   }
   return {
     write: item => serialize(async () => writeDay(dayOf(item.publishedAt), await store.load())),
+    enqueueTerminal: run => serialize(async () => enqueueTerminal(run)),
     send: (run, { emptyMessage = true, terminal = false } = {}) => serialize(async () => {
       if (terminal) await enqueueTerminal(run); else await enqueue(run, { emptyMessage });
       return drain(terminal ? { idleOnly: true } : undefined);

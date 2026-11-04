@@ -1,6 +1,7 @@
 'use strict';
 const { setTimeout: delay } = require('node:timers/promises');
 const { isPublicIp } = require('./publicIp');
+const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const revisionKeys = ['checkGeneration', 'cookieFile', 'enabled', 'username', 'userId'];
 const sameRevision = (a, b) => a && b && revisionKeys.every(k => a[k] === b[k]);
 const confirmed = result => Boolean(
@@ -30,7 +31,23 @@ function createAccountRefresh(ui, { retryMs = 2000, maxFailures = 2, timeoutMs =
     if (controller.signal.aborted) return;
     dirty = true;
     if (renderTask) return;
-    renderTask = (async () => { while (dirty && !controller.signal.aborted) { dirty = false; await ui.refreshPanels(true).catch(() => {}); } })().finally(() => { renderTask = null; });
+    renderTask = (async () => {
+      while (dirty && !controller.signal.aborted) {
+        dirty = false;
+        await ui.refreshPanels(true).catch(err => {
+          if (controller.signal.aborted) return;
+          logStructured(ui?.bot?.logger || null, {
+            level: 'warn',
+            component: 'account_refresh',
+            event: 'account_refresh_panel_failed',
+            operation: 'refreshPanels',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        });
+      }
+    })().finally(() => { renderTask = null; });
   };
   let wake;
   job.nudge = () => wake?.();
@@ -73,14 +90,31 @@ function createAccountRefresh(ui, { retryMs = 2000, maxFailures = 2, timeoutMs =
         failures++;
         if (failures >= maxFailures) {
           try {
-            await ui.recordAccountCheck(id, { isolated: false, vpnHealthy: false, authenticated: false }, {
+            await ui.recordAccountCheck(id, {
+              isolated: false,
+              vpnHealthy: false,
+              authenticated: false,
+              transientError: true,
+              lastError: sanitizeError(error)
+            }, {
               session: false,
               source: 'vpn-health',
               expectedAccount: currentAccount,
               refresh: true,
               signal: controller.signal
-            }).catch(() => {});
-          } catch {}
+            });
+          } catch (persistErr) {
+            logStructured(ui?.bot?.logger || null, {
+              level: 'warn',
+              component: 'account_refresh',
+              event: 'account_refresh_check_persist_failed',
+              accountId: id,
+              operation: 'recordAccountCheck',
+              result: 'failed',
+              errorCode: extractErrorCode(persistErr),
+              sanitizedError: sanitizeError(persistErr)
+            });
+          }
           completed.set(id, currentAccount || { id });
           job.pending.delete(id);
           render();
@@ -106,7 +140,18 @@ function createAccountRefresh(ui, { retryMs = 2000, maxFailures = 2, timeoutMs =
           }
           render();
           if (!active.size && !job.pending.size) break;
-        } catch { /* A failed snapshot must not turn a refresh into success. */ }
+        } catch (err) {
+          /* A failed snapshot must not turn a refresh into success, but emit structured diagnostic. */
+          logStructured(ui?.bot?.logger || null, {
+            level: 'warn',
+            component: 'account_refresh',
+            event: 'account_refresh_snapshot_failed',
+            operation: 'accounts.list',
+            result: 'failed',
+            errorCode: extractErrorCode(err),
+            sanitizedError: sanitizeError(err)
+          });
+        }
         await pause();
       }
     } finally {

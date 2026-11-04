@@ -7,7 +7,15 @@ const { TextDecoder } = require('node:util');
 const { splitRows, parseLine } = require('./csv');
 const { parseCookies } = require('./cookieFormat');
 const { Queue, hash } = require('./queue');
-const { normalizeAccountId } = require('./accounts');
+const {
+  normalizeAccountId,
+  MAX_COOKIE_FILE_BYTES,
+  MAX_ACTIVE_ACCOUNTS,
+  isCaptchaStatus,
+  isBannedStatus,
+  isUnverifiedStatus,
+  isAccountInactive
+} = require('./accounts');
 const { formatAccountTable, escapeHtml } = require('./accountTable');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
 const nonce = () => crypto.randomBytes(10).toString('hex');
@@ -129,9 +137,18 @@ class TelegramFlows {
     try {
       const ext = path.extname(d?.file_name || '').toLowerCase();
       if (!(u.prompt === 'csv' ? ['.csv', '.txt'] : ['.json', '.txt']).includes(ext)) throw new Error(u.prompt === 'csv' ? 'أرسل ملفاً بامتداد CSV أو TXT.' : 'أرسل ملف TXT أو JSON.');
-      if (d.file_size != null && (!Number.isSafeInteger(d.file_size) || d.file_size <= 0 || d.file_size > MAX_FILE)) throw new Error('الحد الأقصى لحجم الملف 2 ميجابايت.');
+      const maxAllowedBytes = u.prompt === 'cookies' ? MAX_COOKIE_FILE_BYTES : MAX_FILE;
+      if (d.file_size != null && (!Number.isSafeInteger(d.file_size) || d.file_size <= 0 || d.file_size > maxAllowedBytes)) {
+        if (u.prompt === 'cookies' && d.file_size > MAX_COOKIE_FILE_BYTES) {
+          throw Object.assign(new Error('COOKIE_FILE_TOO_LARGE: الحد الأقصى لحجم ملف الكوكيز 1 ميجابايت.'), { code: 'COOKIE_FILE_TOO_LARGE' });
+        }
+        throw new Error('الحد الأقصى لحجم الملف 2 ميجابايت.');
+      }
       if (!this.downloadDocument) throw new Error('استقبال الملفات غير متاح الآن. حاول لاحقاً.');
       const content = decodeFile(await this.downloadDocument(d));
+      if (u.prompt === 'cookies' && Buffer.byteLength(content, 'utf8') > MAX_COOKIE_FILE_BYTES) {
+        throw Object.assign(new Error('COOKIE_FILE_TOO_LARGE: الحد الأقصى لحجم ملف الكوكيز 1 ميجابايت.'), { code: 'COOKIE_FILE_TOO_LARGE' });
+      }
       if (u.prompt === 'csv') {
         const snapshot = await this.bot.store.load();
         const preview = { ...parsePostsFile(content, snapshot, { plainText: ext === '.txt' }), queueFingerprint: hash((snapshot.items || []).filter(x => x.state === 'pending').map(x => x.id).sort()) };
@@ -265,11 +282,38 @@ class TelegramFlows {
       const account = (await this.bot.accounts.list()).find(a => a.id === u.accountId); if (!account) return this.accounts(id);
       if (text === 'تعطيل' || (text === 'تفعيل أو تعطيل' && account.enabled)) return this.confirm(id, 'disableConfirm', `تعطيل ${account.label}؟`, { id: account.id });
       if (text === 'تفعيل' || text === 'تفعيل أو تعطيل') {
-        const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
-        if (isBanned) {
-          return this.say(id, 'هذا الحساب محظور، لا يمكن تفعيله.', 'account');
-        }
-        await this.bot.accounts.update(account.id, { enabled: true, status: 'مفعل' });
+        let enableOutcome = { enabled: false, notFound: false, banned: false, captcha: false, unverified: false, limitExceeded: false };
+        await this.bot.store.update(s => {
+          enableOutcome = { enabled: false, notFound: false, banned: false, captcha: false, unverified: false, limitExceeded: false };
+          const target = (s.accounts || []).find(a => a.id === account.id);
+          if (!target) { enableOutcome.notFound = true; return s; }
+          if (isBannedStatus(target.status)) { enableOutcome.banned = true; target.enabled = false; return s; }
+          if (target.needsOwnerCaptcha || isCaptchaStatus(target.status)) { enableOutcome.captcha = true; target.enabled = false; return s; }
+          if (isUnverifiedStatus(target.status)) { enableOutcome.unverified = true; target.enabled = false; return s; }
+          const activeCount = (s.accounts || []).filter(a =>
+            a.id !== target.id &&
+            a.enabled !== false &&
+            !isAccountInactive(a.status) &&
+            !a.needsOwnerCaptcha &&
+            !isCaptchaStatus(a.status) &&
+            !isBannedStatus(a.status) &&
+            !isUnverifiedStatus(a.status)
+          ).length;
+          if (activeCount >= MAX_ACTIVE_ACCOUNTS) { enableOutcome.limitExceeded = true; return s; }
+          target.enabled = true;
+          target.status = 'مفعل';
+          target.checkGeneration = crypto.randomUUID();
+          target.failures = 0;
+          if (s.telegramUi?.accountChecks) delete s.telegramUi.accountChecks[target.id];
+          if (s.posting?.cooling?.[target.id]) delete s.posting.cooling[target.id];
+          enableOutcome.enabled = true;
+          return s;
+        });
+        if (enableOutcome.notFound) return this.accounts(id);
+        if (enableOutcome.banned) return this.say(id, 'هذا الحساب محظور، لا يمكن تفعيله.', 'account');
+        if (enableOutcome.captcha) return this.say(id, 'هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', 'account');
+        if (enableOutcome.unverified) return this.say(id, 'جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', 'account');
+        if (enableOutcome.limitExceeded) return this.say(id, 'تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5).', 'account');
         return this.account(id);
       }
       if (text === 'تعديل الاسم') { await this.ui.page(id, 'account', 'rename'); return this.say(id, 'اكتب الاسم الذي سيظهر في قائمة الحسابات.'); }
