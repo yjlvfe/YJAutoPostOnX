@@ -4,15 +4,16 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 
 # Completed
 
-* Inventoried the production checkout, remote PR/CI state, live service, aggregate queue and VPN container baseline. Production HEAD: `21c44df33b8118f91b48e38753fa1006a50c328c`.
+* Inventoried the production checkout, remote PR/CI state, live service, aggregate queue and VPN container baseline. Initial production HEAD was `21c44df33b8118f91b48e38753fa1006a50c328c`; production main advanced to `f394756a7550fddb7f16c20b74118b99546c1cf4` after PRs #28 and #29 were merged.
 * Created access-restricted off-repo recovery bundle at `/root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK`: full filesystem archive, Git bundle, SQLite online backups, filesystem inventory and SHA-256 manifest. Verified archive compression, checksums, 64 restored files, Git bundle restoration and both database quick checks.
-* Created dedicated worktree and branch `audit/surgical-20261104`; production checkout remains on main.
+* Created dedicated worktree and branch `audit/surgical-20261104`; merged current production main into the audit branch after preserving the newer committed source. Production checkout remains on main.
+* Saved and checked a second Git bundle, tracked-source archive and online SQLite backups for current source and runtime state under `source-drift-20261104`; restored and compared three changed files and checked database integrity.
 * Indexed reports, archives and test-named files; recorded all 53 historical IDs and their sources with claims unverified. Began read-only audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; coverage remains incomplete.
 * Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, a CAPTCHA/account activation interleaving, CAPTCHA state loss during CSV replacement, and a stale dispatch admission flag after an SQLite revision retry; real-world occurrence and full production reachability remain unverified.
 
 # Currently Working On
 
-Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomplete. Raw notes are in the protected off-repo evidence directory; no new architecture or Pxx plan has been created.
+Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomplete; source changed since initial audit, so changed files and evidence must be revalidated against current main. Raw notes are in the protected off-repo evidence directory; no new architecture or Pxx plan has been created.
 
 # Next Steps
 
@@ -22,7 +23,7 @@ Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomp
 
 # Blockers / Important Notes
 
-* Service is running while publishing cycle is stopped; avoid publishing or changes to service, queues, accounts, credentials and VPN containers. The 30 ambiguous items and `53d0f458-3144-4e89-a1af-202a8893afc6` require protection.
+* Service PID predates the production checkout update; its loaded Node code and newly spawned Python code may differ, so deployed SHA is unverified. Service is running while publishing cycle is stopped; avoid publishing or changes to service, queues, accounts, credentials and VPN containers. The 30 ambiguous items and `53d0f458-3144-4e89-a1af-202a8893afc6` require protection.
 * Default `npm test` includes a test that can rotate the real VPN slot; do not run the undifferentiated suite on production. A previously reported M11 database warning was not supported by the specific case inspected, which uses a temporary DB; broader safety remains unverified.
 * Source paths can create a missing project VPN container or remove an owned container under specific triggers even with the publishing cycle stopped; execution in the current live service is not established. Preserve the explicit device policy.
 * Python diagnostics overwrote two existing production checkout Python 3.12 `__pycache__` files; the originals exist in the protected snapshot. No code, database, or service was intentionally changed.
