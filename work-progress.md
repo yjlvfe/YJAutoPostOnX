@@ -9,7 +9,8 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 * Created dedicated worktree and branch `audit/surgical-20261104`; merged current production main into the audit branch after preserving the newer committed source. Production checkout remains on main.
 * Saved and checked a second Git bundle, tracked-source archive and online SQLite backups for current source and runtime state under `source-drift-20261104`; restored and compared three changed files and checked database integrity.
 * Indexed reports, archives and test-named files; recorded all 53 historical IDs and their sources with claims unverified. Began read-only audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; coverage remains incomplete.
-* Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, a CAPTCHA/account activation interleaving, CAPTCHA state loss during CSV replacement, and a stale dispatch admission flag after an SQLite revision retry; real-world occurrence and full production reachability remain unverified.
+* Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, CAPTCHA activation and CSV replacement failures, a stale dispatch admission flag after an SQLite revision retry, and a worktree-relative production DB guard gap. Real-world occurrence and full production reachability remain unverified.
+* Rechecked main CI and X source after PR #28/#29 merges; main release CI passed for AppImage only, not Bot. Generated a provisional static dependency index; historical narrative review and full flow coverage remain open.
 
 # Currently Working On
 
@@ -24,7 +25,7 @@ Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomp
 # Blockers / Important Notes
 
 * Service PID predates the production checkout update; its loaded Node code and newly spawned Python code may differ, so deployed SHA is unverified. Service is running while publishing cycle is stopped; avoid publishing or changes to service, queues, accounts, credentials and VPN containers. The 30 ambiguous items and `53d0f458-3144-4e89-a1af-202a8893afc6` require protection.
-* Default `npm test` includes a test that can rotate the real VPN slot; do not run the undifferentiated suite on production. A previously reported M11 database warning was not supported by the specific case inspected, which uses a temporary DB; broader safety remains unverified.
+* Worktree test-mode database guard does not reject the absolute live production DB path; do not rely on it for isolation. Default `npm test` includes a test that can rotate the real VPN slot; do not run the undifferentiated suite on production. A previously reported M11 database warning was not supported by the specific case inspected, which uses a temporary DB; broader safety remains unverified.
 * Source paths can create a missing project VPN container or remove an owned container under specific triggers even with the publishing cycle stopped; execution in the current live service is not established. Preserve the explicit device policy.
 * Python diagnostics overwrote two existing production checkout Python 3.12 `__pycache__` files; the originals exist in the protected snapshot. No code, database, or service was intentionally changed.
 * Official X developer policy was reviewed, but the Automation Rules page returned HTTP 403 and account/API authorization remains unverified; no live X post is authorized by this evidence.
