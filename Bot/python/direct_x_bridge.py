@@ -110,7 +110,13 @@ def is_rate_limit_exception(exc):
     except Exception:
         pass
     msg = str(exc).lower()
-    return 'rate limit' in msg or 'rate_limit' in msg or 'too many requests' in msg or '429' in msg or 'status update limit' in msg
+    return (
+        'rate limit' in msg
+        or 'rate_limit' in msg
+        or 'too many requests' in msg
+        or bool(re.search(r'\b429\b', msg))
+        or 'status update limit' in msg
+    )
 
 
 if sys.platform.startswith('linux'):
@@ -930,7 +936,7 @@ class DirectSession:
                 }
 
             client_error = getattr(self.client, '_last_create_tweet_error', None)
-            if client_error and is_rate_limit_exception(client_error):
+            if client_error and isinstance(client_error, BaseException) and is_rate_limit_exception(client_error):
                 retry_after = extract_retry_after_seconds(client_error, default=60)
                 return {
                     'status': 'rate_limit',
@@ -967,7 +973,7 @@ class DirectSession:
                 diag = classify_x_account_failure(raw_json=getattr(fetch_exc, 'raw_json', None), text=str(fetch_exc))
             if not diag and fetch_err_str:
                 diag = classify_x_account_failure(text=fetch_err_str)
-            if not diag and client_error:
+            if not diag and client_error and isinstance(client_error, BaseException):
                 diag = classify_x_account_failure(raw_json=getattr(client_error, 'raw_json', None), text=str(client_error))
 
             if diag == 'rate_limit':
@@ -1001,7 +1007,7 @@ class DirectSession:
             if diag in ('banned', 'captcha', 'cookie_expired', 'auth_rejected'):
                 res = unsent(diag)
                 res['accountFailure'] = diag
-                if fetch_err_str or client_error:
+                if fetch_err_str or (client_error and isinstance(client_error, BaseException)):
                     res['rawError'] = (fetch_err_str or str(client_error or ''))[:2048]
                 return res
 
