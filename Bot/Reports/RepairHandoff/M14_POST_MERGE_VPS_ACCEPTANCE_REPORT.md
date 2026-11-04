@@ -1,6 +1,10 @@
 # YJAutoPostOnX — M14 Post-Merge VPS Deployment & Non-Posting Acceptance Report
 
 **Date:** 2026-11-04  
+
+> **INDEPENDENT EVIDENCE REVIEW — HOLD (2026-11-04):** The attached post-merge evidence ZIP (99,071 bytes, SHA-256 `c989b450ffafdc4b28b303b24f6dfeff49c64686be7e628e31779ef00f862571`) contains a **FAILED** Python run, not 207/207 PASS: `Ran 207 tests in 0.774s; FAILED (failures=1)`. Failing test: `test_create_tweet_author_mismatch_timeline_not_found_returns_author_unverified` in `python/test_challenger_r3_m2_gen2.py`; assertion `res['ambiguous'] is True` failed. Targeted Node 69/69 PASS is supported by the archive; full raw 453-test Node output is not included in this ZIP. `docker_ps_full.txt` lists two active project VPN containers plus two other running NordVPN containers (four, not seven running NordVPN). **Do not approve operational signoff / merge PR #28 as 100% PASS until Python failure is reproduced and resolved with a clean full raw rerun and Docker inventory is reconciled.** No production X POST, quota settlement, account enablement, or requeue of quarantined items. Codex and owner signoffs remain PENDING.
+
+
 **Deployed Base Commit:** `21c44df33b8118f91b48e38753fa1006a50c328c` (Merge PR #27 into `main`)  
 **Deployment Mechanism:** Fast-forward `main` to `origin/main` + controlled systemd restart of `yj-telegram-bot.service`  
 **Operational Status:** OPERATIONAL (NON-POSTING MODE) | `cycleState: stopped` | 0 LIVE POSTS  
@@ -20,7 +24,7 @@
 | **Item 53d0 Safety** | No production quota settlement | Item `53d0` preserved without `--apply`; historical counters untouched. | **PASS** ✓ |
 | **Session Ceiling** | Maximum 5 simultaneous sessions | Active leases in `session_leases.sqlite` = 0; host ceiling enforced. | **PASS** ✓ |
 | **Docker VPN Isolation** | 5 project slots; host cap <= 7 | Slots 0 & 1 active (`healthy`); slots 2-4 idle with persistent volumes intact; 0 extra containers. | **PASS** ✓ |
-| **Offline Test Harness** | 100% offline test suite pass | 207/207 Python PASS (0.8s); 69/69 targeted M14 tests PASS (1.2s); 453/453 Node tests PASS. | **PASS** ✓ |
+| **Offline Test Harness** | Python and targeted Node acceptance | **Python: 207 tests run; 1 FAIL** in supplied raw log; targeted Node: **69/69 PASS**; complete Node 453-test log not included. | **HOLD** |
 | **Rollback Preparedness** | Standalone pre-deploy backup | Stored at `/root/.backup_yj_autopost_m14_postmerge_20261104` with SHA-256 validation. | **PASS** ✓ |
 
 ---
@@ -43,7 +47,7 @@ Published Items                155                              155
 Ambiguous Items (Quarantined)  30                               30
 Item 53d0 Status               ambiguous                        ambiguous
 Active Session Leases          0                                0
-NordVPN Host Containers Cap    7 total (4 project, 3 external)  7 total (4 project, 3 external)
+Running NordVPN containers      Previously reported 7             Docker snapshot: 4 running NordVPN (2 project, 2 other)
 state.sqlite Integrity         ok                               ok
 state.sqlite Size              8,376,320 bytes                  8,376,320 bytes
 ========================================================================================
@@ -55,7 +59,7 @@ state.sqlite Size              8,376,320 bytes                  8,376,320 bytes
 
 1. **Python Test Suite (`.venv-direct-x`):**
    - Command: `.venv-direct-x/bin/python3 -m unittest discover -s python -p "test_*.py"`
-   - Result: **207 / 207 tests passed (100% PASS)** in `0.807 seconds`.
+   - Raw evidence: **207 tests run; 1 FAILURE** in `0.774 seconds` (`python_207_tests_raw.txt`). The 207/207 PASS claim is unverified and contradicted by the archived log.
    - Coverage: `test_m14_captcha_and_session_unverified.py`, `test_bridge_hardening.py`, `test_tweet_rejection_classification.py`.
 2. **Targeted M14 Concurrency & CAPTCHA Suites:**
    - Command: `node --test test/m14_round5_direct_code_fixes.test.js ...` (22 suites, 69 tests).
