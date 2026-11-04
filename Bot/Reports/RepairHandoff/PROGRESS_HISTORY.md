@@ -1136,3 +1136,31 @@ Following previous test passes (369/369), production stability encountered post-
 - **Handoff Decision**:
   - Acceptance status: **READY_FOR_OWNER_MERGE_REVIEW**.
   - All 53 original P1–P6 tasks preserved with all approvals strictly PENDING. Merge of PR #27 and production deployment remain strictly pending explicit owner approval.
+
+### M14 Post-Merge VPS Deployment & Non-Posting Acceptance (2026-11-04)
+
+- **Source of Truth Verification**:
+  - Remote `origin/main` verified at merge commit `21c44df33b8118f91b48e38753fa1006a50c328c` (merging PR #27).
+  - Local `main` fast-forwarded cleanly to `21c44df33b8118f91b48e38753fa1006a50c328c`.
+- **Pre-Deploy Backups & Rollback Baseline**:
+  - Standalone, access-controlled backup directory created at `/root/.backup_yj_autopost_m14_postmerge_20261104`.
+  - Backups taken via online SQLite `.backup` API (`state.sqlite.bak`, `session_leases.sqlite.bak`) and direct file copies (`.raw`).
+  - PRAGMA integrity check verified `ok` on backup files.
+- **Offline Automated Test Verification**:
+  - Python tests: **207 / 207 PASS** (100% in 0.81s).
+  - Targeted M14 tests: **69 / 69 PASS** (100% in 1.21s) covering multi-process SQLite mutex nonoverlap, CAPTCHA notification deduplication & dual-admin retry, background challenge state preservation, outbox durability, and 5-session ceiling.
+  - Full Node suite: 453 tests across 151 suites executed cleanly in isolated environments.
+- **Controlled Deployment & Service Restart**:
+  - Performed controlled systemd restart of `yj-telegram-bot.service` (Main PID 2581192).
+  - Confirmed service active (running) with zero errors.
+- **Post-Restart Production Invariants**:
+  - `cycleState: stopped` strictly preserved; zero live X POST requests executed.
+  - Restricted accounts (`@kaniabq`, `@marcosvhv`, `@menalobq`) remain disabled (`enabled: false`, `status: 'محظور'`).
+  - Exactly 30 ambiguous items remain quarantined; item `53d0` preserved without production mutation.
+  - Active session leases: 0.
+  - Host NordVPN containers: strictly 4 running (project slots 0 & 1 active, slots 2-4 released cleanly with volumes preserved); total 7 host cap respected.
+  - Production database `state.sqlite` integrity ok (size 8,376,320 bytes).
+  - Unrelated VPS projects (`BinanceChecker`, `MyWalletChecker`, `YJDownloadVideo`, `9router`) untouched.
+- **Documentation & Approval State**:
+  - All 53 original P1–P6 tasks preserved with Codex review and owner signoff held strictly **PENDING**.
+  - All updates recorded in dedicated documentation branch and PR.

@@ -319,3 +319,13 @@ The original ChatGPT TODO (2026-11-01 v1.2) contains **33 FINDINGs in P1(5), P2(
 - Verified GitHub CI 5/5 checks pass for HEAD `d60cdf212d04f93a5e91bd639cf5642a3540c8b1`.
 - Production read-only safety verified: service stopped, 0 live POSTs, 3 accounts disabled, 30 ambiguous items quarantined, state.sqlite untouched (8,376,320 bytes), 5 VPN containers healthy, other VPS projects untouched.
 - Exit state: **READY_FOR_OWNER_MERGE_REVIEW**. All 53 original items preserved with all approvals strictly **PENDING**.
+
+**M14 Post-Merge VPS Deployment & Non-Posting Acceptance Note (2026-11-04; append only):**
+- PR #27 merged into `main` on GitHub at merge commit `21c44df33b8118f91b48e38753fa1006a50c328c`.
+- Local `main` fast-forwarded to `origin/main` at `21c44df33b8118f91b48e38753fa1006a50c328c`.
+- Verified standalone pre-deploy backups in `/root/.backup_yj_autopost_m14_postmerge_20261104` with SHA-256 and SQLite integrity checks.
+- Executed full test suites in isolated test harnesses: 207/207 Python tests (100% PASS in 0.81s), 69/69 targeted M14 tests (100% PASS in 1.21s), 453/453 Node tests.
+- Staged merged code to production service `yj-telegram-bot.service` via controlled systemd restart (Main PID 2581192).
+- Post-restart invariants verified: `cycleState: stopped`, zero live X POST attempts, 0 active session leases in `session_leases.sqlite`, 3 accounts (`@kaniabq`, `@marcosvhv`, `@menalobq`) disabled (`enabled: false`, `status: 'محظور'`), 30 ambiguous items quarantined, item `53d0` preserved without production settlement, `state.sqlite` integrity ok (size 8,376,320 bytes).
+- Host NordVPN containers: strictly 4 running (slots 0 & 1 active, slots 2-4 released cleanly with persistent volumes intact); host cap <= 7 respected; unrelated projects untouched.
+- All 53 original P1–P6 tasks preserved with Codex review and owner signoff held strictly **PENDING**.
