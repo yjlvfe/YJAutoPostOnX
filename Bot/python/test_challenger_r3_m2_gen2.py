@@ -37,6 +37,8 @@ class TestAdversarialTimelineRecovery(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.mock_client = MagicMock()
+        self.mock_client._last_create_tweet_response = None
+        self.mock_client._last_create_tweet_error = None
         self.account = {
             'username': 'alpha_test',
             'userId': '123456789',
@@ -188,6 +190,57 @@ class TestAdversarialTimelineRecovery(unittest.IsolatedAsyncioTestCase):
         })
 
         res = await self.session.publish("Genuinely unverified author", dispatch=lambda: True)
+
+        self.assertEqual(self.session.verify_timeline_has_post.await_count, 1)
+        self.assertFalse(res['published'])
+        self.assertTrue(res['ambiguous'])
+        self.assertEqual(res['reason'], 'publish_author_or_id_unverified')
+
+    async def test_create_tweet_author_mismatch_timeline_trace_id_containing_429_stays_ambiguous(self):
+        """Numeric 429 embedded in a trace ID is not an HTTP 429 status."""
+        mismatched_tweet = SimpleNamespace(
+            id='1122334455',
+            user=SimpleNamespace(id='999999999', screen_name='impostor_user')
+        )
+        self.mock_client.create_tweet = AsyncMock(return_value=mismatched_tweet)
+        self.session.verify_timeline_has_post = AsyncMock(return_value={
+            'status': 'ambiguous',
+            'published': False,
+            'posted': False,
+            'ambiguous': True,
+            'found': False,
+            'reason': 'publish_confirmation_missing',
+            'fetchError': 'unrelated_trace_id_123429987654',
+            'fetchException': None,
+        })
+
+        res = await self.session.publish("Author mismatch with embedded 429 trace", dispatch=lambda: True)
+
+        self.assertEqual(self.session.verify_timeline_has_post.await_count, 1)
+        self.assertFalse(res['published'])
+        self.assertTrue(res['ambiguous'])
+        self.assertEqual(res['reason'], 'publish_author_or_id_unverified')
+
+    async def test_create_tweet_author_mismatch_with_mock_client_error_preserves_ambiguous(self):
+        """Author mismatch must not be misclassified as rate_limit if client mock has _last_create_tweet_error."""
+        mismatched_tweet = SimpleNamespace(
+            id='1122334455',
+            user=SimpleNamespace(id='999999999', screen_name='impostor_user')
+        )
+        self.mock_client.create_tweet = AsyncMock(return_value=mismatched_tweet)
+        # Injected mock attribute with digits 429 to prove isolation against string/repr false-positives
+        self.mock_client._last_create_tweet_error = MagicMock(name='mock_429_client_error')
+        self.session.verify_timeline_has_post = AsyncMock(return_value={
+            'status': 'ambiguous',
+            'published': False,
+            'posted': False,
+            'ambiguous': True,
+            'found': False,
+            'reason': 'publish_confirmation_missing',
+            'fetchError': None,
+        })
+
+        res = await self.session.publish("Author mismatch with mock error", dispatch=lambda: True)
 
         self.assertEqual(self.session.verify_timeline_has_post.await_count, 1)
         self.assertFalse(res['published'])
