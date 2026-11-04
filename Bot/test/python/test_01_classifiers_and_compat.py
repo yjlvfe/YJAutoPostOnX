@@ -8,7 +8,11 @@ from unittest.mock import MagicMock
 
 ROOT_BOT = pathlib.Path(__file__).resolve().parents[2]
 for venv_root in (ROOT_BOT / '.venv-direct-x', pathlib.Path('/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x')):
-    for sp in venv_root.glob('lib/python*/site-packages'):
+    try:
+        site_dirs = list(venv_root.glob('lib/python*/site-packages'))
+    except OSError:
+        continue
+    for sp in site_dirs:
         if str(sp) not in sys.path:
             sys.path.insert(0, str(sp))
 for p in (str(ROOT_BOT / 'python'), str(ROOT_BOT / 'test' / 'fixtures')):

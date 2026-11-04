@@ -1479,19 +1479,19 @@ Bot/test/
 │   ├── fake_docker_vpn.js                                  # Command-runner spy/stub for dockerVpn.js & VpnSlotManager (7-container policy)
 │   └── fake_twikit_client.py                               # Spec-locked Python Twikit/curl_cffi mock client (_last_error=None, _last_response=None)
 ├── node/
-│   ├── 01_pure_logic_and_classifiers.test.js               # Pure domain logic, classifiers, quota, scheduling, CSV, cookies, env, tables, logger
-│   ├── 02_sqlite_cas_outbox_and_guards.test.js             # SqliteStore, CAS retry closure reset, ForensicLogger/Outbox, Queue, 53d0 settlement
-│   ├── 03_fault_injection_and_runner_fencing.test.js       # Runner claim/dispatch fencing, pre/post-dispatch faults, 3-strikes, singleton lock
-│   ├── 04_captcha_manual_only_and_dual_chat_receipts.test.js # CAPTCHA state machine, manual verify CAS, toggle/CSV race guards, dual-chat receipts
-│   ├── 05_session_and_vpn_host_limits.test.js              # 5-session host ceiling, 7-container NordVPN guard, slot release order, IP leak gate
-│   └── 06_telegram_ui_flows_and_scheduler.test.js          # /account_toggle command vs callback, scheduler day commit, CSV dedup, UI flows
+│   ├── 01_pure_logic.test.js                               # Pure domain logic, classifiers, quota, scheduling, CSV, cookies, env, tables, logger (9 tests)
+│   ├── 02_durable_sqlite_and_outbox.test.js                # SqliteStore, CAS retry closure reset, ForensicLogger/Outbox, Queue, 53d0 settlement (6 tests)
+│   ├── 03_fault_injection_and_runner.test.js               # Runner claim/dispatch fencing, pre/post-dispatch faults, 3-strikes, singleton lock (7 tests)
+│   ├── 04_captcha_and_restrictions.test.js                 # CAPTCHA state machine, manual verify CAS, toggle/CSV race guards, dual-chat receipts (5 tests)
+│   ├── 05_sessions_and_vpn_limits.test.js                  # 5-session host ceiling, 7-container NordVPN guard, slot release order, IP leak gate (5 tests)
+│   └── 06_telegram_ui_and_scheduler.test.js                # /account_toggle command vs callback, scheduler day commit, CSV dedup, UI flows (3 tests)
 ├── python/
-│   ├── test_01_bridge_classifiers_and_urls.py              # X numeric error classifiers, word-bounded 429, MagicMock safety, URL normalization
-│   ├── test_02_identity_and_session_verification.py        # verify_identity cache bypass fix, user_state/settings checks, User patch isolation
-│   └── test_03_transport_and_timeline_attribution.py       # Pre-send vs post-send fallback gate, timeline dispatch_started_at lower bound, SOCKS
+│   ├── test_01_classifiers_and_compat.py                   # X numeric error classifiers, word-bounded 429, MagicMock safety, URL normalization (4 tests)
+│   ├── test_02_identity_and_transport.py                   # verify_identity cache bypass fix, user_state/settings checks, User patch isolation (4 tests)
+│   └── test_03_publish_and_timeline.py                     # Pre-send vs post-send fallback gate, timeline dispatch_started_at lower bound, SOCKS (3 tests)
 └── e2e/
-    ├── 01_nonposting_service_lifecycle.e2e.test.js         # Full nonposting cycle: startup recovery -> readiness -> rotation -> CSV export -> shutdown
-    └── 02_adversarial_crash_and_isolation.e2e.test.js      # Mid-dispatch CAS conflict + crash recovery, CAPTCHA E2E isolation, 3-strikes halt
+    ├── 01_service_nonposting_pipeline.e2e.test.js          # Full nonposting cycle: startup recovery -> readiness -> rotation -> CSV export -> shutdown (1 test)
+    └── 02_adversarial_crash_and_captcha_isolation.e2e.test.js # Mid-dispatch CAS conflict + crash recovery, CAPTCHA E2E isolation, 3-strikes halt (1 test)
 ```
 
 ---
@@ -2596,6 +2596,8 @@ sqlite3 /root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK/state.sqlite.on
 | `2026-11-04T16:30:00Z` | **Phase 1: Surgical Code & Flow Audit** | `Hermes Main + Delegates + Codex CLI TERRA` | Inspected 69/69 Bot runtime/operational files line-by-line and 8/8 cross-module flows (`coverage-index.md`); ran isolated synthetic probes proving `PERSIST-OBS-04` (CAS retry stale closure), `PERSIST-OBS-05` (worktree DB guard bypass), `TR-06` (concurrent toggle vs CAPTCHA race), `ACC-RAW-01` (CSV import wiping CAPTCHA/ban), `XT-01` (timeline 30m window misattributing old tweets), `XT-02` (`DirectXAdapter` dropping `accountFailure` on timeline recovery), and `UTIL-RAW-01` (top-level key secret redaction bypass); consolidated all 59 raw findings and classified all 53 historical IDs (`phase1-audit-completion-gate.md`). |
 | `2026-11-04T19:30:00Z` | **Phase 2: Architecture, Master TODO, CI/Electron & Test Specs** | `Delegates D1, D2, D3, D4` | Authored post-audit architecture, state machines, `ADR-001..010`, and dependency-ordered Master TODO `P01`–`P08` (`phase2-architecture-and-pxx-todo.md`); diagnosed PR #29 CI failure (`job/126416216292` Xvfb `SIGTERM` GPU/zygote race) and `CI-01..08` with empirical reproduction (`phase2-ci-electron-spec.md`); produced cryptographically verified 220-file deletion & retention manifest (`phase3-deletion-manifest.md` / `.json`); designed hermetic fresh test suite `Bot/test/` (`phase4-fresh-test-spec.md`). |
 | `2026-11-04T20:05:00Z` | **Phase 3: Report Consolidation & Cleanup (`P08-T01` Part 1)** | `Delegate W1 (Hermes Subagent)` | Verified backup integrity (`sha256sum -c SHA256SUMS` = `OK`); created `/root/Projects/YJAutoPostOnX-surgical-audit/Bot/Reports/Old reports.md` containing all 8 required sections; programmatically verified 100% presence of `FINDING-001..033`, `ADD-P1-01..ADD-P6-04`, all 59 raw finding IDs, and all `P01`–`P08` tasks; retired all other files/subdirectories under `Bot/Reports/` and repo-root duplicates (`MASTER_TODO.md`, `PROGRESS_HISTORY.md`, `RESOURCE_CLEANUP_REPORT.md`, `ARCHIVES/*.zip`, `ARCHIVES/`) in `/root/Projects/YJAutoPostOnX-surgical-audit/`; asserted `find Bot/Reports -mindepth 1` returns ONLY `Bot/Reports/Old reports.md`. |
+| `2026-11-04T21:40:00Z` | **Phase 4 & 5: Clean Test Rebuild (`P06`) & Surgical Remediation (`P01`–`P05`, `P07`)** | `Delegates W2, W3, W4 + Hermes Main` | Implemented all `P01`–`P07` code, Python bridge, VPN/session, Telegram UI, and CI/AppImage fixes (`f73b904`, `81bd130`); retired 96 legacy test/runner/script files and built the hermetic 17-file `Bot/test/` suite (`df17172`, `48/48 PASS`: Stage 1 Node `35/35`, Stage 2 Python `11/11`, Stage 3 E2E `2/2`, `productionDbUntouched: true`, `leakedTempDirs: 0`); consolidated `Bot/Reports/Old reports.md` (`01c50e1`) and opened PR #30 (`https://github.com/yjlvfe/YJAutoPostOnX/pull/30`). |
+| `2026-11-04T21:58:00Z` | **Phase 6: Independent Review, CI Verification & Nonposting VPS Steady-State** | `Delegates V1, V2, V3 + Hermes Main` | Verified PR #29 Electron/Xvfb `SIGTERM` GPU teardown race is 100% resolved in GitHub Actions Run `41890532909` Job `126786413779` (`boot exit code: 124`, `0` occurrences of `GPU process isn't usable`, `package-smoke 31/31 PASS`, `baseline-tests`, `workflow-tests`, `electron-tests` all `PASS`); identified and fixed `REV-01` (`PermissionError` when non-root GitHub runner stats `/root/Projects/.../.venv-direct-x` in `Bot/test/python/test_01..03_*.py`) and `REV-02` (`Old reports.md` Section 7/8 sync); executed 3-interval (`t=0s, 30s, 60s`) nonposting steady-state observation on `yj-telegram-bot.service` (`active/running`, `MainPID=2581192`, `NRestarts=0`, `0` active leases, `4` NordVPN containers + `1` SOCKS sidecar `<= 7` cap, `30` quarantined ambiguous items with `requeueApproved: false`, `53d0f458` fenced). |
 
 ---
 
@@ -2618,20 +2620,14 @@ sqlite3 /root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK/state.sqlite.on
 
 ---
 
-## 8.3 Latest Next Actions (Ordered Execution Queue)
+## 8.3 Latest Next Actions & Explicit Remaining Exclusions (`P08`)
 
-1. **Phase 4 — Fresh Test Suite Implementation & Legacy Test/Script Retirement (`P06-T01`):**
-   - Retire the 58 legacy `Bot/test/*.test.js` files, `Bot/test/p2_reproducer_test.py`, 13 `Bot/python/test_*.py` files, 7 `Bot/TEST_RUNNER/*` files, 17 obsolete `Bot/scripts/*` files, and 32 `.pyc` files per `phase3-deletion-manifest.json` (retaining only the 4 approved forensic/audit scripts in `Bot/scripts/`).
-   - Implement the hermetic `Bot/test/` suite specified in Section 7.1 (`run_all.js`, 5 fixtures in `Bot/test/fixtures/`, 6 Node suites in `Bot/test/node/`, 3 Python suites in `Bot/test/python/`, and 2 nonposting E2E suites in `Bot/test/e2e/`).
-2. **Phase 5 — Surgical Code Remediation (`P01`–`P05`, `P07`):**
-   - Implement `P01-T01..T05` (SQLite synchronous in-transaction mutators, pure per-pass CAS outputs, multi-worktree/inode DB mutation guard, fail-closed `ForensicLogger.reconcile()`, `Queue.requeue` ambiguity block, top-level key redaction in `structuredLogger.js`, bounded `linkTerminalEvents`).
-   - Implement `P02-T01..T06` (authenticated `v11.user_state()` check even with `use_cache`, zero `POST` transport fallback, Snowflake `tweet_ts >= dispatch_started_epoch - 2.0` timeline verification, `accountFailure` preservation on `recoveredFromTimeline`, `payload.account` pin preservation on pre-dispatch failure, pre-dispatch 280 weighted char validation, bounded `429` status matching).
-   - Implement `P03-T01..T04` (in-transaction CAPTCHA/ban/5-account guards in `telegramUi.js`/`accounts.js`/`telegramFlows.js`/`runner.js`, preserve CAPTCHA status on `disable`/`disable_all` and `/accounts_csv`, unified `1 MiB` cookie cap and ancestor symlink guard).
-   - Implement `P04-T01..T03` (7-container cap and existing `_state`/`_auth` volume verification in `dockerVpn.js`, no `docker rm -f` on slot release/reconcile, fix `telegramUi.js` slot release ordering, preserve NordVPN CLI rate-limit errors, remove automatic strike/enable IP rotation, remove unproxied `ipify` curl fallback, wire `accmanage:check_vpn` to live `vpnManager.health`, fail-closed `bindChildProcess` + `/proc/<pid>/stat` `starttime` check in `sessionGuard.js`).
-   - Implement `P05-T01..T02` (unify `SingleInstanceLock` on `src/singleInstance.js`, move `watchdog.close()`/`ui.destroy()` inside inner `try/finally`, fix `/account_toggle` text command routing, commit `uiScheduleDay` only after `startScheduled()` succeeds, require integer `message_id` on notifications, bound `telegramApi.transfer()` to `4 MiB`, `escapeHtml(account.label)`).
-   - Implement `P07-T01` (apply `Appimage/dev/main.js` `in-process-gpu`/`disable-gpu` + `SIGTERM` handler, `Appimage/scripts/verify-release.sh` `-f .Xauthority` + `boot.log` preservation + real-HOME snapshot diff + `124/137` exit code check, and `.github/workflows/*.yml` `bot-tests` job + fail-closed `npm audit` parser).
-3. **Phase 6 — Full Offline Verification, CI Validation & Owner Handoff (`P08-T01`):**
-   - Execute `Bot/test/run_all.js` and `Appimage/scripts/verify-release.sh` in isolated scratch environments, confirming 100% pass rate and zero production DB or container side effects, then record final verification results in Section 8.
+1. **Completed Engineering Phases (`P01`–`P07` — `TESTED_PASS`):**
+   - All `P01`–`P07` code fixes, hermetic `Bot/test/` suite (`48/48 PASS`: 35 Node, 11 Python, 2 E2E), report consolidation (`Bot/Reports/Old reports.md`), and CI/AppImage Xvfb GPU teardown repairs are implemented and verified.
+2. **Remaining Owner-Gated / External Policy Items (`P08`):**
+   - **`GATE-LIVE-X-PUBLISH` (`BLOCKED` — X Developer Policy / Automation Rules Compliance):** Live X publishing via `Twikit` (`2.3.3`) scraped web-session cookies (`auth_token`/`ct0`) and reverse-engineered GraphQL (`CreateTweet`) violates X Developer Policy / Automation Rules prohibiting non-API website automation. Zero live X test posts were executed during this engagement (`cycle.state: stopped`). Compliant migration to official X API v2 (`POST /2/tweets` with OAuth 2.0 / OAuth 1.0a user context) is required before enabling live X posting.
+   - **`ITEM-53D0-SETTLEMENT` (`PENDING_APPROVAL` — Owner Authorization Gate):** Queue item `53d0f458-3144-4e89-a1af-202a8893afc6` (`tweetId: 2049987886359699848`, `@Roshnisa2002`) remains quarantined in `state = 'ambiguous'` in production `Bot/data/state.sqlite`. Dry-run verified (`READY_FOR_OWNER_APPROVAL`); live `--apply` requires explicit owner authorization (`YJ_APPROVE_PROD_SETTLEMENT_53D0=1`).
+   - **`BANNED-ACCOUNTS-3` (`BLOCKED` — External X Account Standing):** Accounts `@kaniabq`, `@marcosvhv`, and `@menalobq` remain `enabled: false, status: 'banned'` (`lastErrorCode: 64`) and cannot be automated unless X lifts the suspensions and fresh owner cookies are uploaded.
 
 ---
 

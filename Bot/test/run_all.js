@@ -61,7 +61,7 @@ function resolvePythonInterpreter() {
   ].filter(Boolean);
 
   for (const bin of candidates) {
-    if (bin.includes('/') && !fs.existsSync(bin)) continue;
+    if (bin.includes('/')) { try { if (!fs.existsSync(bin)) continue; } catch { continue; } }
     const probe = spawnSync(bin, ['-B', '-c', 'import httpx, twikit; print("OK")'], {
       encoding: 'utf8',
       timeout: 10_000,
