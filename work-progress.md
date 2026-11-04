@@ -8,7 +8,7 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 * Created access-restricted off-repo recovery bundle at `/root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK`: full filesystem archive, Git bundle, SQLite online backups, filesystem inventory and SHA-256 manifest. Verified archive compression, checksums, 64 restored files, Git bundle restoration and both database quick checks.
 * Created dedicated worktree and branch `audit/surgical-20261104`; merged current production main into the audit branch after preserving the newer committed source. Production checkout remains on main.
 * Saved and checked a second Git bundle, tracked-source archive and online SQLite backups for current source and runtime state under `source-drift-20261104`; restored and compared three changed files and checked database integrity.
-* Read all 72 current historical Markdown report bodies and indexed archives and test-named files; recorded all 53 historical IDs and their sources with claims unverified. Raw archived evidence and full claim validation remain incomplete. Began source audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; cross-flow coverage remains incomplete.
+* Read all 72 current historical Markdown report bodies; indexed 24 non-Markdown records and streamed all 21 archives successfully including ZIP CRC checks. Recorded all 53 historical IDs and sources with claims unverified. Raw archived evidence and full claim validation remain incomplete. Began source audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; cross-flow coverage remains incomplete.
 * Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, CAPTCHA activation and CSV replacement failures, a stale dispatch admission flag after an SQLite revision retry, and a worktree-relative production DB guard gap. Real-world occurrence and full production reachability remain unverified.
 * Rechecked main CI and X source after PR #28/#29 merges; main release CI passed for AppImage only, not Bot. Generated a provisional static dependency index; historical narrative review and full flow coverage remain open.
 
@@ -18,7 +18,7 @@ Phase 0 historical ingestion and Phase 1 line-by-line system audit remain incomp
 
 # Next Steps
 
-1. Inspect historical archives, raw evidence and test sources; classify all 53 historical IDs against independent current evidence.
+1. Inspect archive contents, raw evidence and legacy test sources semantically; classify all 53 historical IDs against independent current evidence.
 2. Complete runtime module and cross-flow audit, including queue, persistence, transport, VPN, security, CI, AppImage, rollback and raw logs; record explicit uninspected areas.
 3. Only after the full audit gate, derive architecture and the phased master TODO, then follow the user's prescribed consolidation, fresh-test and implementation order.
 
