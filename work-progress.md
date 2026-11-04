@@ -8,7 +8,7 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 * Created access-restricted off-repo recovery bundle at `/root/YJAutoPostOnX-private-audits/20261104-audit-D8N9YK`: full filesystem archive, Git bundle, SQLite online backups, filesystem inventory and SHA-256 manifest. Verified archive compression, checksums, 64 restored files, Git bundle restoration and both database quick checks.
 * Created dedicated worktree and branch `audit/surgical-20261104`; production checkout remains on main.
 * Indexed reports, archives and test-named files; recorded all 53 historical IDs and their sources with claims unverified. Began read-only audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; coverage remains incomplete.
-* Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, and a CAPTCHA/account activation interleaving; real-world occurrence and full production reachability remain unverified.
+* Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, a CAPTCHA/account activation interleaving, and a stale dispatch admission flag after an SQLite revision retry; real-world occurrence and full production reachability remain unverified.
 
 # Currently Working On
 
