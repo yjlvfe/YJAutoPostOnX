@@ -54,6 +54,7 @@ class Queue {
   async replacePending(payloads, { userKey, confirmationToken, queueFingerprint } = {}) {
     let added = 0;
     await this.store.update(s => {
+      added = 0;
       if (['running', 'stopping'].includes(s.cycle?.state) || (s.items || []).some(x => ['processing', 'dispatch_started'].includes(x.state))) throw new Error('QUEUE_BUSY');
       if (queueFingerprint && hash((s.items || []).filter(x => x.state === 'pending').map(x => x.id).sort()) !== queueFingerprint) throw new Error('QUEUE_CHANGED');
       if (userKey) {
@@ -79,6 +80,7 @@ class Queue {
   async claimNext(predicate = () => true) {
     let claimedId = null;
     const state = await this.store.update(next => {
+      claimedId = null;
       next.items ||= [];
       const item = next.items.find(entry => entry.state === 'pending' && predicate(entry));
       if (item) { addressableItem(next, item.id); item.state = 'processing'; item.claimedAt = new Date().toISOString(); claimedId = item.id; }
@@ -88,16 +90,33 @@ class Queue {
   }
   async complete(id, result = {}) { return this.store.update(state => { const item = addressableItem(state, id); item.state = 'done'; item.result = result; item.completedAt = new Date().toISOString(); return state; }); }
   async fail(id, error) { return this.store.update(state => { const item = addressableItem(state, id); item.state = 'failed'; item.error = String(error?.message || error); return state; }); }
-  async requeue(id, result = {}) { return this.store.update(state => { const item = addressableItem(state, id); item.state = 'pending'; item.result = result; delete item.claimedAt; return state; }); }
+  async requeue(id, result = {}) {
+    return this.store.update(state => {
+      const item = addressableItem(state, id);
+      if (item.state === 'ambiguous' || item.state === 'published') {
+        const err = new Error(`AMBIGUOUS_REQUEUE_FORBIDDEN: Cannot requeue item ${id} from state '${item.state}'`);
+        err.code = 'AMBIGUOUS_REQUEUE_FORBIDDEN';
+        throw err;
+      }
+      item.state = 'pending';
+      item.result = result;
+      delete item.claimedAt;
+      return state;
+    });
+  }
   async recoverProcessing({ state = 'ambiguous', reason = 'restart' } = {}) {
     return this.store.update(current => {
       for (const item of current.items || []) {
         if (item.state === 'processing' || item.state === 'dispatch_started') {
           if (item.attempt?.phase === 'claimed') {
+            item.archivedAttempt = structuredClone(item.attempt);
             item.state = 'pending';
             delete item.attempt;
             delete item.claimedAt;
           } else {
+            if (item.attempt) {
+              item.archivedAttempt = structuredClone(item.attempt);
+            }
             item.state = state;
             item.outcome = state;
             item.reason = reason;

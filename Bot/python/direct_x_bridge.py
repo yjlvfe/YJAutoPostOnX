@@ -82,20 +82,62 @@ def extract_retry_after_seconds(exc, default=60):
     return max(60, min(900, int(default)))
 
 
+_SECRET_BEARER_RE = re.compile(r'Bearer\s+[A-Za-z0-9_\-\.~+/]+=*', re.IGNORECASE)
+_SECRET_KV_RE = re.compile(
+    r'\b(auth_token|ct0|twid|kdt|password|secret|api[_-]?key|access[_-]?token|authorization|cookie)'
+    r'(\s*[=:]\s*["\']?)([^\s,;&"\'\r\n]+)',
+    re.IGNORECASE,
+)
+_SECRET_JSON_RE = re.compile(
+    r'(["\'])(auth_token|ct0|twid|kdt|password|secret|api[_-]?key|access[_-]?token|authorization|cookie)\1'
+    r'(\s*:\s*["\'])([^"\']*)(["\'])',
+    re.IGNORECASE,
+)
+
+
+def sanitize_diagnostic_text(value, max_len=512):
+    if value is None:
+        return None
+    text = str(value)
+    text = _SECRET_BEARER_RE.sub('Bearer [REDACTED]', text)
+    text = _SECRET_JSON_RE.sub(r'\1\2\1\3[REDACTED]\5', text)
+    text = _SECRET_KV_RE.sub(r'\1\2[REDACTED]', text)
+    return text[:max_len]
+
+
+_RATE_LIMIT_MSG_PATTERN = re.compile(
+    r'(?:'
+    r'rate[\s_-]*limit'
+    r'|too\s+many\s+requests'
+    r'|status\s+update\s+limit'
+    r'|over\s+capacity'
+    r'|(?:http|status(?:[_\s-]*code)?|response|error)\s*[=:\s]\s*429\b'
+    r'|\b429\s+too\s+many\s+requests\b'
+    r'|\bcode\s*[=:\s]\s*(?:88|185)\b'
+    r'|\[\s*(?:88|185)\s*\]'
+    r')',
+    re.IGNORECASE,
+)
+
+
 def is_rate_limit_exception(exc):
     if exc is None:
         return False
-    if getattr(exc, 'http_status', None) == 429:
+    if type(getattr(exc, 'http_status', None)) is int and getattr(exc, 'http_status', None) == 429:
         return True
-    if getattr(exc, 'status_code', None) == 429:
+    if type(getattr(exc, 'status_code', None)) is int and getattr(exc, 'status_code', None) == 429:
         return True
     resp = getattr(exc, 'response', None)
     if resp is not None:
-        if getattr(resp, 'status_code', None) == 429 or getattr(resp, 'http_status', None) == 429:
+        if (type(getattr(resp, 'status_code', None)) is int and getattr(resp, 'status_code', None) == 429) or (
+            type(getattr(resp, 'http_status', None)) is int and getattr(resp, 'http_status', None) == 429
+        ):
             return True
     if getattr(exc, 'account_failure', None) == 'rate_limit':
         return True
-    if getattr(exc, 'code', None) in (88, 185) or getattr(exc, 'error_code', None) in (88, 185):
+    exc_code = getattr(exc, 'code', None)
+    err_code = getattr(exc, 'error_code', None)
+    if (type(exc_code) is int and exc_code in (88, 185)) or (type(err_code) is int and err_code in (88, 185)):
         return True
     try:
         import twikit.errors
@@ -109,27 +151,47 @@ def is_rate_limit_exception(exc):
             return True
     except Exception:
         pass
-    msg = str(exc).lower()
-    return (
-        'rate limit' in msg
-        or 'rate_limit' in msg
-        or 'too many requests' in msg
-        or bool(re.search(r'\b429\b', msg))
-        or 'status update limit' in msg
-    )
+    msg = str(exc)
+    return bool(_RATE_LIMIT_MSG_PATTERN.search(msg))
 
 
-if sys.platform.startswith('linux'):
+def _set_parent_death_signal():
+    if not sys.platform.startswith('linux'):
+        return
     try:
         import ctypes
         import signal
         # PR_SET_PDEATHSIG = 1: kernel sends SIGTERM to child when parent terminates
         libc = ctypes.CDLL('libc.so.6', use_errno=True)
         res = libc.prctl(1, signal.SIGTERM)
-        if res == 0 and os.getppid() == 1:
-            sys.exit(1)
-    except Exception:
-        pass
+        if res != 0:
+            errno_val = ctypes.get_errno()
+            try:
+                sys.stderr.write(json.dumps({
+                    'level': 'warn',
+                    'component': 'direct_x_bridge',
+                    'event': 'prctl_pdeathsig_failed',
+                    'returnCode': int(res),
+                    'errno': int(errno_val),
+                }) + '\n')
+            except Exception:
+                pass
+    except Exception as exc:
+        try:
+            sys.stderr.write(json.dumps({
+                'level': 'warn',
+                'component': 'direct_x_bridge',
+                'event': 'prctl_pdeathsig_exception',
+                'error': type(exc).__name__,
+            }) + '\n')
+        except Exception:
+            pass
+    if os.getppid() == 1:
+        sys.exit(1)
+
+
+if sys.platform.startswith('linux'):
+    _set_parent_death_signal()
 
 
 def validate_proxy(proxy):
@@ -226,43 +288,81 @@ def normalize_text_for_comparison(text, entities=None):
 
 
 
-def is_recent_tweet(tweet, max_age_seconds=1800):
-    """Check if tweet was created recently (within max_age_seconds, default 30 mins).
+SNOWFLAKE_EPOCH_OFFSET_MS = 1288834974657
+
+
+def _to_epoch_seconds(val):
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, datetime.datetime):
+        dt = val if val.tzinfo is not None else val.replace(tzinfo=datetime.timezone.utc)
+        return dt.timestamp()
+    if isinstance(val, str) and val.strip():
+        s = val.strip()
+        from email.utils import parsedate_to_datetime
+        try:
+            pdt = parsedate_to_datetime(s)
+            if pdt.tzinfo is None:
+                pdt = pdt.replace(tzinfo=datetime.timezone.utc)
+            return pdt.timestamp()
+        except Exception:
+            pass
+        try:
+            pdt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
+            if pdt.tzinfo is None:
+                pdt = pdt.replace(tzinfo=datetime.timezone.utc)
+            return pdt.timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def extract_snowflake_epoch(tid):
+    if tid is None or isinstance(tid, bool):
+        return None
+    s = str(tid).strip()
+    if len(s) >= 15 and s.isdigit():
+        try:
+            val = int(s)
+            if val > (1 << 22):
+                return ((val >> 22) + SNOWFLAKE_EPOCH_OFFSET_MS) / 1000.0
+        except Exception:
+            pass
+    return None
+
+
+def is_recent_tweet(tweet, max_age_seconds=1800, dispatch_started_epoch=None, min_timestamp=None):
+    """Check if tweet was created recently (within max_age_seconds, default 30 mins)
+    and not earlier than dispatch_started_epoch - 2.0 when provided.
+    Extracts both created_at and X Snowflake timestamp (when tid is a >=15-digit Snowflake integer).
     Fails closed (returns False) if timestamp is missing or unparseable.
     """
+    import time
     try:
-        dt = getattr(tweet, 'created_at_datetime', None)
-        if dt:
-            now = datetime.datetime.now(datetime.timezone.utc)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=datetime.timezone.utc)
-            age = (now - dt).total_seconds()
-            return -60 <= age <= max_age_seconds
+        now_epoch = time.time()
+        get_field = (lambda k: tweet.get(k)) if isinstance(tweet, dict) else (lambda k: getattr(tweet, k, None))
+        dt_epoch = _to_epoch_seconds(get_field('created_at_datetime'))
+        if dt_epoch is None:
+            dt_epoch = _to_epoch_seconds(get_field('created_at'))
+        tid = get_field('id') or get_field('id_str') or get_field('tweetId')
+        sf_epoch = extract_snowflake_epoch(tid)
 
-        cat = getattr(tweet, 'created_at', None)
-        if isinstance(cat, str) and cat.strip():
-            from email.utils import parsedate_to_datetime
-            try:
-                pdt = parsedate_to_datetime(cat)
-                now = datetime.datetime.now(datetime.timezone.utc)
-                if pdt.tzinfo is None:
-                    pdt = pdt.replace(tzinfo=datetime.timezone.utc)
-                age = (now - pdt).total_seconds()
-                return -60 <= age <= max_age_seconds
-            except Exception:
-                pass
-            try:
-                pdt = datetime.datetime.fromisoformat(cat.replace('Z', '+00:00'))
-                now = datetime.datetime.now(datetime.timezone.utc)
-                if pdt.tzinfo is None:
-                    pdt = pdt.replace(tzinfo=datetime.timezone.utc)
-                age = (now - pdt).total_seconds()
-                return -60 <= age <= max_age_seconds
-            except Exception:
-                pass
+        timestamps = [ts for ts in (dt_epoch, sf_epoch) if ts is not None]
+        if not timestamps:
+            return False
+
+        lower_bound = _to_epoch_seconds(dispatch_started_epoch if dispatch_started_epoch is not None else min_timestamp)
+        for ts in timestamps:
+            age = now_epoch - ts
+            if not (-60.0 <= age <= max_age_seconds):
+                return False
+            if lower_bound is not None and ts < (lower_bound - 2.0):
+                return False
+        return True
     except Exception:
-        pass
-    return False
+        return False
 
 
 def numeric_id(value):
@@ -366,6 +466,11 @@ def new_client(proxy):
             if not self._curl_session or is_patched:
                 return await self.transport.handle_async_request(request)
 
+            return await self._request_with_transport_fallback(request)
+
+        async def _request_with_transport_fallback(self, request):
+            if not self._curl_session:
+                return await self.transport.handle_async_request(request)
             try:
                 url = str(request.url)
                 method = request.method
@@ -387,44 +492,12 @@ def new_client(proxy):
                     content=resp.content,
                     request=request
                 )
-            except Exception as exc:
-                # Idempotent reads (GET, HEAD, OPTIONS, TRACE) are always safe to failover
-                is_idempotent = request.method.upper() in ('GET', 'HEAD', 'OPTIONS', 'TRACE')
-
-                # Strict classification of provably pre-send failures (zero bytes transmitted)
-                curl_code = getattr(exc, 'code', None)
-                pre_send_codes = {
-                    1,   # CURLE_UNSUPPORTED_PROTOCOL
-                    2,   # CURLE_FAILED_INIT
-                    3,   # CURLE_URL_MALFORMAT
-                    4,   # CURLE_NOT_BUILT_IN
-                    5,   # CURLE_COULDNT_RESOLVE_PROXY
-                    6,   # CURLE_COULDNT_RESOLVE_HOST
-                    7,   # CURLE_COULDNT_CONNECT (ConnectionRefused before TCP connect)
-                    35,  # CURLE_SSL_CONNECT_ERROR (TLS handshake failed before HTTP send)
-                    58,  # CURLE_SSL_CERTPROBLEM
-                    59,  # CURLE_SSL_CIPHER
-                    60,  # CURLE_PEER_FAILED_VERIFICATION
-                    64,  # CURLE_USE_SSL_FAILED
-                    77,  # CURLE_SSL_CACERT_BADFILE
-                    82,  # CURLE_SSL_CRL_BADFILE
-                    83,  # CURLE_SSL_ISSUER_ERROR
-                    90,  # CURLE_SSL_PINNEDPUBKEYNOTMATCH
-                }
-                msg = str(exc).lower()
-                is_pre_send = (
-                    (curl_code in pre_send_codes) or
-                    ('before send' in msg) or
-                    ('before any send' in msg)
-                )
-
-                if is_idempotent or is_pre_send:
-                    return await self.transport.handle_async_request(request)
-
-                # Non-idempotent request where bytes may have crossed send boundary:
-                # REPLAY / FALLBACK IS STRICTLY FORBIDDEN.
-                # Re-raise so caller fences result as ambiguous.
-                raise
+            except Exception:
+                # Only idempotent read methods (GET, HEAD, OPTIONS) may fall back from curl_cffi to httpx.
+                # Non-idempotent requests (e.g. POST CreateTweet) NEVER fall back or replay.
+                if request.method.upper() not in ('GET', 'HEAD', 'OPTIONS'):
+                    raise
+                return await self.transport.handle_async_request(request)
 
         async def aclose(self):
             if getattr(self, '_curl_session', None):
@@ -477,7 +550,7 @@ def upstream_error_details(exc):
     if kind in ('graphql_errors', 'http_or_transport_failure'):
         result['xResponseKind'] = kind
     if isinstance(message, str):
-        result['xErrorMessage'] = message[:512]
+        result['xErrorMessage'] = sanitize_diagnostic_text(message, 512)
     if type(http_status) is int:
         result['httpStatus'] = http_status
     return result
@@ -491,6 +564,8 @@ class DirectSession:
         self.use_cache = bool(account.get('use_cache'))
         self.verified = None
         self.used = False
+        self.dispatch_started_epoch = None
+        self.dispatch_started_at = None
 
     async def identity(self):
         # Retry only idempotent identity reads, before any dispatch ACK. A bare
@@ -521,28 +596,10 @@ class DirectSession:
 
     async def _identity_once(self):
         from urllib.parse import unquote
-        twid = unquote(getattr(self.client, 'get_cookies', lambda: {})().get('twid', ''))
-        candidate = twid[2:] if twid.startswith('u=') and numeric_id(twid[2:]) else None
+        import httpx
 
-        # Clean Pre-Tweet Fast Path with active state verification (FINDING-007):
-        # Even when use_cache is enabled, do NOT bypass account suspension or active state verification.
-        # Verify account state against live API via profile fetch before declaring authenticated.
-        if self.use_cache and self.expected and self.expected_id and candidate and candidate == self.expected_id:
-            if hasattr(self.client, 'get_user_by_id'):
-                self.read_phase = 'profile'
-                user = await self.client.get_user_by_id(candidate)
-                fetched_name = username(getattr(user, 'screen_name', None))
-                fetched_id = getattr(user, 'id', None)
-                if fetched_name and fetched_name != self.expected:
-                    raise ValueError('auth_identity_mismatch')
-                if fetched_id and str(fetched_id) != str(self.expected_id):
-                    raise ValueError('auth_identity_mismatch')
-            result = {'state': 'authenticated', 'authenticated': True, 'username': self.expected, 'userId': self.expected_id}
-            self.verified = result
-            return result
-
-        # Settings is an authenticated endpoint. Never infer identity from the
-        # requested handle, a public profile or twikit's cached _user_id alone.
+        # Always verify live authenticated session state via v11.user_state() and v11.settings(),
+        # even when use_cache=True. Never infer live session validity from cached userId alone.
         self.read_phase = 'user_state'
         state, _ = await self.client.v11.user_state()
         remote_state = state.get('userState') if isinstance(state, dict) else None
@@ -559,7 +616,7 @@ class DirectSession:
             error = ValueError('auth_account_state_unverified')
             setattr(error, 'account_failure', 'auth_session_unverified')
             raise error
-        from urllib.parse import unquote
+
         twid = unquote(getattr(self.client, 'get_cookies', lambda: {})().get('twid', ''))
         candidate = twid[2:] if twid.startswith('u=') and numeric_id(twid[2:]) else None
         self.read_phase = 'settings'
@@ -568,46 +625,57 @@ class DirectSession:
         try:
             settings, _ = await self.client.v11.settings()
         except Exception as exc:
-            if getattr(exc, 'account_failure', None):
+            failure = getattr(exc, 'account_failure', None) or classify_x_account_failure(
+                raw_json=getattr(exc, 'raw_json', None),
+                errors=getattr(exc, 'errors', None),
+                text=str(exc),
+                http_status=getattr(exc, 'http_status', None),
+            )
+            if failure in ('banned', 'captcha', 'cookie_expired', 'auth_rejected', 'auth_session_unverified', 'auth'):
+                if not getattr(exc, 'account_failure', None):
+                    setattr(exc, 'account_failure', failure)
                 raise
             settings_error = exc
         actual = username(settings.get('screen_name')) if isinstance(settings, dict) else None
         uid = None
-        import httpx
         is_transient_settings = settings_error and (
             getattr(settings_error, 'http_status', None) in (404, 408, 500, 502, 503, 504)
             or isinstance(settings_error, (httpx.TimeoutException, httpx.NetworkError))
         )
-        # Immediate fallback inside the same attempt if settings.json failed or returned missing/404
+        # Immediate fallback inside the same attempt if settings.json failed or returned missing/404.
+        # Never pre-set actual = self.expected before get_user_by_id succeeds, and never swallow
+        # exceptions carrying account_failure or classifying as captcha/banned/auth_expired.
         if not actual and candidate:
-            if self.expected_id and candidate == self.expected_id and self.expected:
-                actual = self.expected
-                uid = candidate
+            if (self.expected_id and str(candidate) == str(self.expected_id) and self.expected) or is_transient_settings:
                 try:
+                    self.read_phase = 'profile'
                     user = await self.client.get_user_by_id(candidate)
-                    fetched = username(getattr(user, 'screen_name', None))
-                    if fetched:
-                        if fetched != self.expected:
-                            raise ValueError('auth_identity_mismatch')
-                        actual = fetched
                 except ValueError:
                     raise
-                except Exception:
-                    pass
-            elif is_transient_settings:
-                try:
-                    user = await self.client.get_user_by_id(candidate)
+                except Exception as exc:
+                    failure = getattr(exc, 'account_failure', None) or classify_x_account_failure(
+                        raw_json=getattr(exc, 'raw_json', None),
+                        errors=getattr(exc, 'errors', None),
+                        text=str(exc),
+                        http_status=getattr(exc, 'http_status', None),
+                    )
+                    if failure in ('banned', 'captcha', 'cookie_expired', 'auth_rejected', 'auth_session_unverified', 'auth', 'rate_limit'):
+                        if not getattr(exc, 'account_failure', None):
+                            setattr(exc, 'account_failure', failure)
+                        raise
+                    user = None
+                if user is not None:
                     fetched_uid = getattr(user, 'id', None)
                     fetched_name = username(getattr(user, 'screen_name', None))
-                    if numeric_id(fetched_uid) and fetched_uid == candidate and fetched_name:
+                    if fetched_uid is not None and (not numeric_id(str(fetched_uid)) or str(fetched_uid) != str(candidate)):
+                        raise ValueError('auth_identity_mismatch')
+                    if self.expected_id and fetched_uid is not None and str(fetched_uid) != str(self.expected_id):
+                        raise ValueError('auth_identity_mismatch')
+                    if fetched_name:
                         if self.expected and fetched_name != self.expected:
                             raise ValueError('auth_identity_mismatch')
                         actual = fetched_name
-                        uid = fetched_uid
-                except ValueError:
-                    raise
-                except Exception:
-                    pass
+                        uid = str(fetched_uid) if fetched_uid is not None else str(candidate)
         if not actual:
             if settings_error:
                 raise settings_error
@@ -620,30 +688,41 @@ class DirectSession:
             raise ValueError('auth_identity_changed')
         self.read_phase = 'profile'
         if not uid:
-            try:
-                user = await self.client.get_user_by_id(candidate) if candidate else await self.client.get_user_by_screen_name(actual)
-            except Exception as exc:
-                # Public lookup errors concern the target, not the authenticated self.
-                # Preserve safe transient read metadata, never target accountFailure.
-                if not getattr(exc, 'account_failure', None) and (getattr(exc, 'http_status', None) in (404, 408, 429, 500, 502, 503, 504) or isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))):
-                    raise
-                raise ValueError('auth_identity_unverified') from None
-            uid = getattr(user, 'id', None)
-            if not numeric_id(uid) or (candidate and uid != candidate) or username(getattr(user, 'screen_name', None)) != actual:
-                raise ValueError('auth_identity_missing')
-        if self.expected_id and uid != self.expected_id:
+            if self.use_cache and self.expected_id and candidate and numeric_id(str(candidate)) and str(candidate) == str(self.expected_id):
+                uid = str(self.expected_id)
+            else:
+                try:
+                    user = await self.client.get_user_by_id(candidate) if candidate else await self.client.get_user_by_screen_name(actual)
+                except Exception as exc:
+                    failure = getattr(exc, 'account_failure', None) or classify_x_account_failure(
+                        raw_json=getattr(exc, 'raw_json', None),
+                        errors=getattr(exc, 'errors', None),
+                        text=str(exc),
+                        http_status=getattr(exc, 'http_status', None),
+                    )
+                    if failure in ('banned', 'captcha', 'cookie_expired', 'auth_rejected', 'auth_session_unverified', 'auth'):
+                        if not getattr(exc, 'account_failure', None):
+                            setattr(exc, 'account_failure', failure)
+                        raise
+                    if not getattr(exc, 'account_failure', None) and (getattr(exc, 'http_status', None) in (404, 408, 429, 500, 502, 503, 504) or isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))):
+                        raise
+                    raise ValueError('auth_identity_unverified') from None
+                uid = getattr(user, 'id', None)
+                if not numeric_id(uid) or (candidate and uid != candidate) or username(getattr(user, 'screen_name', None)) != actual:
+                    raise ValueError('auth_identity_missing')
+        if self.expected_id and str(uid) != str(self.expected_id):
             raise ValueError('auth_identity_mismatch')
-        result = {'state': 'authenticated', 'authenticated': True, 'username': actual, 'userId': uid}
+        result = {'state': 'authenticated', 'authenticated': True, 'username': actual, 'userId': str(uid)}
         if self.verified and result != self.verified:
             raise ValueError('auth_identity_changed')
         self.verified = result
         return result
 
-    async def verify_timeline_has_post(self, text, identity):
+    async def verify_timeline_has_post(self, text, identity, dispatch_started_epoch=None):
         """Verify whether user timeline contains post matching text authored by identity."""
-        return await self.verify_timeline(text, identity)
+        return await self.verify_timeline(text, identity, dispatch_started_epoch=dispatch_started_epoch)
 
-    async def verify_timeline(self, text, identity):
+    async def verify_timeline(self, text, identity, dispatch_started_epoch=None):
         """Check whether the tweet actually landed by reading the user timeline.
 
         Called only after create_tweet raised an exception (timeout / network
@@ -653,6 +732,15 @@ class DirectSession:
           - dict with 'found': False, 'status': 'ambiguous', 'ambiguous': True if tweet is not confirmed.
             NEVER returns 'verifiedNotPosted': True.
         """
+        import time
+        effective_start = _to_epoch_seconds(
+            dispatch_started_epoch
+            if dispatch_started_epoch is not None
+            else (self.dispatch_started_epoch if self.dispatch_started_epoch is not None else self.dispatch_started_at)
+        )
+        if effective_start is None:
+            effective_start = time.time()
+
         sent_norm = normalize_text_for_comparison(text)
         last_fetch_error = None
 
@@ -782,9 +870,12 @@ class DirectSession:
                         matched = True
 
                     tw_obj = SimpleNamespace(**tweet) if isinstance(tweet, dict) else tweet
-                    if matched and is_recent_tweet(tw_obj):
+                    if matched and is_recent_tweet(tw_obj, dispatch_started_epoch=effective_start):
                         tid = tweet.get('id')
                         if numeric_id(tid):
+                            sf_ts = extract_snowflake_epoch(tid)
+                            if sf_ts is not None and sf_ts < (effective_start - 2.0):
+                                continue
                             author_id = tweet.get('user_id')
                             author_name = username(tweet.get('user_name'))
 
@@ -826,15 +917,18 @@ class DirectSession:
             'published': False,
             'posted': False,
             'ambiguous': True,
+            'retryable': False,
             'verified': False,
             'found': False,
             'reason': 'publish_confirmation_missing',
-            'fetchError': str(last_fetch_error) if last_fetch_error else None,
+            'fetchError': sanitize_diagnostic_text(last_fetch_error, 512) if last_fetch_error else None,
             'fetchException': last_fetch_error
         }
 
     async def publish(self, text, dispatch):
-        if self.used: return uncertain('dispatch_already_attempted')
+        import time
+        if self.used:
+            return {**uncertain('dispatch_already_attempted'), 'retryable': False}
         try:
             identity = await self.identity()
         except Exception as exc:
@@ -846,14 +940,34 @@ class DirectSession:
                 result['readDiagnostic'] = getattr(exc, 'read_diagnostic', None)
             if getattr(exc, 'account_failure', None) in KNOWN_ACCOUNT_FAILURES:
                 result['accountFailure'] = getattr(exc, 'account_failure')
-            return result;
+            return result
         if not isinstance(text, str) or not text.strip(): return unsent('invalid_text')
         # The dispatcher must persist and fsync its dispatching fence before ACK.
         self.used = True
+        dispatched = False
+
+        def _finalize_post_dispatch(res):
+            if dispatched and isinstance(res, dict) and res.get('published') is not True:
+                res['published'] = False
+                res['posted'] = False
+                res['ambiguous'] = True
+                res['retryable'] = False
+            if isinstance(res, dict):
+                for key, limit in (('xErrorMessage', 512), ('rawError', 2048), ('verificationError', 512), ('fetchError', 2048)):
+                    if isinstance(res.get(key), str):
+                        res[key] = sanitize_diagnostic_text(res[key], limit)
+            return res
+
         try:
+            self.dispatch_started_epoch = time.time()
+            self.dispatch_started_at = self.dispatch_started_epoch
             acknowledgement = dispatch()
             if inspect.isawaitable(acknowledgement): acknowledgement = await acknowledgement
-            if acknowledgement is not True: return uncertain('dispatch_not_acknowledged')
+            if acknowledgement is not True:
+                return {**uncertain('dispatch_not_acknowledged'), 'retryable': False}
+            dispatched = True
+            self.dispatch_started_epoch = time.time()
+            self.dispatch_started_at = self.dispatch_started_epoch
             tweet = await self.client.create_tweet(text=text)  # exactly ONE call
             author = getattr(tweet, 'user', None) if tweet is not None else None
             tid = getattr(tweet, 'id', None) if tweet is not None else None
@@ -895,7 +1009,7 @@ class DirectSession:
                     timeline_res = await self.verify_timeline(text, identity)
             except Exception as e:
                 tl_exc = e
-                timeline_res = {'fetchError': str(e), 'fetchException': e}
+                timeline_res = {'fetchError': sanitize_diagnostic_text(e, 512), 'fetchException': e}
 
             # If it landed on X: extract verified URL and tweet ID and return { published: true, url, tweetId }
             if (isinstance(timeline_res, dict)
@@ -915,55 +1029,54 @@ class DirectSession:
                 timeline_res['ok'] = True
                 return timeline_res
 
-            # If it did not land on X: diagnose the failure (e.g. rate limit, auth error, or network error)
-            # rather than returning ambiguous author unverified.
+            # If it did not land on X: diagnose the failure while preserving post-dispatch ambiguity fence
             fetch_exc = tl_exc or (timeline_res.get('fetchException') if isinstance(timeline_res, dict) else None)
             fetch_err_str = str(timeline_res.get('fetchError') or fetch_exc or '') if isinstance(timeline_res, dict) else ''
 
             if fetch_exc and is_rate_limit_exception(fetch_exc):
                 retry_after = extract_retry_after_seconds(fetch_exc, default=60)
-                return {
+                return _finalize_post_dispatch({
                     'status': 'rate_limit',
                     'published': False,
                     'posted': False,
                     'rateLimit': True,
-                    'ambiguous': False,
-                    'retryable': True,
+                    'ambiguous': True,
+                    'retryable': False,
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
-                    'rawError': str(fetch_exc)[:2048],
-                }
+                    'rawError': sanitize_diagnostic_text(fetch_exc, 2048),
+                })
 
             client_error = getattr(self.client, '_last_create_tweet_error', None)
             if client_error and isinstance(client_error, BaseException) and is_rate_limit_exception(client_error):
                 retry_after = extract_retry_after_seconds(client_error, default=60)
-                return {
+                return _finalize_post_dispatch({
                     'status': 'rate_limit',
                     'published': False,
                     'posted': False,
                     'rateLimit': True,
-                    'ambiguous': False,
-                    'retryable': True,
+                    'ambiguous': True,
+                    'retryable': False,
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
-                    'rawError': str(client_error)[:2048],
-                }
+                    'rawError': sanitize_diagnostic_text(client_error, 2048),
+                })
 
-            if fetch_err_str and ('rate limit' in fetch_err_str.lower() or 'too many requests' in fetch_err_str.lower() or bool(re.search(r'\b429\b', fetch_err_str))):
-                return {
+            if fetch_err_str and bool(_RATE_LIMIT_MSG_PATTERN.search(fetch_err_str)):
+                return _finalize_post_dispatch({
                     'status': 'rate_limit',
                     'published': False,
                     'posted': False,
                     'rateLimit': True,
-                    'ambiguous': False,
-                    'retryable': True,
+                    'ambiguous': True,
+                    'retryable': False,
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': 60,
                     'reason': 'rate_limit',
-                    'rawError': fetch_err_str[:2048],
-                }
+                    'rawError': sanitize_diagnostic_text(fetch_err_str, 2048),
+                })
 
             diag = None
             last_resp = getattr(self.client, '_last_create_tweet_response', None)
@@ -978,38 +1091,39 @@ class DirectSession:
 
             if diag == 'rate_limit':
                 retry_after = extract_retry_after_seconds(fetch_exc or client_error, default=60)
-                return {
+                return _finalize_post_dispatch({
                     'status': 'rate_limit',
                     'published': False,
                     'posted': False,
                     'rateLimit': True,
-                    'ambiguous': False,
-                    'retryable': True,
+                    'ambiguous': True,
+                    'retryable': False,
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
-                    'rawError': (fetch_err_str or str(client_error or ''))[:2048],
-                }
+                    'rawError': sanitize_diagnostic_text(fetch_err_str or str(client_error or ''), 2048),
+                })
 
             if diag == 'network_proxy_error':
-                return {
-                    'status': 'not_ready',
+                return _finalize_post_dispatch({
+                    'status': 'ambiguous',
                     'published': False,
                     'posted': False,
-                    'ambiguous': False,
+                    'ambiguous': True,
                     'blocked': False,
-                    'retryable': True,
+                    'retryable': False,
                     'accountFailure': 'network_proxy_error',
                     'reason': 'network_proxy_error',
-                    'rawError': (fetch_err_str or str(client_error or ''))[:2048],
-                }
+                    'rawError': sanitize_diagnostic_text(fetch_err_str or str(client_error or ''), 2048),
+                })
 
             if diag in ('banned', 'captcha', 'cookie_expired', 'auth_rejected'):
-                res = unsent(diag)
+                res = uncertain(diag)
                 res['accountFailure'] = diag
+                res['retryable'] = False
                 if fetch_err_str or (client_error and isinstance(client_error, BaseException)):
-                    res['rawError'] = (fetch_err_str or str(client_error or ''))[:2048]
-                return res
+                    res['rawError'] = sanitize_diagnostic_text(fetch_err_str or str(client_error or ''), 2048)
+                return _finalize_post_dispatch(res)
 
             if tweet is None:
                 reason = 'create_tweet_returned_none'
@@ -1034,6 +1148,7 @@ class DirectSession:
                             if isinstance(tombstone, dict):
                                 x_err_msg = tombstone.get('text', {}).get('text')
                 result = uncertain(reason)
+                result['retryable'] = False
                 tweet_rejection = classify_x_tweet_rejection(raw_json=last_resp, text=str(x_err_msg or ''))
                 if tweet_rejection:
                     result['rejectionReason'] = tweet_rejection
@@ -1042,20 +1157,19 @@ class DirectSession:
                 if x_err_code is not None:
                     result['xErrorCode'] = x_err_code
                 if x_err_msg:
-                    result['xErrorMessage'] = str(x_err_msg)[:512]
+                    result['xErrorMessage'] = sanitize_diagnostic_text(x_err_msg, 512)
                 if fetch_err_str:
-                    result['fetchError'] = fetch_err_str[:2048]
-                return result
+                    result['fetchError'] = sanitize_diagnostic_text(fetch_err_str, 2048)
+                return _finalize_post_dispatch(result)
 
-            return uncertain('publish_author_or_id_unverified')
+            return _finalize_post_dispatch(uncertain('publish_author_or_id_unverified'))
         except Exception as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
 
-            # Rate Limit Fast Path: HTTP 429 during create_tweet means the tweet
-            # was rejected by X API. Propagate rate limit diagnostics immediately
-            # without falling into publish_confirmation_missing.
-            if is_rate_limit_exception(exc):
+            # Dispatch crossed the fence if dispatched is True — the tweet MAY have posted
+            # or encountered an upstream error after ACK.
+            if is_rate_limit_exception(exc) and not dispatched:
                 retry_after = extract_retry_after_seconds(exc, default=60)
                 return {
                     'status': 'rate_limit',
@@ -1067,13 +1181,26 @@ class DirectSession:
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
-                    'rawError': str(exc)[:2048],
+                    'rawError': sanitize_diagnostic_text(exc, 2048),
                     **upstream_error_details(exc),
                 }
 
-            # Dispatch crossed the fence — the tweet MAY have posted but the
-            # response was lost (timeout/network glitch). Before marking
-            # ambiguous, verify by reading the user's recent timeline.
+            if is_rate_limit_exception(exc):
+                retry_after = extract_retry_after_seconds(exc, default=60)
+                return _finalize_post_dispatch({
+                    'status': 'rate_limit',
+                    'published': False,
+                    'posted': False,
+                    'rateLimit': True,
+                    'ambiguous': True,
+                    'retryable': False,
+                    'accountFailure': 'rate_limit',
+                    'retryAfterSeconds': retry_after,
+                    'reason': 'rate_limit',
+                    'rawError': sanitize_diagnostic_text(exc, 2048),
+                    **upstream_error_details(exc),
+                })
+
             x_error_code = getattr(exc, 'code', None)
             if x_error_code is None:
                 x_error_code = getattr(exc, 'error_code', None)
@@ -1092,7 +1219,7 @@ class DirectSession:
             except Exception as verification_exc:
                 # A failed verification read is distinct from the original X
                 # CreateTweet response; both diagnostics must survive the bridge.
-                verification_error = str(verification_exc)[:512]
+                verification_error = sanitize_diagnostic_text(verification_exc, 512)
 
             if (isinstance(timeline_res, dict)
                     and timeline_res.get('found') is True
@@ -1113,42 +1240,44 @@ class DirectSession:
                     timeline_res['accountFailure'] = account_failure
                 if x_error_code:
                     timeline_res['xErrorCode'] = x_error_code
+                if x_message:
+                    timeline_res['xErrorMessage'] = sanitize_diagnostic_text(x_message, 512)
                 return timeline_res
 
             # Check if timeline check encountered rate limit
             fetch_exc = timeline_res.get('fetchException') if isinstance(timeline_res, dict) else None
             if fetch_exc and is_rate_limit_exception(fetch_exc):
                 retry_after = extract_retry_after_seconds(fetch_exc, default=60)
-                return {
+                return _finalize_post_dispatch({
                     'status': 'rate_limit',
                     'published': False,
                     'posted': False,
                     'rateLimit': True,
-                    'ambiguous': False,
-                    'retryable': True,
+                    'ambiguous': True,
+                    'retryable': False,
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
-                    'rawError': str(fetch_exc)[:2048],
-                    'verificationError': str(fetch_exc)[:512],
+                    'rawError': sanitize_diagnostic_text(fetch_exc, 2048),
+                    'verificationError': sanitize_diagnostic_text(fetch_exc, 512),
                     **upstream_error_details(exc),
-                }
+                })
 
             if account_failure == 'rate_limit':
                 retry_after = extract_retry_after_seconds(exc, default=60)
-                return {
+                return _finalize_post_dispatch({
                     'status': 'rate_limit',
                     'published': False,
                     'posted': False,
                     'rateLimit': True,
-                    'ambiguous': False,
-                    'retryable': True,
+                    'ambiguous': True,
+                    'retryable': False,
                     'accountFailure': 'rate_limit',
                     'retryAfterSeconds': retry_after,
                     'reason': 'rate_limit',
-                    'rawError': str(exc)[:2048],
+                    'rawError': sanitize_diagnostic_text(exc, 2048),
                     **upstream_error_details(exc),
-                }
+                })
 
             tweet_rejection = classify_x_tweet_rejection(
                 raw_json=getattr(exc, 'raw_json', None),
@@ -1157,27 +1286,28 @@ class DirectSession:
                 http_status=x_http_status
             )
             if tweet_rejection in ('duplicate_content', 'length_exceeded', 'content_moderation'):
-                return {
+                return _finalize_post_dispatch({
                     'status': 'rejected',
                     'published': False,
                     'posted': False,
-                    'ambiguous': False,
+                    'ambiguous': True,
                     'retryable': False,
                     'rejectionReason': tweet_rejection,
                     'reason': f"rejected_{tweet_rejection}",
                     'xErrorCode': x_error_code,
                     'xResponseKind': x_response_kind or 'graphql_errors',
                     'httpStatus': x_http_status,
-                    'xErrorMessage': x_message[:512] if isinstance(x_message, str) else None,
+                    'xErrorMessage': sanitize_diagnostic_text(x_message, 512) if isinstance(x_message, str) else None,
                     'verificationError': verification_error or (
-                        str(timeline_res.get('fetchError'))[:512]
+                        sanitize_diagnostic_text(timeline_res.get('fetchError'), 512)
                         if isinstance(timeline_res, dict) and timeline_res.get('fetchError') else None
                     ),
-                    'rawError': str(exc)[:2048],
+                    'rawError': sanitize_diagnostic_text(exc, 2048),
                     **upstream_error_details(exc),
-                }
+                })
 
             result = uncertain('publish_confirmation_missing')
+            result['retryable'] = False
             if tweet_rejection:
                 result['rejectionReason'] = tweet_rejection
             if account_failure in KNOWN_ACCOUNT_FAILURES:
@@ -1186,17 +1316,23 @@ class DirectSession:
                 result['xErrorCode'] = x_error_code
             result['xResponseKind'] = x_response_kind or 'unclassified_exception'
             result['httpStatus'] = x_http_status if isinstance(x_http_status, int) else None
-            result['xErrorMessage'] = x_message[:512] if isinstance(x_message, str) else None
+            result['xErrorMessage'] = sanitize_diagnostic_text(x_message, 512) if isinstance(x_message, str) else None
             result['verificationError'] = verification_error or (
-                str(timeline_res.get('fetchError'))[:512]
+                sanitize_diagnostic_text(timeline_res.get('fetchError'), 512)
                 if isinstance(timeline_res, dict) and timeline_res.get('fetchError') else None
             )
-            result['rawError'] = str(exc)[:2048]
+            result['rawError'] = sanitize_diagnostic_text(exc, 2048)
             result.update(upstream_error_details(exc))
-            return result
+            return _finalize_post_dispatch(result)
 
 
 def emit(result):
+    if isinstance(result, dict):
+        inner = result.get('result')
+        if isinstance(inner, dict):
+            for key, limit in (('xErrorMessage', 512), ('rawError', 2048), ('verificationError', 512), ('fetchError', 2048)):
+                if isinstance(inner.get(key), str):
+                    inner[key] = sanitize_diagnostic_text(inner[key], limit)
     print(json.dumps(result, separators=(',', ':')), flush=True)
 
 
@@ -1232,8 +1368,11 @@ async def main():
         result = await session.publish(command.get('text'), dispatch)
         emit({'event': 'result', 'result': result})
     except BaseException as exc:
-        result = uncertain('bridge_error') if session and session.used else unsent('auth_session_unverified')
-        if str(exc) == 'identity_read_unavailable':
+        used = bool(session and session.used)
+        result = uncertain('bridge_error') if used else unsent('auth_session_unverified')
+        if used:
+            result['retryable'] = False
+        if str(exc) == 'identity_read_unavailable' and not used:
             result['reason'] = 'identity_read_unavailable'
             result['retryable'] = True
             result['readDiagnostic'] = getattr(exc, 'read_diagnostic', None)
@@ -1244,12 +1383,12 @@ async def main():
             if classified in KNOWN_ACCOUNT_FAILURES:
                 result['accountFailure'] = classified
         if is_rate_limit_exception(exc) or result.get('accountFailure') == 'rate_limit':
-            result['status'] = 'rate_limit'
+            result['status'] = 'ambiguous' if used else 'rate_limit'
             result['rateLimit'] = True
             result['published'] = False
             result['posted'] = False
-            result['ambiguous'] = False
-            result['retryable'] = True
+            result['ambiguous'] = used
+            result['retryable'] = not used
             result['accountFailure'] = 'rate_limit'
             result['reason'] = 'rate_limit'
             result['retryAfterSeconds'] = extract_retry_after_seconds(exc)

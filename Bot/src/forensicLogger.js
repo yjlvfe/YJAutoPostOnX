@@ -9,22 +9,31 @@ const { logStructured, sanitizeError, sanitizeString, sanitizeValue, extractErro
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const BURNED_SUBNET_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const HOST_PROD_DATA_DIR = '/root/Projects/YJAutoPostOnX/Bot/data';
 
-let PROD_DATA_CANONICAL = null;
-function getCanonicalProdDataDir() {
-  if (!PROD_DATA_CANONICAL) {
-    try {
-      const prodDir = path.resolve(__dirname, '../data');
-      if (fs.existsSync(prodDir)) {
-        PROD_DATA_CANONICAL = fs.realpathSync(prodDir);
-      } else {
-        PROD_DATA_CANONICAL = prodDir;
-      }
-    } catch {
-      PROD_DATA_CANONICAL = path.resolve(__dirname, '../data');
-    }
+function getProtectedProdDataDirs() {
+  const candidates = [
+    path.resolve(__dirname, '../data'),
+    HOST_PROD_DATA_DIR,
+  ];
+  if (process.env.BOT_PRODUCTION_DATA_DIR) {
+    candidates.push(path.resolve(process.env.BOT_PRODUCTION_DATA_DIR));
   }
-  return PROD_DATA_CANONICAL;
+  const dirs = new Set();
+  for (const dir of candidates) {
+    const resolved = path.resolve(dir);
+    dirs.add(resolved);
+    try {
+      if (fs.existsSync(resolved)) {
+        dirs.add(fs.realpathSync(resolved));
+      }
+    } catch {}
+  }
+  return Array.from(dirs);
+}
+
+function getCanonicalProdDataDir() {
+  return getProtectedProdDataDirs()[0];
 }
 
 function isTestEnvironment() {
@@ -33,24 +42,73 @@ function isTestEnvironment() {
     process.env.NODE_TEST_CONTEXT ||
     process.env.npm_lifecycle_event === 'test' ||
     process.env.YJ_TEST_MODE === '1' ||
+    process.execArgv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test'))) ||
     process.argv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test')))
   );
 }
 
-function assertForensicMutationAllowed(dataDir) {
-  if (isTestEnvironment()) {
-    const prodData = getCanonicalProdDataDir();
-    let resolved = null;
-    try {
-      resolved = dataDir ? path.resolve(dataDir) : null;
-      if (resolved && fs.existsSync(resolved)) {
-        resolved = fs.realpathSync(resolved);
+function isTargetingProdForensic(targetPath) {
+  if (!targetPath) return false;
+  const prodDirs = getProtectedProdDataDirs();
+  try {
+    const resolved = path.resolve(targetPath);
+    const candidates = [resolved];
+    if (fs.existsSync(resolved)) {
+      try { candidates.push(fs.realpathSync(resolved)); } catch {}
+    } else {
+      const parent = path.dirname(resolved);
+      if (fs.existsSync(parent)) {
+        try { candidates.push(path.join(fs.realpathSync(parent), path.basename(resolved))); } catch {}
       }
-    } catch {}
-    if (resolved && (resolved === prodData || resolved.startsWith(prodData + path.sep))) {
-      const err = new Error('PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating production forensic logs. Use an isolated temporary dataDir.');
-      err.code = 'PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST';
-      throw err;
+    }
+    for (const cand of candidates) {
+      for (const prodDir of prodDirs) {
+        if (cand === prodDir || cand.startsWith(prodDir + path.sep)) {
+          return true;
+        }
+      }
+    }
+    if (fs.existsSync(resolved)) {
+      const targetStat = fs.statSync(resolved);
+      for (const prodDir of prodDirs) {
+        for (const prodTarget of [prodDir, path.join(prodDir, 'logs', 'forensic.jsonl')]) {
+          try {
+            if (fs.existsSync(prodTarget)) {
+              const pStat = fs.statSync(prodTarget);
+              if (pStat.dev === targetStat.dev && pStat.ino === targetStat.ino) {
+                return true;
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+  return false;
+}
+
+function assertForensicMutationAllowed(...targets) {
+  if (isTestEnvironment()) {
+    for (const target of targets) {
+      if (isTargetingProdForensic(target)) {
+        const err = new Error('PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating production forensic logs. Use an isolated temporary dataDir.');
+        err.code = 'PROD_FORENSIC_MUTATION_FORBIDDEN_IN_TEST';
+        throw err;
+      }
+    }
+  }
+}
+
+async function fsyncDirectory(dirPath) {
+  let dirHandle;
+  try {
+    dirHandle = await fsp.open(dirPath, 'r');
+    await dirHandle.sync();
+  } catch {
+    // Best-effort directory sync on platforms/filesystems that support it
+  } finally {
+    if (dirHandle) {
+      try { await dirHandle.close(); } catch {}
     }
   }
 }
@@ -68,7 +126,7 @@ class ForensicLogger {
     this.maxAgeMs = maxAgeMs;
     this.clock = clock;
     this.logFile = logFile ? path.resolve(logFile) : (dataDir ? path.join(dataDir, 'logs', 'forensic.jsonl') : null);
-    if (this.logFile) {
+    if (this.logFile && (!isTestEnvironment() || (!isTargetingProdForensic(this.dataDir) && !isTargetingProdForensic(this.logFile)))) {
       const dir = path.dirname(this.logFile);
       try {
         if (!fs.existsSync(dir)) {
@@ -79,6 +137,7 @@ class ForensicLogger {
   }
 
   async record(event) {
+    assertForensicMutationAllowed(this.dataDir, this.logFile);
     const now = typeof this.clock === 'function' ? this.clock() : Date.now();
     const timestamp = new Date(now).toISOString();
     const exitIp = event.exitIp || null;
@@ -104,14 +163,20 @@ class ForensicLogger {
       details: event.details ? sanitizeValue(event.details) : null
     };
 
-    // 1. Persist to store (state.forensicLogs) with auto-prune
+    // 1. Persist to store (state.forensicLogs + state.pendingForensicOutbox) with auto-prune
     if (this.store) {
       try {
         await this.store.update(state => {
           state.forensicLogs ||= [];
-          state.forensicLogs.push(record);
+          if (!state.forensicLogs.some(e => e && e.id === record.id)) {
+            state.forensicLogs.push(record);
+          }
           const cutoff = now - this.maxAgeMs;
           state.forensicLogs = state.forensicLogs.filter(e => typeof e.epoch === 'number' && e.epoch >= cutoff);
+          state.pendingForensicOutbox ||= [];
+          if (!state.pendingForensicOutbox.some(e => e && e.id === record.id)) {
+            state.pendingForensicOutbox.push(record);
+          }
           return state;
         });
       } catch (err) {
@@ -128,12 +193,30 @@ class ForensicLogger {
       }
     }
 
-    // 2. Persist to JSONL file
+    // 2. Persist to JSONL file and clear acknowledged record from pendingForensicOutbox
     if (this.logFile) {
-      assertForensicMutationAllowed(this.dataDir);
+      assertForensicMutationAllowed(this.dataDir, this.logFile);
       try {
         const line = JSON.stringify(record) + '\n';
-        await this._withLogLock(() => fsp.appendFile(this.logFile, line, { mode: 0o600 }));
+        await this._withLogLock(async () => {
+          const dir = path.dirname(this.logFile);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const fileHandle = await fsp.open(this.logFile, 'a', 0o600);
+          try {
+            await fileHandle.write(line);
+            await fileHandle.sync();
+          } finally {
+            await fileHandle.close();
+          }
+        });
+        if (this.store) {
+          await this.store.update(s => {
+            if (Array.isArray(s.pendingForensicOutbox)) {
+              s.pendingForensicOutbox = s.pendingForensicOutbox.filter(e => e && e.id !== record.id);
+            }
+            return s;
+          });
+        }
       } catch (err) {
         logStructured(null, {
           level: 'error',
@@ -152,20 +235,23 @@ class ForensicLogger {
   }
 
   async prune(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
-    assertForensicMutationAllowed(this.dataDir);
+    assertForensicMutationAllowed(this.dataDir, this.logFile);
     const cutoff = now - this.maxAgeMs;
     let prunedCount = 0;
 
     // Prune in store
     if (this.store) {
       try {
+        let storePruned = 0;
         await this.store.update(state => {
+          storePruned = 0;
           if (!Array.isArray(state.forensicLogs)) return state;
           const before = state.forensicLogs.length;
           state.forensicLogs = state.forensicLogs.filter(e => typeof e.epoch === 'number' && e.epoch >= cutoff);
-          prunedCount += (before - state.forensicLogs.length);
+          storePruned = before - state.forensicLogs.length;
           return state;
         });
+        prunedCount += storePruned;
       } catch (err) {
         logStructured(null, {
           level: 'error',
@@ -195,6 +281,7 @@ class ForensicLogger {
               errorCode: extractErrorCode(err),
               sanitizedError: sanitizeError(err)
             });
+            throw err;
           }
           return '';
         });
@@ -223,7 +310,18 @@ class ForensicLogger {
               });
             }
           }
-          await fsp.writeFile(this.logFile, retained.length ? retained.join('\n') + '\n' : '', { mode: 0o600 });
+          const dir = path.dirname(this.logFile);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const tempPath = `${this.logFile}.${crypto.randomUUID()}.tmp`;
+          const handle = await fsp.open(tempPath, 'w', 0o600);
+          try {
+            await handle.write(retained.length ? retained.join('\n') + '\n' : '');
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          await fsp.rename(tempPath, this.logFile);
+          await fsyncDirectory(dir);
         }
         });
       } catch (err) {
@@ -327,7 +425,7 @@ class ForensicLogger {
   }
 
   async reconcile(now = typeof this.clock === 'function' ? this.clock() : Date.now()) {
-    assertForensicMutationAllowed(this.dataDir);
+    assertForensicMutationAllowed(this.dataDir, this.logFile);
     return this._withLogLock(async () => {
       const cutoff = now - this.maxAgeMs;
       const storeLogs = [];
@@ -350,26 +448,30 @@ class ForensicLogger {
             errorCode: extractErrorCode(err),
             sanitizedError: sanitizeError(err)
           });
+          throw err; // Fail closed: never overwrite file or store if store.load() fails
         }
       }
 
       const fileLogs = [];
       if (this.logFile) {
         try {
-          const content = await fsp.readFile(this.logFile, 'utf8').catch(err => {
-            if (err.code !== 'ENOENT') {
+          let content = '';
+          try {
+            content = await fsp.readFile(this.logFile, 'utf8');
+          } catch (readErr) {
+            if (readErr.code !== 'ENOENT') {
               logStructured(null, {
                 level: 'warn',
                 component: 'forensic_logger',
                 event: 'forensic_log_read_failed',
                 operation: 'reconcile_readFile',
                 result: 'failed',
-                errorCode: extractErrorCode(err),
-                sanitizedError: sanitizeError(err)
+                errorCode: extractErrorCode(readErr),
+                sanitizedError: sanitizeError(readErr)
               });
+              throw readErr; // Fail closed: never overwrite store or file on non-ENOENT read error
             }
-            return '';
-          });
+          }
           if (content) {
             for (const line of content.split('\n').filter(Boolean)) {
               try { fileLogs.push(JSON.parse(line)); } catch (parseErr) {
@@ -396,6 +498,7 @@ class ForensicLogger {
             errorCode: extractErrorCode(err),
             sanitizedError: sanitizeError(err)
           });
+          throw err;
         }
       }
 
@@ -408,7 +511,7 @@ class ForensicLogger {
 
       const reconciled = Array.from(map.values()).sort((a, b) => (a.epoch || 0) - (b.epoch || 0));
 
-      // Phase 1: Durably write to JSONL file with temp file, fsync, and atomic rename FIRST
+      // Phase 1: Durably write to JSONL file with temp file, fsync, atomic rename, and parent dir fsync FIRST
       let updatedFile = false;
       if (this.logFile) {
         try {
@@ -424,6 +527,7 @@ class ForensicLogger {
             await handle.close();
           }
           await fsp.rename(tempPath, this.logFile);
+          await fsyncDirectory(dir);
           updatedFile = true;
         } catch (err) {
           logStructured(null, {
@@ -463,6 +567,7 @@ class ForensicLogger {
             errorCode: extractErrorCode(err),
             sanitizedError: sanitizeError(err)
           });
+          throw err;
         }
       }
 
@@ -478,7 +583,7 @@ class ForensicLogger {
   }
 
   async flushOutbox() {
-    assertForensicMutationAllowed(this.dataDir);
+    assertForensicMutationAllowed(this.dataDir, this.logFile);
     if (!this.store || !this.logFile) return { flushed: 0, newlyAppended: 0 };
     return this._withLogLock(async () => {
       const state = await this.store.load();

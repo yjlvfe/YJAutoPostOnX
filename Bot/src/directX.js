@@ -86,11 +86,22 @@ class DirectXAdapter {
       // Env is intentionally allowlisted: proxy and Python import injection variables
       // from the parent must not affect the isolated interpreter or transport.
       child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
-        stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', PYTHONDONTWRITEBYTECODE: '1' },
       });
-      lease.bindChild?.(child.pid);
+      if (typeof lease.bindChildProcess === 'function') {
+        lease.bindChildProcess(child.pid);
+      } else if (typeof lease.bindChild === 'function') {
+        lease.bindChild(child.pid);
+      }
       lease.pid = child.pid;
     } catch (spawnError) {
+      if (child) {
+        try { child.stdin?.destroy(); } catch {}
+        try { child.stdout?.destroy(); } catch {}
+        try { child.stderr?.destroy(); } catch {}
+        try { if (!child.killed && child.exitCode === null) child.kill('SIGKILL'); } catch {}
+      }
       lease.release();
       throw spawnError;
     }
@@ -235,6 +246,21 @@ class DirectXAdapter {
           };
         }
         if (result.rateLimit === true || result.status === 'rate_limit') {
+          if (state.used || result.ambiguous) {
+            return {
+              ...ambiguous(result.reason || 'rate_limit'),
+              rateLimit: true,
+              retryable: false,
+              accountFailure: result.accountFailure || 'rate_limit',
+              retryAfterSeconds: result.retryAfterSeconds || 60,
+              rawError: result.rawError,
+              xErrorCode: result.xErrorCode,
+              xErrorMessage: result.xErrorMessage,
+              xResponseKind: result.xResponseKind,
+              verificationError: result.verificationError,
+              httpStatus: result.httpStatus,
+            };
+          }
           return {
             status: 'rate_limit',
             published: false,
@@ -256,6 +282,7 @@ class DirectXAdapter {
         if (state.used || result.ambiguous) {
           return {
             ...ambiguous(result.reason || 'publish_unverified'),
+            retryable: false,
             accountFailure: result.accountFailure,
             rawError: result.rawError,
             xErrorCode: result.xErrorCode,
@@ -283,13 +310,27 @@ class DirectXAdapter {
         };
       }
       if (!state.used || !numericId(result.tweetId) || result.userId !== state.identity.userId || handle(result.username) !== state.identity.username) {
-        return ambiguous('publish_author_or_id_unverified');
+        return {
+          ...ambiguous('publish_author_or_id_unverified'),
+          accountFailure: result.accountFailure || null,
+          xErrorCode: result.xErrorCode ?? null,
+          xErrorMessage: result.xErrorMessage || null,
+        };
       }
-      return { status: 'published', published: true, posted: true, tweetId: result.tweetId,
-        username: state.identity.username, userId: state.identity.userId,
-        url: result.tweetUrl || `https://x.com/${state.identity.username}/status/${result.tweetId}`,
-        recoveredFromTimeline: result.recoveredFromTimeline === true || result.recovered_from_timeline === true,
-        ok: true };
+      return {
+        status: 'published',
+        published: true,
+        posted: true,
+        tweetId: result.tweetId,
+        username: state.identity.username,
+        userId: state.identity.userId,
+        url: result.tweetUrl || result.url || `https://x.com/${state.identity.username}/status/${result.tweetId}`,
+        recoveredFromTimeline: Boolean(result.recoveredFromTimeline || result.recovered_from_timeline),
+        accountFailure: result.accountFailure || null,
+        xErrorCode: result.xErrorCode ?? null,
+        xErrorMessage: result.xErrorMessage || null,
+        ok: true
+      };
     } catch (err) {
       return state.used ? { ...ambiguous('publish_confirmation_missing'), rawError: err?.message } : signal?.aborted ? unsent('stopped') : { ...unsent('identity_read_unavailable'), retryable: true, rawError: err?.message };
     } finally { state.busy = false; }

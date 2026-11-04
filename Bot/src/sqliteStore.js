@@ -21,21 +21,36 @@ function secureFileMode(file, { missing = false } = {}) {
   if ((stat.mode & 0o777) !== 0o600) fs.chmodSync(file, 0o600);
 }
 
-let PROD_DB_CANONICAL = null;
-function getCanonicalProdDbPath() {
-  if (!PROD_DB_CANONICAL) {
-    try {
-      const prodDir = path.resolve(__dirname, '../data');
-      if (fs.existsSync(prodDir)) {
-        PROD_DB_CANONICAL = path.join(fs.realpathSync(prodDir), 'state.sqlite');
-      } else {
-        PROD_DB_CANONICAL = path.resolve(__dirname, '../data/state.sqlite');
-      }
-    } catch {
-      PROD_DB_CANONICAL = path.resolve(__dirname, '../data/state.sqlite');
-    }
+const HOST_PROD_DATA_DIR = '/root/Projects/YJAutoPostOnX/Bot/data';
+
+function getProtectedProdDbPaths() {
+  const dirs = [
+    path.resolve(__dirname, '../data'),
+    HOST_PROD_DATA_DIR,
+  ];
+  if (process.env.BOT_PRODUCTION_DATA_DIR) {
+    dirs.push(path.resolve(process.env.BOT_PRODUCTION_DATA_DIR));
   }
-  return PROD_DB_CANONICAL;
+  const paths = new Set();
+  for (const dir of dirs) {
+    const resolvedDir = path.resolve(dir);
+    paths.add(path.join(resolvedDir, 'state.sqlite'));
+    try {
+      if (fs.existsSync(resolvedDir)) {
+        paths.add(path.join(fs.realpathSync(resolvedDir), 'state.sqlite'));
+      }
+    } catch {}
+  }
+  return Array.from(paths);
+}
+
+function getCanonicalProdDbPath() {
+  const paths = getProtectedProdDbPaths();
+  return paths[0];
+}
+
+function resolveProductionDbPath() {
+  return getCanonicalProdDbPath();
 }
 
 function isTestEnvironment() {
@@ -44,23 +59,39 @@ function isTestEnvironment() {
     process.env.NODE_TEST_CONTEXT ||
     process.env.npm_lifecycle_event === 'test' ||
     process.env.YJ_TEST_MODE === '1' ||
+    process.execArgv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test'))) ||
     process.argv.some(arg => typeof arg === 'string' && (arg.includes('test') || arg.includes('--test')))
   );
 }
 
 function isTargetingProd(filePath) {
   if (!filePath) return false;
-  const prodCanonical = getCanonicalProdDbPath();
+  const protectedPaths = getProtectedProdDbPaths();
   try {
     const resolved = path.resolve(filePath);
-    if (resolved === prodCanonical) return true;
+    if (protectedPaths.includes(resolved)) return true;
+    let targetStat = null;
     if (fs.existsSync(resolved)) {
-      if (fs.realpathSync(resolved) === prodCanonical) return true;
+      const real = fs.realpathSync(resolved);
+      if (protectedPaths.includes(real)) return true;
+      try { targetStat = fs.statSync(resolved); } catch {}
     }
     const dir = path.dirname(resolved);
     if (fs.existsSync(dir)) {
       const canonicalKey = path.join(fs.realpathSync(dir), path.basename(resolved));
-      if (canonicalKey === prodCanonical) return true;
+      if (protectedPaths.includes(canonicalKey)) return true;
+    }
+    if (targetStat) {
+      for (const prodPath of protectedPaths) {
+        try {
+          if (fs.existsSync(prodPath)) {
+            const prodStat = fs.statSync(prodPath);
+            if (prodStat.dev === targetStat.dev && prodStat.ino === targetStat.ino) {
+              return true;
+            }
+          }
+        } catch {}
+      }
     }
   } catch {}
   return false;
@@ -69,11 +100,18 @@ function isTargetingProd(filePath) {
 function assertMutationAllowed(key) {
   if (isTestEnvironment()) {
     if (isTargetingProd(key)) {
-      const err = new Error('PROD_DB_MUTATION_FORBIDDEN_IN_TEST: Tests are strictly forbidden from mutating the production database (state.sqlite). Use an isolated temporary database in a temporary test directory.');
+      const err = new Error('PROD_DB_MUTATION_FORBIDDEN_IN_TEST (PRODUCTION_DB_MUTATION_FORBIDDEN): Tests are strictly forbidden from mutating the production database (state.sqlite). Use an isolated temporary database in a temporary test directory.');
       err.code = 'PROD_DB_MUTATION_FORBIDDEN_IN_TEST';
       throw err;
     }
   }
+}
+
+function isMutatorEnvelope(value, draft) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value === draft) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes('state') || !keys.includes('result')) return false;
+  return value.state !== null && typeof value.state === 'object';
 }
 
 // All connections in this process must wait asynchronously for one another:
@@ -89,17 +127,18 @@ function serialize(key, fn) {
 }
 
 class SqliteStore {
-  constructor(file, initial = {}, { legacyFile } = {}) {
+  constructor(file, initial = {}, { legacyFile, readOnly = false } = {}) {
     this.file = path.resolve(file);
     this.initial = structuredClone(initial);
     this.legacyFile = legacyFile ? path.resolve(legacyFile) : null;
+    this.readOnly = Boolean(readOnly);
     this.state = null;
     this.db = null;
     this.closed = false;
     this.lastSlowReadLog = 0;
     // Resolve aliases of the parent directory so different instances share a queue.
     const directory = path.dirname(this.file);
-    if (!isTestEnvironment() || !isTargetingProd(this.file)) {
+    if (!this.readOnly && (!isTestEnvironment() || !isTargetingProd(this.file))) {
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       fs.chmodSync(directory, 0o700);
     }
@@ -109,6 +148,18 @@ class SqliteStore {
   _open() {
     if (this.closed) throw new Error('Store is closed');
     if (this.db) return;
+    const isProtectedReadOnly = this.readOnly || (isTestEnvironment() && isTargetingProd(this.key));
+    if (isProtectedReadOnly) {
+      const stat = fs.lstatSync(this.key);
+      if (!stat.isFile()) throw new Error('SQLite path must be a regular file, not a symlink');
+      this.created = false;
+      const db = new DatabaseSync(this.key, { readOnly: true });
+      try {
+        db.exec('PRAGMA busy_timeout=5000; PRAGMA query_only=ON;');
+        this.db = db;
+      } catch (error) { db.close(); throw error; }
+      return;
+    }
     // Refuse symlinks before chmod/SQLite open; the private canonical parent
     // is the trust boundary for subsequent SQLite-managed path operations.
     let fd;
@@ -236,6 +287,11 @@ class SqliteStore {
 
   async update(mutator) {
     assertMutationAllowed(this.key);
+    if (this.readOnly) {
+      const err = new Error('READ_ONLY_STORE: Cannot call update() on a read-only SqliteStore');
+      err.code = 'READ_ONLY_STORE';
+      throw err;
+    }
     return serialize(this.key, async () => {
       this._open();
       let attempts = 0;
@@ -243,18 +299,59 @@ class SqliteStore {
         attempts++;
         const { data: current, revision } = this._readRecord();
         const draft = structuredClone(current);
-        const next = await mutator(draft);
-        const json = this._encode(next === undefined ? draft : next);
+        const rawNext = mutator(draft);
+        if (rawNext && typeof rawNext.then === 'function') {
+          this._transaction(() => rawNext, { immediate: true });
+        }
+        let envelope = isMutatorEnvelope(rawNext, draft);
+        let nextState = envelope ? rawNext.state : (rawNext === undefined ? draft : rawNext);
+        let mutatorResult = envelope ? rawNext.result : undefined;
+        let json = this._encode(nextState);
         try {
           const result = this._transaction(() => {
-            const res = this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1 AND revision = ?').run(json, revision);
+            let res = this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1 AND revision = ?').run(json, revision);
             if (res.changes !== 1) {
-              throw Object.assign(new Error(`Optimistic concurrency conflict at revision ${revision}`), { code: 'OPTIMISTIC_CONCURRENCY_CONFLICT' });
+              if (attempts < 3) {
+                attempts++;
+                const { data: freshCurrent, revision: freshRevision } = this._readRecord();
+                const freshDraft = structuredClone(freshCurrent);
+                const freshRawNext = mutator(freshDraft);
+                if (freshRawNext && typeof freshRawNext.then === 'function') {
+                  return freshRawNext;
+                }
+                envelope = isMutatorEnvelope(freshRawNext, freshDraft);
+                nextState = envelope ? freshRawNext.state : (freshRawNext === undefined ? freshDraft : freshRawNext);
+                mutatorResult = envelope ? freshRawNext.result : undefined;
+                json = this._encode(nextState);
+                res = this.db.prepare('UPDATE state SET json = ?, revision = revision + 1 WHERE id = 1 AND revision = ?').run(json, freshRevision);
+              }
+              if (res.changes !== 1) {
+                throw Object.assign(new Error(`Optimistic concurrency conflict at revision ${revision}`), { code: 'OPTIMISTIC_CONCURRENCY_CONFLICT' });
+              }
             }
             return JSON.parse(json);
-          });
+          }, { immediate: true });
           this.state = structuredClone(result);
-          return structuredClone(result);
+          const returned = structuredClone(result);
+          if (envelope) {
+            if (!Object.prototype.hasOwnProperty.call(returned, 'state')) {
+              Object.defineProperty(returned, 'state', {
+                value: structuredClone(result),
+                enumerable: false,
+                configurable: true,
+                writable: true,
+              });
+            }
+            if (!Object.prototype.hasOwnProperty.call(returned, 'result')) {
+              Object.defineProperty(returned, 'result', {
+                value: structuredClone(mutatorResult),
+                enumerable: false,
+                configurable: true,
+                writable: true,
+              });
+            }
+          }
+          return returned;
         } catch (err) {
           if (err.code === 'OPTIMISTIC_CONCURRENCY_CONFLICT' && attempts < 3) {
             continue;
@@ -268,7 +365,9 @@ class SqliteStore {
   async close() {
     return serialize(this.key, () => {
       if (this.db) {
-        try { this.db.exec('PRAGMA wal_checkpoint(PASSIVE)'); } catch {}
+        if (!this.readOnly && (!isTestEnvironment() || !isTargetingProd(this.key))) {
+          try { this.db.exec('PRAGMA wal_checkpoint(PASSIVE)'); } catch {}
+        }
         this.db.close();
       }
       this.db = null;
@@ -277,4 +376,12 @@ class SqliteStore {
   }
 }
 
-module.exports = { SqliteStore, getCanonicalProdDbPath, isTestEnvironment, assertMutationAllowed };
+module.exports = {
+  SqliteStore,
+  getCanonicalProdDbPath,
+  getProtectedProdDbPaths,
+  resolveProductionDbPath,
+  isTestEnvironment,
+  isTargetingProd,
+  assertMutationAllowed
+};

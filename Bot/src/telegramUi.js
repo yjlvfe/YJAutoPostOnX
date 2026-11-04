@@ -4,10 +4,17 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const { accountCapacity, quotaAdmission } = require('./quota');
 const { DEFAULT_SETTINGS, parseDuration, formatDuration } = require('./settings');
+const { riyadhDateParts } = require('./scheduling');
 const { TelegramFlows } = require('./telegramFlows');
-const { richTable, accountStatus, formatAccountTable, clean } = require('./accountTable');
+const { richTable, accountStatus, formatAccountTable, clean, escapeHtml } = require('./accountTable');
 const { isConflict409 } = require('./singleInstance');
 const { logStructured, sanitizeError, extractErrorCode } = require('./structuredLogger');
+const {
+  isCaptchaStatus,
+  isBannedStatus,
+  isUnverifiedStatus,
+  isAccountInactive
+} = require('./accounts');
 
 const MAX_ACTIVE_ACCOUNTS = 5;
 
@@ -17,10 +24,6 @@ const ISOLATION_REASONS = {
   STRIKES_EXCEEDED: 'تجاوز 3 إخفاقات طبيعية (Exceeded 3 qualified strikes)',
   COOKIE_REJECTED: 'رفض جلسة الكوكيز (Session rejected / invalid cookies)'
 };
-
-function isCaptchaStatus(status) {
-  return typeof status === 'string' && (status === 'كابتشا' || status === 'كابتشا (مطلوب حل يدوي)' || status.startsWith('كابتشا'));
-}
 
 function formatIsolationReason(reason) {
   if (!reason) return ISOLATION_REASONS.STRIKES_EXCEEDED;
@@ -75,12 +78,22 @@ const durationText = seconds => formatDurationAdaptive(seconds);
 const token = () => crypto.randomBytes(12).toString('hex');
 const cycleRunning = state => ['running', 'stopping'].includes(state?.cycle?.state);
 const validText = value => typeof value === 'string' && value.trim() && true;
-const eligible = account => account.enabled !== false && typeof account.username === 'string' && account.username.trim() && typeof account.cookieFile === 'string' && account.cookieFile.trim();
+const eligible = account =>
+  account.enabled !== false &&
+  !account.needsOwnerCaptcha &&
+  !isCaptchaStatus(account.status) &&
+  !isBannedStatus(account.status) &&
+  !isUnverifiedStatus(account.status) &&
+  account.status !== 'معزول (3 إخفاقات)' &&
+  typeof account.username === 'string' &&
+  account.username.trim() &&
+  typeof account.cookieFile === 'string' &&
+  account.cookieFile.trim();
 const validSettings = settings => Number.isSafeInteger(settings.delayMs) && settings.delayMs >= 0 && (settings.dailyQuota == null || (Number.isSafeInteger(settings.dailyQuota) && settings.dailyQuota > 0));
 
 class TelegramUi {
-  constructor({ bot, runtimeReady = async () => ({ ready: false, reasons: ['مكونات النشر الفعلي غير جاهزة'] }), launch, clock = () => new Date(), inlineStyles = true, downloadDocument, isolatedVerifier, onCycleFinished, onCycleStop, onPanelTask, notify, accountRefreshRetryMs = 2000, autoStartTicker = true }) {
-    this.bot = bot; this.runtimeReady = runtimeReady; this.launch = launch; this.clock = clock; this.inlineStyles = inlineStyles;
+  constructor({ bot, vpnManager, runtimeReady = async () => ({ ready: false, reasons: ['مكونات النشر الفعلي غير جاهزة'] }), launch, clock = () => new Date(), inlineStyles = true, downloadDocument, isolatedVerifier, onCycleFinished, onCycleStop, onPanelTask, notify, accountRefreshRetryMs = 2000, autoStartTicker = true }) {
+    this.bot = bot; this.vpnManager = vpnManager || null; this.runtimeReady = runtimeReady; this.launch = launch; this.clock = clock; this.inlineStyles = inlineStyles;
     this.isolatedVerifier = isolatedVerifier;
     this.accountRefreshJob = null; this.accountRefreshRetryMs = accountRefreshRetryMs; this.destroyed = false;
     this.panelBlockedUntil = new Map(); this.panelLastEdit = new Map();
@@ -487,6 +500,9 @@ class TelegramUi {
   async restore() {
     let snapshot; let stopping = false; let pendingReport;
     await this.bot.store.update(s => {
+      snapshot = undefined;
+      stopping = false;
+      pendingReport = null;
       s.telegramUi ||= {}; s.telegramUi.dashboards ||= {}; s.telegramUi.activePanelsByChatId ||= {};
       // A prior process cannot still own an outbound request. Keep its uncertain
       // delivery fenced, but do not mistake it for an active transport forever.
@@ -855,14 +871,30 @@ class TelegramUi {
     const healthy = isolated && result.vpnHealthy === true;
     const rawIp = result.exitIp || result.ip;
     const ip = healthy && require('./publicIp').isPublicIp(rawIp) ? rawIp : null;
+    const failure = result.accountFailure || (result.suspended === true || result.banned === true ? 'banned' : result.captcha === true ? 'captcha' : null);
+    const isSecurityIsolation = failure === 'captcha' || failure === 'banned';
+    const isTransientError = result.transientError === true;
+    const effectiveSession = session || isSecurityIsolation || isTransientError || Object.hasOwn(result, 'authenticated');
     let applied = false;
     try { await this.bot.store.update(s => {
+      applied = false;
       const account = s.accounts?.find(a => a.id === accountId);
       if (!account || signal?.aborted) return s;
       // Refresh must not invalidate a live claim/dispatch. Re-observe after it
       // settles; the publisher retains its own mandatory restriction gate.
-      if (refresh && (s.items || []).some(i => ['processing', 'dispatch_started'].includes(i.state) && (i.attempt?.accountId === accountId || i.accountId === accountId))) return s;
-      if (expectedAccount && ['checkGeneration', 'cookieFile', 'enabled', 'username', 'userId'].some(key => account[key] !== expectedAccount[key])) return s;
+      if (refresh && !isSecurityIsolation && (s.items || []).some(i => ['processing', 'dispatch_started'].includes(i.state) && (i.attempt?.accountId === accountId || i.accountId === accountId))) return s;
+      if (expectedAccount) {
+        if (isSecurityIsolation) {
+          // Security signals (captcha / banned) apply as long as identity/cookie match,
+          // even if checkGeneration or enabled changed concurrently (XT-03 / P02-T04).
+          const cookieMismatch = expectedAccount.cookieFile != null && account.cookieFile != null && account.cookieFile !== expectedAccount.cookieFile;
+          const userIdMismatch = expectedAccount.userId != null && account.userId != null && String(account.userId) !== String(expectedAccount.userId);
+          const usernameMismatch = expectedAccount.username != null && account.username != null && String(account.username).toLowerCase() !== String(expectedAccount.username).toLowerCase();
+          if (cookieMismatch || userIdMismatch || usernameMismatch) return s;
+        } else if (['checkGeneration', 'cookieFile', 'enabled', 'username', 'userId'].some(key => account[key] !== expectedAccount[key])) {
+          return s;
+        }
+      }
       applied = true;
       s.telegramUi ||= {}; s.telegramUi.accountChecks ||= {};
       if (!Object.hasOwn(s.telegramUi.accountChecks, accountId)) Object.defineProperty(s.telegramUi.accountChecks, accountId, { value: {}, enumerable: true, configurable: true, writable: true });
@@ -871,8 +903,13 @@ class TelegramUi {
       if (vpnEvidence) checks.vpn = { checkedAt, source, isolated, healthy, ip: ip || (require('./publicIp').isPublicIp(checks.vpn?.ip) ? checks.vpn.ip : null) };
       else if (checks.vpn && !require('./publicIp').isPublicIp(checks.vpn.ip)) checks.vpn.ip = null;
       if (ip) account.exitIp = ip;
-      const failure = result.accountFailure || (result.suspended === true || result.banned === true ? 'banned' : result.captcha === true ? 'captcha' : null);
-      if (session && source === 'x-session') {
+      if (isTransientError) {
+        const errMsg = String(result.lastError || result.error || result.reason || 'transient_error');
+        account.lastError = errMsg;
+        account.lastErrorAt = checkedAt;
+        checks.lastError = errMsg;
+      }
+      if (effectiveSession && source === 'x-session') {
         if (failure === 'banned') {
           account.enabled = false;
           account.status = 'محظور';
@@ -892,30 +929,33 @@ class TelegramUi {
             delete account.lastNotifiedCaptchaIncidentId;
             account.checkGeneration = crypto.randomUUID();
           }
-        } else if (failure === 'auth_session_unverified' || (!result.authenticated && !failure)) {
+        } else if (!isTransientError && (failure === 'auth_session_unverified' || (!result.authenticated && !failure))) {
           // Unverified session / cause uncertain: DO NOT default to 'محظور'!
           // Only preserve existing 'محظور' if it was already marked as such by an authoritative check.
           // ALSO preserve existing pending owner CAPTCHA workflow! A periodic unverified check
           // must never overwrite pending challenge status, incident metadata, or checkGeneration.
           const isPendingCaptcha = Boolean(account.needsOwnerCaptcha) || isCaptchaStatus(account.status);
-          if (account.status !== 'محظور' && !isPendingCaptcha) {
+          if (!isBannedStatus(account.status) && !isPendingCaptcha) {
             account.enabled = false;
             account.status = 'غير محقق (جلسة غير مؤكدة)';
             account.checkGeneration = crypto.randomUUID();
           }
+        } else if (!isTransientError && result.authenticated === true && !failure) {
+          delete account.lastError;
+          delete account.lastErrorAt;
         }
       }
-      if (refresh && session && healthy && ip && result.authenticated === true && !failure) {
-        if (!account.needsOwnerCaptcha && !['كابتشا', 'كابتشا (مطلوب حل يدوي)'].includes(account.status)) {
+      if (refresh && effectiveSession && healthy && ip && result.authenticated === true && !failure && !isTransientError) {
+        if (!account.needsOwnerCaptcha && !isCaptchaStatus(account.status) && !isBannedStatus(account.status)) {
           account.status = account.enabled === false ? 'غير مفعل' : 'مفعل';
         }
       }
       onApplied?.(structuredClone(account));
-      if (session) checks.session = { checkedAt, source, isolated, authenticated: isolated && result.authenticated === true, username: /^[A-Za-z0-9_]{1,15}$/.test(result.username || '') ? result.username : null,
+      if (effectiveSession && !isTransientError) checks.session = { checkedAt, source, isolated, authenticated: isolated && result.authenticated === true, username: /^[A-Za-z0-9_]{1,15}$/.test(result.username || '') ? result.username : null,
         ...Object.fromEntries(['challenge', 'locked', 'captcha', 'suspended', 'banned'].map(flag => [flag, isolated && result[flag] === true])) };
       return s;
     }); } catch { throw Object.assign(new Error('Account check persistence failed'), { code: 'ACCOUNT_CHECK_PERSIST_FAILED' }); }
-    if (applied && session && source === 'x-session' && (result.accountFailure === 'captcha' || result.captcha === true)) {
+    if (applied && effectiveSession && source === 'x-session' && (result.accountFailure === 'captcha' || result.captcha === true)) {
       // Background checks are also responsible for alerting the owner. Repeated
       // checks reuse the incident ID and per-chat delivered receipt state.
       const fresh = await this.bot.store.load();
@@ -951,6 +991,9 @@ class TelegramUi {
     let started = false; let snapshot; let blockedQuota; const runId = token();
     const persistenceStartedAt = Date.now();
     await this.bot.store.update(s => {
+      started = false;
+      snapshot = undefined;
+      blockedQuota = undefined;
       if (['running', 'stopping'].includes(s.cycle?.state) || this.job || s.linkExportLease || s.telegramUi?.pendingReport || (s.linkOutbox || []).some(entry => entry.status === 'sending')) return s;
       if (id) {
         const p = s.telegramUi?.users?.[id.key]?.panel || s.telegramUi?.activePanelsByChatId?.[String(id.chat)] || s.telegramUi?.dashboards?.[String(id.chat)];
@@ -970,6 +1013,10 @@ class TelegramUi {
       if (!accounts.length || !items.length || !validSettings(settings)) return s;
       const quota = quotaAdmission(s, { accounts, items, now: this.clock() });
       if (quota.exhausted) { blockedQuota = quota; return s; }
+      if (source === 'scheduled') {
+        const parts = riyadhDateParts(this.clock());
+        s.uiScheduleDay = `${parts.year}-${parts.month}-${parts.day}`;
+      }
       s.cycle = { state: 'running', runId, startedAt: new Date(this.clock()).toISOString(), updatedAt: new Date(this.clock()).toISOString() };
       s.telegramUi ||= {}; s.telegramUi.run = { runId, source, itemIds: items.map(x => x.id), accountIds: accounts.map(x => x.id), stopAfterSuccess };
       s.telegramUi.dashboards ||= {};
@@ -1007,16 +1054,24 @@ class TelegramUi {
       if (!this.notify) return [];
       return this.notify('🟢 تم استلام طلب تشغيل النشر وبدأت الدورة بالفعل.\nالمصدر: ' + origin + '\nرقم الدورة: ' + runId);
     }).then(deliveries => {
-      const results = Array.isArray(deliveries) ? deliveries : [];
+      const results = Array.isArray(deliveries) ? deliveries : (deliveries && typeof deliveries === 'object' ? [{ status: 'fulfilled', value: deliveries }] : []);
+      const isConfirmedReceipt = entry => {
+        if (!entry || entry.status !== 'fulfilled') return false;
+        const val = entry.value;
+        if (!val || typeof val !== 'object' || val.ok === false) return false;
+        const msgId = val.message_id ?? val.result?.message_id;
+        return Number.isInteger(msgId) && msgId > 0;
+      };
+      const deliveredCount = results.filter(isConfirmedReceipt).length;
       logStructured(this.bot?.logger, {
-        level: results.length && results.some(x => x.status === 'rejected') ? 'warn' : 'info',
+        level: results.length && deliveredCount < results.length ? 'warn' : 'info',
         component: 'telegram_ui',
         event: 'cycle_start_notification_completed',
         runId,
         operation: 'begin.notify',
-        result: results.some(x => x.status === 'fulfilled') ? 'delivered' : 'unconfirmed',
+        result: deliveredCount > 0 ? 'delivered' : 'unconfirmed',
         details: { source, attempted: results.length,
-          delivered: results.filter(x => x.status === 'fulfilled').length }
+          delivered: deliveredCount }
       });
     }).catch(err => this._logError('cycle_start_notify_failed', 'begin', err, { runId, source }));
     this.onPanelTask?.(notification);
@@ -1077,9 +1132,9 @@ class TelegramUi {
     for (let i = 0; i < accounts.length; i += 2) {
       const pair = accounts.slice(i, i + 2);
       const row = pair.map(a => {
-        const isBanned = a.status === 'محظور' || ['suspended', 'banned'].includes(String(a.status || '').toLowerCase());
-        const isCaptcha = a.status === 'كابتشا' || String(a.status || '').toLowerCase() === 'captcha';
-        const isEnabled = a.enabled !== false && !isBanned && !isCaptcha;
+        const isBanned = isBannedStatus(a.status);
+        const isCaptcha = isCaptchaStatus(a.status) || Boolean(a.needsOwnerCaptcha);
+        const isEnabled = a.enabled !== false && !isBanned && !isCaptcha && !isAccountInactive(a.status);
         const name = a.username ? `@${clean(a.username)}` : a.label || a.id;
         const text = name;
         const style = isBanned ? 'danger' : isEnabled ? 'success' : 'primary';
@@ -1110,27 +1165,94 @@ class TelegramUi {
     return this.bot.transport.sendMessage(id.chat, text, { reply_markup: markup });
   }
 
-  async accountToggle(request, raw) {
-    const id = this.identity(raw);
-    const parsed = request.parsed || {};
-    const callbackId = raw.callback_query?.id;
-    const messageId = raw.callback_query?.message?.message_id;
-    const acknowledge = (text, alert = false) => request.acknowledge ? request.acknowledge(text, alert) : callbackId ? this.bot.transport.acknowledgeCallback(callbackId, text, alert) : Promise.resolve();
+  async accountToggle(request = {}, raw = request) {
+    let id;
+    try {
+      id = this.identity(raw || request);
+    } catch {
+      const fallbackChat = raw?.message?.chat?.id ?? raw?.chat?.id ?? request?.chatId ?? request?.chat ?? 0;
+      const fallbackUser = raw?.message?.from?.id ?? raw?.from?.id ?? request?.userId ?? request?.user ?? fallbackChat;
+      id = { chat: fallbackChat, user: fallbackUser, key: `${fallbackChat}:${fallbackUser}` };
+    }
+    let parsed = request?.parsed ? { ...request.parsed } : {};
+    let explicitMode = null;
 
-    if (parsed.action === 'all_disable') {
+    if (!parsed.action) {
+      let args = [];
+      if (Array.isArray(request?.command?.args)) {
+        args = request.command.args;
+      } else if (Array.isArray(request?.args)) {
+        args = request.args;
+      } else if (Array.isArray(raw?.args)) {
+        args = raw.args;
+      } else {
+        const rawText = String(request?.text ?? raw?.message?.text ?? raw?.text ?? '').trim();
+        if (rawText) {
+          const tokens = rawText.split(/\s+/).filter(Boolean);
+          if (tokens[0] && tokens[0].startsWith('/account_toggle')) tokens.shift();
+          args = tokens;
+        }
+      }
+      const targetArg = args[0] ? String(args[0]).trim() : '';
+      const modeArg = args[1] ? String(args[1]).trim().toLowerCase() : null;
+      if (targetArg === 'all_disable' || (targetArg === 'all' && modeArg === 'off')) {
+        parsed = { action: 'all_disable', value: 'all' };
+      } else if (targetArg) {
+        parsed = { action: 'toggle', value: targetArg };
+        if (modeArg && ['on', 'off', 'enable', 'disable'].includes(modeArg)) {
+          explicitMode = ['on', 'enable'].includes(modeArg) ? 'enable' : 'disable';
+        } else if (modeArg) {
+          if (this.bot?.transport?.sendMessage && id.chat) {
+            await this.bot.transport.sendMessage(id.chat, 'استخدم /account_toggle account-id on أو off.');
+          }
+          return { invalidArgs: true };
+        }
+      } else if (request?.source === 'message' || request?.command || request?.text || raw?.message?.text) {
+        if (this.bot?.transport?.sendMessage && id.chat) {
+          await this.bot.transport.sendMessage(id.chat, 'استخدم /account_toggle account-id on أو off.');
+        }
+        return { invalidArgs: true };
+      }
+    }
+
+    const callbackId = raw?.callback_query?.id;
+    const messageId = raw?.callback_query?.message?.message_id;
+    const isCommandInvocation = !callbackId && !messageId && Boolean(request?.command || request?.args || request?.text || raw?.message?.text);
+    const acknowledge = async (text, alert = false) => {
+      if (request?.acknowledge) return request.acknowledge(text, alert);
+      if (callbackId && this.bot?.transport?.acknowledgeCallback) {
+        return this.bot.transport.acknowledgeCallback(callbackId, text, alert);
+      }
+      if (isCommandInvocation && text && this.bot?.transport?.sendMessage && id.chat) {
+        return this.bot.transport.sendMessage(id.chat, text);
+      }
+      return undefined;
+    };
+    const vpnMgr = this.vpnManager || this.bot?.vpnManager;
+
+    if (parsed.action === 'all_disable' || parsed.action === 'disable_all') {
+      let releaseIds = [];
       await this.bot.store.update(s => {
+        releaseIds = [];
         for (const a of s.accounts || []) {
-          if (!['محظور', 'كابتشا'].includes(a.status)) {
-            a.enabled = false;
+          a.enabled = false;
+          if (a.needsOwnerCaptcha || isCaptchaStatus(a.status)) {
+            if (!isCaptchaStatus(a.status)) {
+              a.status = 'كابتشا (مطلوب حل يدوي)';
+            }
+          } else if (isBannedStatus(a.status)) {
+            a.status = 'محظور';
+          } else {
             a.status = 'غير مفعل';
             a.checkGeneration = crypto.randomUUID();
           }
+          releaseIds.push(a.id);
         }
         if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
           s.telegramUi.run.accountIds = [];
           s.telegramUi.run.cursor = 0;
         }
-        if (s.vpnSlots) {
+        if (!vpnMgr?.release && s.vpnSlots) {
           s.vpnSlots = {};
         }
         return s;
@@ -1139,11 +1261,14 @@ class TelegramUi {
         this.activeRun.accountIds.length = 0;
         this.activeRun.cursor = 0;
       }
-      const state = await this.bot.store.load();
-      for (const a of (state.accounts || [])) {
-        this.bot.vpnManager?.release?.(a.id).catch(err => this._logError('vpn_release_failed', 'accountToggle.all_disable', err, { accountId: a.id }));
+      if (typeof vpnMgr?.release === 'function') {
+        for (const accId of releaseIds) {
+          await Promise.resolve(vpnMgr.release(accId)).catch(err =>
+            this._logError('vpn_release_failed', 'accountToggle.all_disable', err, { accountId: accId })
+          );
+        }
       }
-      this.bot.forensicLogger?.record({
+      this.bot?.forensicLogger?.record({
         eventType: 'manual_toggle',
         details: { action: 'all_disable' }
       }).catch(err => this._logError('forensic_record_failed', 'accountToggle.all_disable', err));
@@ -1164,29 +1289,25 @@ class TelegramUi {
         await acknowledge('الحساب غير موجود', true);
         return { notFound: true };
       }
-      const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
-      if (isBanned) {
-        await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
-        return { banned: true };
-      }
-      const isCaptcha = account.status === 'كابتشا' || account.status === 'كابتشا (مطلوب حل يدوي)' || account.needsOwnerCaptcha === true;
-      if (isCaptcha) {
-        await acknowledge('هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', true);
-        return { captcha: true };
-      }
-      const isUnverified = account.status === 'غير محقق' || account.status === 'غير محقق (جلسة غير مؤكدة)';
-      if (isUnverified) {
-        await acknowledge('جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', true);
-        return { unverified: true };
-      }
-      const isCurrentlyActive = account.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(account.status);
-      if (isCurrentlyActive) {
+
+      const isCurrentlyActive = account.enabled !== false && !isAccountInactive(account.status) && !account.needsOwnerCaptcha;
+      const shouldDisable = explicitMode ? explicitMode === 'disable' : isCurrentlyActive;
+
+      if (shouldDisable) {
         await this.bot.store.update(s => {
           const a = (s.accounts || []).find(acc => acc.id === targetId);
           if (a) {
             a.enabled = false;
-            a.status = 'غير مفعل';
-            a.checkGeneration = crypto.randomUUID();
+            if (a.needsOwnerCaptcha || isCaptchaStatus(a.status)) {
+              if (!isCaptchaStatus(a.status)) {
+                a.status = 'كابتشا (مطلوب حل يدوي)';
+              }
+            } else if (isBannedStatus(a.status)) {
+              a.status = 'محظور';
+            } else {
+              a.status = 'غير مفعل';
+              a.checkGeneration = crypto.randomUUID();
+            }
           }
           if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
             s.telegramUi.run.accountIds = s.telegramUi.run.accountIds.filter(id => id !== targetId);
@@ -1194,7 +1315,7 @@ class TelegramUi {
               s.telegramUi.run.cursor = 0;
             }
           }
-          if (s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
+          if (!vpnMgr?.release && s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
             delete s.vpnSlots[targetId];
           }
           return s;
@@ -1206,8 +1327,12 @@ class TelegramUi {
             this.activeRun.cursor = 0;
           }
         }
-        this.bot.vpnManager?.release?.(targetId).catch(err => this._logError('vpn_release_failed', 'accountToggle.disable', err, { accountId: targetId }));
-        this.bot.forensicLogger?.record({
+        if (typeof vpnMgr?.release === 'function') {
+          await Promise.resolve(vpnMgr.release(targetId)).catch(err =>
+            this._logError('vpn_release_failed', 'accountToggle.disable', err, { accountId: targetId })
+          );
+        }
+        this.bot?.forensicLogger?.record({
           eventType: 'manual_toggle',
           accountId: targetId,
           username: account.username,
@@ -1218,22 +1343,67 @@ class TelegramUi {
         if (messageId) {
           await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountToggle.disable', err));
         }
-        await acknowledge(`تم تعطيل الحساب @${account.username || account.label}`);
+        await acknowledge(isCommandInvocation ? 'تم تعطيل الحساب.' : `تم تعطيل الحساب @${account.username || account.label}`);
         return { toggled: false };
       } else {
-        const activeCount = (state.accounts || []).filter(a => a.id !== targetId && a.enabled !== false && !['محظور', 'كابتشا', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status)).length;
-        if (activeCount >= 5) {
-          await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
-          return { limitExceeded: true };
-        }
+        let outcome = {
+          toggled: false,
+          notFound: false,
+          banned: false,
+          captcha: false,
+          unverified: false,
+          limitExceeded: false
+        };
         await this.bot.store.update(s => {
-          const a = (s.accounts || []).find(acc => acc.id === targetId);
-          if (a) {
-            a.enabled = true;
-            a.status = 'مفعل';
-            a.checkGeneration = crypto.randomUUID();
-            a.failures = 0;
+          outcome = {
+            toggled: false,
+            notFound: false,
+            banned: false,
+            captcha: false,
+            unverified: false,
+            limitExceeded: false
+          };
+          const target = (s.accounts || []).find(acc => acc.id === targetId);
+          if (!target) {
+            outcome.notFound = true;
+            return s;
           }
+          if (isBannedStatus(target.status)) {
+            target.enabled = false;
+            target.status = 'محظور';
+            outcome.banned = true;
+            return s;
+          }
+          if (target.needsOwnerCaptcha || isCaptchaStatus(target.status)) {
+            target.enabled = false;
+            if (!isCaptchaStatus(target.status)) {
+              target.status = 'كابتشا (مطلوب حل يدوي)';
+            }
+            outcome.captcha = true;
+            return s;
+          }
+          if (isUnverifiedStatus(target.status)) {
+            target.enabled = false;
+            outcome.unverified = true;
+            return s;
+          }
+          const activeCount = (s.accounts || []).filter(a =>
+            a.id !== targetId &&
+            a.enabled !== false &&
+            !isAccountInactive(a.status) &&
+            !a.needsOwnerCaptcha &&
+            !isCaptchaStatus(a.status) &&
+            !isBannedStatus(a.status) &&
+            !isUnverifiedStatus(a.status)
+          ).length;
+          if (activeCount >= MAX_ACTIVE_ACCOUNTS) {
+            outcome.limitExceeded = true;
+            return s;
+          }
+          target.enabled = true;
+          target.status = 'مفعل';
+          target.checkGeneration = crypto.randomUUID();
+          target.failures = 0;
           if (s.telegramUi?.accountChecks?.[targetId]) {
             delete s.telegramUi.accountChecks[targetId];
           }
@@ -1245,15 +1415,37 @@ class TelegramUi {
               s.telegramUi.run.accountIds.push(targetId);
             }
           }
+          outcome.toggled = true;
           return s;
         });
+
+        if (outcome.notFound) {
+          await acknowledge('الحساب غير موجود', true);
+          return { notFound: true };
+        }
+        if (outcome.banned) {
+          await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
+          return { banned: true };
+        }
+        if (outcome.captcha) {
+          await acknowledge('هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', true);
+          return { captcha: true };
+        }
+        if (outcome.unverified) {
+          await acknowledge('جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', true);
+          return { unverified: true };
+        }
+        if (outcome.limitExceeded) {
+          await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
+          return { limitExceeded: true };
+        }
+
         if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
           if (!this.activeRun.accountIds.includes(targetId)) {
             this.activeRun.accountIds.push(targetId);
           }
         }
-        this.bot.vpnManager?.rotate(targetId).catch(err => this._logError('vpn_rotate_failed', 'accountToggle.enable', err, { accountId: targetId }));
-        this.bot.forensicLogger?.record({
+        this.bot?.forensicLogger?.record({
           eventType: 'manual_toggle',
           accountId: targetId,
           username: account.username,
@@ -1264,7 +1456,7 @@ class TelegramUi {
         if (messageId) {
           await this.bot.transport.editMessageText(id.chat, messageId, 'اختر الحسابات التي تريد تفعيلها (الحد الأقصى 5):', { reply_markup: markup }).catch(err => this._logWarn('telegram_ui_edit_message_suppressed', 'accountToggle.enable', err));
         }
-        await acknowledge(`تم تفعيل الحساب @${account.username || account.label}`);
+        await acknowledge(isCommandInvocation ? 'تم تفعيل الحساب.' : `تم تفعيل الحساب @${account.username || account.label}`);
         return { toggled: true };
       }
     }
@@ -1279,9 +1471,9 @@ class TelegramUi {
       const pair = accounts.slice(i, i + 2);
       const row = pair.map(a => {
         const name = a.username ? `@${clean(a.username)}` : a.label || a.id;
-        const isBanned = a.status === 'محظور' || ['suspended', 'banned'].includes(String(a.status || '').toLowerCase());
-        const isCaptcha = a.status === 'كابتشا' || String(a.status || '').toLowerCase() === 'captcha';
-        const isEnabled = a.enabled !== false && !isBanned && !isCaptcha;
+        const isBanned = isBannedStatus(a.status);
+        const isCaptcha = isCaptchaStatus(a.status) || Boolean(a.needsOwnerCaptcha);
+        const isEnabled = a.enabled !== false && !isBanned && !isCaptcha && !isAccountInactive(a.status);
         const style = isBanned ? 'danger' : isEnabled ? 'success' : 'primary';
         return {
           text: name,
@@ -1307,24 +1499,32 @@ class TelegramUi {
   }
 
   accountDetailText(account) {
-    const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
-    const isCaptcha = account.status === 'كابتشا' || String(account.status || '').toLowerCase() === 'captcha';
-    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha;
-    const statusLabel = isBanned ? `🚫 ${account.status}` : isCaptcha ? `⚠️ كابتشا` : isEnabled ? '🟢 مفعل' : '🔴 غير مفعل';
-    const name = account.username ? `@${clean(account.username)}` : account.label || account.id;
+    const isBanned = isBannedStatus(account.status);
+    const isCaptcha = isCaptchaStatus(account.status) || Boolean(account.needsOwnerCaptcha);
+    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha && !isAccountInactive(account.status);
+    const statusLabel = isBanned
+      ? `🚫 ${escapeHtml(account.status)}`
+      : isCaptcha
+      ? `🟠 محجوب بـ CAPTCHA (⚠️ كابتشا)`
+      : isEnabled
+      ? '🟢 مفعل'
+      : '🔴 غير مفعل';
+    const rawName = account.username ? `@${clean(account.username)}` : account.label || account.id;
+    const name = escapeHtml(rawName);
+    const safeLabel = escapeHtml(account.label || rawName);
     return `⚙️ <b>لوحة إعدادات وخيارات الحساب:</b> ${name}\n\n` +
       `• <b>الحالة:</b> ${statusLabel}\n` +
-      `• <b>اسم الحساب:</b> ${account.label || name}\n` +
-      `• <b>المعرف الرقمي:</b> ${account.userId || 'غير متوفر'}\n` +
-      `• <b>عنوان IP الخروج:</b> ${account.exitIp || 'غير متوفر'}\n` +
-      `• <b>الكوتا اليومية:</b> ${account.quota ? `${account.quota} منشور` : 'افتراضي (حسب النظام)'}\n\n` +
+      `• <b>اسم الحساب:</b> ${safeLabel}\n` +
+      `• <b>المعرف الرقمي:</b> ${escapeHtml(account.userId || 'غير متوفر')}\n` +
+      `• <b>عنوان IP الخروج:</b> ${escapeHtml(account.exitIp || 'غير متوفر')}\n` +
+      `• <b>الكوتا اليومية:</b> ${account.quota ? `${escapeHtml(account.quota)} منشور` : 'افتراضي (حسب النظام)'}\n\n` +
       `اختر الإجراء المطلوب تنفيذه:`;
   }
 
   accountDetailKeyboard(account) {
-    const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
-    const isCaptcha = account.status === 'كابتشا' || account.status === 'كابتشا (مطلوب حل يدوي)' || account.needsOwnerCaptcha === true;
-    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha && !String(account.status || '').includes('غير محقق');
+    const isBanned = isBannedStatus(account.status);
+    const isCaptcha = isCaptchaStatus(account.status) || Boolean(account.needsOwnerCaptcha);
+    const isEnabled = account.enabled !== false && !isBanned && !isCaptcha && !isUnverifiedStatus(account.status) && !isAccountInactive(account.status);
 
     const toggleButton = isEnabled
       ? { text: 'تعطيل', callback_data: `accmanage:disable:${account.id}`, ...(this.inlineStyles ? { style: 'danger' } : {}) }
@@ -1397,34 +1597,65 @@ class TelegramUi {
         await acknowledge('الحساب غير موجود', true);
         return { notFound: true };
       }
-      const isBanned = account.status === 'محظور' || ['suspended', 'banned'].includes(String(account.status || '').toLowerCase());
-      if (isBanned) {
-        await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
-        return { banned: true };
-      }
-      const isCaptcha = account.status === 'كابتشا' || account.status === 'كابتشا (مطلوب حل يدوي)' || account.needsOwnerCaptcha === true;
-      if (isCaptcha) {
-        await acknowledge('هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', true);
-        return { captcha: true };
-      }
-      const isUnverified = account.status === 'غير محقق' || account.status === 'غير محقق (جلسة غير مؤكدة)';
-      if (isUnverified) {
-        await acknowledge('جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', true);
-        return { unverified: true };
-      }
-      const activeCount = (state.accounts || []).filter(a => a.id !== targetId && a.enabled !== false && !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)', 'غير مفعل'].includes(a.status)).length;
-      if (activeCount >= 5) {
-        await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
-        return { limitExceeded: true };
-      }
+
+      let outcome = {
+        enabled: false,
+        notFound: false,
+        banned: false,
+        captcha: false,
+        unverified: false,
+        limitExceeded: false
+      };
       await this.bot.store.update(s => {
-        const a = (s.accounts || []).find(acc => acc.id === targetId);
-        if (a) {
-          a.enabled = true;
-          a.status = 'مفعل';
-          a.checkGeneration = crypto.randomUUID();
-          a.failures = 0;
+        outcome = {
+          enabled: false,
+          notFound: false,
+          banned: false,
+          captcha: false,
+          unverified: false,
+          limitExceeded: false
+        };
+        const target = (s.accounts || []).find(acc => acc.id === targetId);
+        if (!target) {
+          outcome.notFound = true;
+          return s;
         }
+        if (isBannedStatus(target.status)) {
+          target.enabled = false;
+          target.status = 'محظور';
+          outcome.banned = true;
+          return s;
+        }
+        if (target.needsOwnerCaptcha || isCaptchaStatus(target.status)) {
+          target.enabled = false;
+          if (!isCaptchaStatus(target.status)) {
+            target.status = 'كابتشا (مطلوب حل يدوي)';
+          }
+          outcome.captcha = true;
+          return s;
+        }
+        if (isUnverifiedStatus(target.status)) {
+          target.enabled = false;
+          outcome.unverified = true;
+          return s;
+        }
+        const activeCount = (s.accounts || []).filter(a =>
+          a.id !== targetId &&
+          a.enabled !== false &&
+          !isAccountInactive(a.status) &&
+          !a.needsOwnerCaptcha &&
+          !isCaptchaStatus(a.status) &&
+          !isBannedStatus(a.status) &&
+          !isUnverifiedStatus(a.status)
+        ).length;
+        if (activeCount >= MAX_ACTIVE_ACCOUNTS) {
+          outcome.limitExceeded = true;
+          return s;
+        }
+        target.enabled = true;
+        target.status = 'مفعل';
+        target.checkGeneration = crypto.randomUUID();
+        target.failures = 0;
         if (s.telegramUi?.accountChecks?.[targetId]) {
           delete s.telegramUi.accountChecks[targetId];
         }
@@ -1436,15 +1667,37 @@ class TelegramUi {
             s.telegramUi.run.accountIds.push(targetId);
           }
         }
+        outcome.enabled = true;
         return s;
       });
+
+      if (outcome.notFound) {
+        await acknowledge('الحساب غير موجود', true);
+        return { notFound: true };
+      }
+      if (outcome.banned) {
+        await acknowledge('هذا الحساب محظور، لا يمكن تفعيله.', true);
+        return { banned: true };
+      }
+      if (outcome.captcha) {
+        await acknowledge('هذا الحساب يتطلب حل التحدي الأمني (كابتشا) يدوياً عبر موقع X أولاً، ثم الضغط على "تم الحل" للتحقق.', true);
+        return { captcha: true };
+      }
+      if (outcome.unverified) {
+        await acknowledge('جلسة هذا الحساب غير مؤكدة؛ يرجى فحص الحساب عبر موقع X وتحديث الكوكيز قبل التفعيل.', true);
+        return { unverified: true };
+      }
+      if (outcome.limitExceeded) {
+        await acknowledge('تجاوزت الحد للحسابات المفعلة (الحد الأقصى 5)', true);
+        return { limitExceeded: true };
+      }
+
       if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
         if (!this.activeRun.accountIds.includes(targetId)) {
           this.activeRun.accountIds.push(targetId);
         }
       }
-      this.bot.vpnManager?.rotate(targetId).catch(err => this._logError('vpn_rotate_failed', 'accountManage.enable', err, { accountId: targetId }));
-      this.bot.forensicLogger?.record({
+      this.bot?.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
         username: account.username,
@@ -1467,12 +1720,21 @@ class TelegramUi {
         await acknowledge('الحساب غير موجود', true);
         return { notFound: true };
       }
+      const vpnMgr = this.vpnManager || this.bot?.vpnManager;
       await this.bot.store.update(s => {
         const a = (s.accounts || []).find(acc => acc.id === targetId);
         if (a) {
           a.enabled = false;
-          a.status = 'غير مفعل';
-          a.checkGeneration = crypto.randomUUID();
+          if (a.needsOwnerCaptcha || isCaptchaStatus(a.status)) {
+            if (!isCaptchaStatus(a.status)) {
+              a.status = 'كابتشا (مطلوب حل يدوي)';
+            }
+          } else if (isBannedStatus(a.status)) {
+            a.status = 'محظور';
+          } else {
+            a.status = 'غير مفعل';
+            a.checkGeneration = crypto.randomUUID();
+          }
         }
         if (s.cycle?.state === 'running' && s.telegramUi?.run && Array.isArray(s.telegramUi.run.accountIds)) {
           s.telegramUi.run.accountIds = s.telegramUi.run.accountIds.filter(id => id !== targetId);
@@ -1480,7 +1742,7 @@ class TelegramUi {
             s.telegramUi.run.cursor = 0;
           }
         }
-        if (s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
+        if (!vpnMgr?.release && s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
           delete s.vpnSlots[targetId];
         }
         return s;
@@ -1492,8 +1754,12 @@ class TelegramUi {
           this.activeRun.cursor = 0;
         }
       }
-      this.bot.vpnManager?.release?.(targetId).catch(err => this._logError('vpn_release_failed', 'accountManage.disable', err, { accountId: targetId }));
-      this.bot.forensicLogger?.record({
+      if (typeof vpnMgr?.release === 'function') {
+        await Promise.resolve(vpnMgr.release(targetId)).catch(err =>
+          this._logError('vpn_release_failed', 'accountManage.disable', err, { accountId: targetId })
+        );
+      }
+      this.bot?.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
         username: account.username,
@@ -1521,6 +1787,8 @@ class TelegramUi {
       let rateLimited = false;
       let remainingSec = 0;
       await this.bot.store.update(s => {
+        rateLimited = false;
+        remainingSec = 0;
         const a = (s.accounts || []).find(acc => acc.id === targetId);
         if (!a) return s;
         const now = Date.now();
@@ -1592,6 +1860,8 @@ class TelegramUi {
         let preemptReason = null;
 
         await this.bot.store.update(s => {
+          staleOrPreempted = false;
+          preemptReason = null;
           const a = (s.accounts || []).find(acc => acc.id === targetId);
           if (!a) {
             staleOrPreempted = true;
@@ -1600,12 +1870,13 @@ class TelegramUi {
           }
 
           // Strict Compare-And-Set: verify that NO security challenge, incident, credential, or generation changed!
+          // Accept either needsOwnerCaptcha || isCaptchaStatus(a.status) so status label variants never deadlock verification.
           const incidentChanged = a.captchaIncidentId !== capturedIncidentId;
           const genChanged = a.checkGeneration !== capturedCheckGen;
           const cookieChanged = a.cookieFile !== capturedCookieFile;
           const currentUserId = a.userId ? String(a.userId) : null;
           const userChanged = currentUserId !== capturedUserId || a.username !== capturedUsername;
-          const challengeClearedOrChanged = !a.needsOwnerCaptcha || !isCaptchaStatus(a.status);
+          const challengeClearedOrChanged = !a.needsOwnerCaptcha && !isCaptchaStatus(a.status);
 
           if (incidentChanged || genChanged || cookieChanged || userChanged || challengeClearedOrChanged) {
             staleOrPreempted = true;
@@ -1658,7 +1929,11 @@ class TelegramUi {
       const targetId = parsed.value;
       const state = await this.bot.store.load();
       const account = (state.accounts || []).find(a => a.id === targetId);
-      const isOk = account && account.enabled !== false && !['محظور', 'كابتشا'].includes(account.status);
+      if (!account) {
+        await acknowledge('الحساب غير موجود', true);
+        return { notFound: true };
+      }
+      const isOk = account && account.enabled !== false && !isBannedStatus(account.status) && !isCaptchaStatus(account.status) && !account.needsOwnerCaptcha;
       await acknowledge(isOk ? `حالة التكوين المحلي للحساب @${account.username || account.label}: مهيأ (فحص تكوين محلي فقط)` : `حالة الحساب المحلية: ${account?.status || 'غير متحققة'}`);
       return { checked: 'session' };
     }
@@ -1667,8 +1942,36 @@ class TelegramUi {
       const targetId = parsed.value;
       const state = await this.bot.store.load();
       const account = (state.accounts || []).find(a => a.id === targetId);
-      await acknowledge(`حالة VPN: المنفذ نشط وعنوان IP هو ${account?.exitIp || 'سليم'}`);
-      return { checked: 'vpn' };
+      if (!account) {
+        await acknowledge('الحساب غير موجود', true);
+        return { notFound: true };
+      }
+      const vpnMgr = this.vpnManager || this.bot?.vpnManager;
+      if (typeof vpnMgr?.health === 'function') {
+        const health = await vpnMgr.health(targetId);
+        const healthy = Boolean(health?.healthy || health?.vpnHealthy);
+        const exitIp = health?.exitIp || health?.ip || null;
+        await this.recordAccountCheck(targetId, { isolated: healthy, vpnHealthy: healthy, exitIp }, { source: 'vpn-health', expectedAccount: account }).catch(() => {});
+        if (!healthy) {
+          await acknowledge(`⚠️ حالة VPN غير سليمة (${health?.reason || 'unhealthy'})`, true);
+          return { checked: 'vpn', healthy: false, reason: health?.reason || 'unhealthy' };
+        }
+        await acknowledge(`حالة VPN: المنفذ نشط وعنوان IP هو ${exitIp || 'سليم'}`);
+        return { checked: 'vpn', healthy: true, exitIp };
+      }
+      if (typeof this.isolatedVerifier?.health === 'function') {
+        const health = await this.isolatedVerifier.health(account);
+        const healthy = Boolean(health?.vpnHealthy || health?.healthy);
+        const exitIp = health?.exitIp || health?.ip || null;
+        if (!healthy) {
+          await acknowledge('⚠️ حالة VPN غير سليمة', true);
+          return { checked: 'vpn', healthy: false };
+        }
+        await acknowledge(`حالة VPN: المنفذ نشط وعنوان IP هو ${exitIp || 'سليم'}`);
+        return { checked: 'vpn', healthy: true, exitIp };
+      }
+      await acknowledge(`حالة VPN: المنفذ نشط وعنوان IP هو ${account.exitIp || 'سليم'}`);
+      return { checked: 'vpn', healthy: Boolean(account.exitIp), exitIp: account.exitIp || null };
     }
 
     if (parsed.action === 'delete_prompt' && parsed.value) {
@@ -1696,6 +1999,7 @@ class TelegramUi {
 
     if (parsed.action === 'delete_confirm' && parsed.value) {
       const targetId = parsed.value;
+      const vpnMgr = this.vpnManager || this.bot?.vpnManager;
       if (this.activeRun && Array.isArray(this.activeRun.accountIds)) {
         const idx = this.activeRun.accountIds.indexOf(targetId);
         if (idx !== -1) this.activeRun.accountIds.splice(idx, 1);
@@ -1703,8 +2007,12 @@ class TelegramUi {
           this.activeRun.cursor = 0;
         }
       }
-      this.bot.vpnManager?.release?.(targetId).catch(err => this._logError('vpn_release_failed', 'accountManage.delete_confirm', err, { accountId: targetId }));
-      this.bot.forensicLogger?.record({
+      if (typeof vpnMgr?.release === 'function') {
+        await Promise.resolve(vpnMgr.release(targetId)).catch(err =>
+          this._logError('vpn_release_failed', 'accountManage.delete_confirm', err, { accountId: targetId })
+        );
+      }
+      this.bot?.forensicLogger?.record({
         eventType: 'manual_toggle',
         accountId: targetId,
         details: { action: 'delete' }
@@ -1724,7 +2032,7 @@ class TelegramUi {
             s.telegramUi.run.cursor = 0;
           }
         }
-        if (s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
+        if (!vpnMgr?.release && s.vpnSlots && Object.hasOwn(s.vpnSlots, targetId)) {
           delete s.vpnSlots[targetId];
         }
         return s;
@@ -1773,6 +2081,8 @@ class TelegramUi {
   async stop(expectedToken, id) {
     let accepted = false; let snapshot;
     await this.bot.store.update(s => {
+      accepted = false;
+      snapshot = undefined;
       if (id) {
         const p = s.telegramUi?.users?.[id.key]?.panel || s.telegramUi?.activePanelsByChatId?.[String(id.chat)] || s.telegramUi?.dashboards?.[String(id.chat)];
         if (p?.token !== expectedToken && p?.stopToken !== expectedToken) return s;
@@ -1997,6 +2307,7 @@ module.exports = {
   TelegramUi,
   MAX_ACTIVE_ACCOUNTS,
   ISOLATION_REASONS,
+  isCaptchaStatus,
   formatIsolationReason,
   buildIsolationMessage
 };

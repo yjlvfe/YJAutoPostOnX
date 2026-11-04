@@ -49,7 +49,8 @@ function parseTelegramEnvelope(data, method, response) {
 
 // One lifecycle owns the complete-request deadline, settlement and stream
 // cleanup for ordinary API writes, multipart writes and binary downloads.
-function transfer(url, { method = 'POST', body, headers, timeoutMs = 30_000, maxBytes, decode, file = false }) {
+const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+function transfer(url, { method = 'POST', body, headers, timeoutMs = 30_000, maxBytes = DEFAULT_MAX_RESPONSE_BYTES, decode, file = false }) {
   const client = url.protocol === 'http:' ? http : https;
   return new Promise((resolve, reject) => {
     let response, deadline, settled = false, bytes = 0;
@@ -125,6 +126,7 @@ function request(token, method, params = {}, options = {}) {
   const body = JSON.stringify(params);
   return transfer(url, {
     body, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeoutMs,
+    maxBytes: options.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
     decode: (data, response) => parseTelegramEnvelope(data.toString('utf8'), method, response)
   });
 }
@@ -247,4 +249,4 @@ function createTelegramApi(token, options = {}) {
   };
 }
 
-module.exports = { createTelegramApi, request };
+module.exports = { createTelegramApi, request, transfer, DEFAULT_MAX_RESPONSE_BYTES };

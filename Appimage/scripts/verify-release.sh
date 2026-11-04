@@ -25,7 +25,29 @@ run_step() {
 }
 
 # ── Isolation (brief §4): every test/probe/smoke/boot uses its own HOME. ──
+REAL_HOME="${HOME:-/root}"
+REAL_USER_DIRS=(
+  "$REAL_HOME/.config/x-poster-bot-profile"
+  "$REAL_HOME/.config/x-poster-profiles"
+  "$REAL_HOME/.config/x-poster-shared"
+)
+snapshot_real_user_dirs() {
+  for d in "${REAL_USER_DIRS[@]}"; do
+    if [ -e "$d" ]; then
+      echo "EXISTS:$d"
+      find "$d" -type f -printf '%P\t%s\t%T@\n' 2>/dev/null | sort
+    else
+      echo "ABSENT:$d"
+    fi
+  done
+}
+
 ISOLATED_HOME="$(mktemp -d -t xposter-verify-home-XXXXXX)"
+RUN_START_MARKER="$ISOLATED_HOME/.run-start"
+touch "$RUN_START_MARKER"
+PRE_RUN_SNAPSHOT="$ISOLATED_HOME/.real-user-dirs.before"
+snapshot_real_user_dirs > "$PRE_RUN_SNAPSHOT"
+
 export HOME="$ISOLATED_HOME"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_CACHE_HOME="$HOME/.cache"
@@ -35,6 +57,10 @@ mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$TMPDIR"
 echo "Isolated HOME for this verification run: $HOME"
 
 cleanup() {
+  if [ -f "$ISOLATED_HOME/boot.log" ]; then
+    mkdir -p "$REPO_ROOT/dist"
+    cp -f "$ISOLATED_HOME/boot.log" "$REPO_ROOT/dist/boot.log" 2>/dev/null || true
+  fi
   rm -rf "$ISOLATED_HOME" "${EXTRACT_DIR:-}" 2>/dev/null || true
 }
 trap 'cleanup; fail' ERR
@@ -91,30 +117,64 @@ run_step "unpack asar" node -e "
 run_step "package smoke (inside the built AppImage)" \
   bash -c "SMOKE_APP_ROOT='$ASAR_OUT' ELECTRON_RUN_AS_NODE=1 ./node_modules/.bin/electron scripts/package-smoke.js"
 
-run_step "windowed boot (45s, isolated HOME, must not crash before the timeout)" bash -c "
+windowed_boot_check() {
+  local code=0
   set +e
-  # AppRun's own \\\$APPDIR auto-detection walks up looking for a path
-  # component matching \\\$1 (here --no-sandbox), which never exists, so it
-  # unwinds to an empty string and then tries to exec /yjautopostonx. Setting
-  # APPDIR explicitly (exactly what the real AppImage type-2 runtime does
-  # before invoking AppRun) is what makes this a faithful boot test.
-  APPDIR='$EXTRACT_DIR/squashfs-root' xvfb-run -a timeout 45 '$EXTRACT_DIR/squashfs-root/AppRun' --no-sandbox > '$ISOLATED_HOME/boot.log' 2>&1
-  code=\$?
-  echo \"boot exit code: \$code (124/137 = ran the full 45s without crashing, which is success here)\"
-  tail -40 \"$ISOLATED_HOME/boot.log\" || true
-  if [ \"\$code\" -ne 124 ] && [ \"\$code\" -ne 137 ] && [ \"\$code\" -ne 0 ]; then
-    echo 'boot exited early with an unexpected code' >&2
-    exit 1
+  ulimit -c 0
+  APPDIR="$EXTRACT_DIR/squashfs-root" xvfb-run -a -f "$ISOLATED_HOME/.Xauthority" \
+    timeout --signal=TERM --kill-after=10s 45s \
+    "$EXTRACT_DIR/squashfs-root/AppRun" --no-sandbox --disable-gpu > "$ISOLATED_HOME/boot.log" 2>&1
+  code=$?
+  set -e
+  mkdir -p "$REPO_ROOT/dist"
+  cp -f "$ISOLATED_HOME/boot.log" "$REPO_ROOT/dist/boot.log" 2>/dev/null || true
+  echo "boot exit code: $code (124/137 = ran the full 45s without crashing; 0 = premature exit, rejected)"
+  tail -40 "$ISOLATED_HOME/boot.log" || true
+  if [ "$code" -ne 124 ] && [ "$code" -ne 137 ]; then
+    echo "boot exited early or unexpectedly with code $code (expected 124 or 137 after full 45s soak)" >&2
+    return 1
   fi
-"
+  if [ ! -s "$ISOLATED_HOME/.config/x-poster-shared/workflow.sqlite" ]; then
+    echo "boot did not initialize isolated workflow.sqlite" >&2
+    return 1
+  fi
+  if [ ! -d "$ISOLATED_HOME/.config/x-poster-bot-profile/reports" ]; then
+    echo "boot did not reach app.whenReady() report directory initialization" >&2
+    return 1
+  fi
+  if [ -e "$ISOLATED_HOME/.config/YJAutoPostOnX/logs/fatal.log" ]; then
+    echo "fatal.log was written during windowed boot" >&2
+    cat "$ISOLATED_HOME/.config/YJAutoPostOnX/logs/fatal.log" >&2 || true
+    return 1
+  fi
+  if grep -E "App threw an error during load|Uncaught Exception:|FATAL:" "$ISOLATED_HOME/boot.log" >/dev/null 2>&1; then
+    echo "boot.log contains fatal/uncaught error output" >&2
+    return 1
+  fi
+}
 
-run_step "real user data untouched (~/.config/x-poster-*)" bash -c '
-  for d in "/root/.config/x-poster-bot-profile" "/root/.config/x-poster-profiles" "/root/.config/x-poster-shared"; do
+verify_real_user_data_untouched() {
+  local post_run_snapshot="$ISOLATED_HOME/.real-user-dirs.after"
+  snapshot_real_user_dirs > "$post_run_snapshot"
+  for d in "${REAL_USER_DIRS[@]}"; do
     if [ -e "$d" ]; then
-      echo "checking $d for anything newer than this run..."
+      local newer
+      newer="$(find "$d" -newer "$RUN_START_MARKER" -print -quit 2>/dev/null || true)"
+      if [ -n "$newer" ]; then
+        echo "real user data modified under $d: $newer" >&2
+        return 1
+      fi
     fi
   done
-'
+  if ! diff -u "$PRE_RUN_SNAPSHOT" "$post_run_snapshot"; then
+    echo "real user data snapshot changed during verification run" >&2
+    return 1
+  fi
+}
+
+run_step "windowed boot (45s, isolated HOME, must not crash before the timeout)" windowed_boot_check
+
+run_step "real user data untouched (~/.config/x-poster-*)" verify_real_user_data_untouched
 
 echo ""
 echo "✅ verify-release: all steps passed"

@@ -14,6 +14,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bot-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: Bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Bot Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-direct-x.txt
+      - name: Run Bot unified test suite (Node + Python + E2E)
+        run: npm test
+
   baseline-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -99,7 +120,7 @@ jobs:
           if-no-files-found: error
 
   package-appimage:
-    needs: [baseline-tests, workflow-tests, electron-tests]
+    needs: [bot-tests, baseline-tests, workflow-tests, electron-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     defaults:
@@ -131,6 +152,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ulimit -c 0
           APPIMAGE="$(find dist -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
           test -n "$APPIMAGE"
           chmod +x "$APPIMAGE"
@@ -139,16 +161,18 @@ jobs:
           export XDG_CONFIG_HOME="$HOME/.config"
           export XDG_CACHE_HOME="$HOME/.cache"
           export XDG_DATA_HOME="$HOME/.local/share"
+          export TMPDIR="$HOME/tmp"
           export APPIMAGE_EXTRACT_AND_RUN=1
-          mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$TMPDIR"
           set +e
-          timeout --signal=TERM --kill-after=10s 30s xvfb-run -a "$APPIMAGE" --no-sandbox 2>&1 | tee appimage-boot.log
+          xvfb-run -a -f "$HOME/.Xauthority" timeout --signal=TERM --kill-after=10s 30s "$APPIMAGE" --no-sandbox --disable-gpu 2>&1 | tee appimage-boot.log
           CODE=${PIPESTATUS[0]}
           set -e
-          if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 124 ]; then
+          if [ "$CODE" -ne 124 ] && [ "$CODE" -ne 137 ]; then
+            echo "Unexpected AppImage boot exit code: $CODE (expected 124 or 137 after 30s soak)" >&2
             exit "$CODE"
           fi
-          test -f "$HOME/.config/x-poster-shared/workflow.sqlite"
+          test -s "$HOME/.config/x-poster-shared/workflow.sqlite"
       - name: Upload AppImage boot failure log
         if: ${{ failure() && steps.boot.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
@@ -173,15 +197,27 @@ jobs:
           node <<'NODE'
           const fs = require('fs');
           const audit = JSON.parse(fs.readFileSync('audit-prod.json', 'utf8'));
-          const counts = audit.metadata?.vulnerabilities || {};
-          const high = Number(counts.high || 0);
-          const critical = Number(counts.critical || 0);
+          if (audit.error) {
+            console.error('npm audit returned an error payload:', JSON.stringify(audit.error));
+            process.exit(1);
+          }
+          const counts = audit.metadata && audit.metadata.vulnerabilities;
+          if (!counts || typeof counts !== 'object' || !Number.isInteger(counts.high) || !Number.isInteger(counts.critical)) {
+            console.error('npm audit output is missing valid metadata.vulnerabilities counts:', JSON.stringify(audit.metadata || null));
+            process.exit(1);
+          }
+          const { high, critical } = counts;
           console.log(`production audit: high=${high}, critical=${critical}`);
           if (high > 0 || critical > 0) process.exit(1);
           NODE
+      - name: Read package version
+        id: pkg_meta
+        shell: bash
+        run: |
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Upload verified AppImage
         uses: actions/upload-artifact@v4
         with:
-          name: YJAutoPostOnX-5.20.0-AppImage
+          name: YJAutoPostOnX-${{ steps.pkg_meta.outputs.version }}-AppImage
           path: Appimage/dist/*.AppImage
           if-no-files-found: error

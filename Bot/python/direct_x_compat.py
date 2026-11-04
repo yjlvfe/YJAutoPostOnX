@@ -1,8 +1,13 @@
-"""Per-client Twikit compatibility without process-global monkey-patching.
+"""Twikit compatibility layer for the isolated Direct-X bridge process.
 
-The direct-X bridge obtains its Client, transaction and User subclasses from
-``compatibility_client``. Third-party Twikit classes remain unchanged for every
-other client in the interpreter.
+The direct-X bridge obtains its ``CompatibilityClient``, ``DirectTransaction``,
+and ``DirectUser`` classes from ``compatibility_client()``. Because Twikit's own
+internal helpers (e.g. ``twikit.tweet.tweet_from_data``) instantiate
+``twikit.user.User`` directly rather than through a client factory method,
+``compatibility_client()`` also installs an idempotent, process-scoped
+normalization wrapper on ``twikit.user.User.__init__`` (via ``_compat_user_data``)
+so missing ``legacy.entities.description.urls`` or ``legacy.entities.url.urls``
+fields never raise ``KeyError: 'urls'`` inside the isolated single-account bridge.
 """
 from __future__ import annotations
 
@@ -289,6 +294,28 @@ def classify_x_tweet_rejection(raw_json=None, errors=None, text='', http_status=
 
 
 
+_SECRET_BEARER_RE = re.compile(r'Bearer\s+[A-Za-z0-9_\-\.~+/]+=*', re.IGNORECASE)
+_SECRET_KV_RE = re.compile(
+    r'\b(auth_token|ct0|twid|kdt|password|secret|api[_-]?key|access[_-]?token|authorization|cookie)'
+    r'(\s*[=:]\s*["\']?)([^\s,;&"\'\r\n]+)',
+    re.IGNORECASE,
+)
+_SECRET_JSON_RE = re.compile(
+    r'(["\'])(auth_token|ct0|twid|kdt|password|secret|api[_-]?key|access[_-]?token|authorization|cookie)\1'
+    r'(\s*:\s*["\'])([^"\']*)(["\'])',
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_text(value, max_len=512):
+    if not isinstance(value, str):
+        return None
+    text = _SECRET_BEARER_RE.sub('Bearer [REDACTED]', value)
+    text = _SECRET_JSON_RE.sub(r'\1\2\1\3[REDACTED]\5', text)
+    text = _SECRET_KV_RE.sub(r'\1\2[REDACTED]', text)
+    return text[:max_len]
+
+
 def _x_error_with_details(exc, payload=None, http_status=None):
     """Preserve X codes/messages on ALL exception paths, without printing raw JSON."""
     body = payload if isinstance(payload, dict) else {}
@@ -304,7 +331,7 @@ def _x_error_with_details(exc, payload=None, http_status=None):
     if code is not None and not isinstance(code, (str, int)):
         code = None
     message = first.get('message')
-    message = message[:512] if isinstance(message, str) else None
+    message = _scrub_secret_text(message, 512) if isinstance(message, str) else None
 
     exc.raw_json = body  # internal classification only: never dump full payload to logs
     exc.errors = errors
@@ -317,7 +344,7 @@ def _x_error_with_details(exc, payload=None, http_status=None):
     return exc
 
 def compatibility_client():
-    """Build a local Client subclass; never rewrite third-party classes/methods."""
+    """Build the CompatibilityClient subclass and install idempotent User.__init__ normalization."""
     validate_versions()
     from twikit.client.client import Client
     from twikit.errors import (
@@ -329,15 +356,16 @@ def compatibility_client():
     from twikit.x_client_transaction.transaction import ClientTransaction  # type: ignore
     from twikit.utils import find_dict  # type: ignore
 
-    # Monkeypatch twikit.user.User.__init__ so any User instantiated anywhere in twikit
-    # (e.g. inside twikit.tweet.tweet_from_data, get_user_tweets, search_tweet, etc.)
-    # automatically normalizes data through _compat_user_data to prevent KeyError: 'urls'.
+    # Idempotently wrap twikit.user.User.__init__ in this isolated bridge process
+    # so any User instantiated inside twikit (e.g. tweet_from_data, get_user_tweets,
+    # search_tweet) normalizes data through _compat_user_data to prevent KeyError: 'urls'.
     _orig_user_init = User.__init__
     if not getattr(User, '_compat_patched', False):
         def _safe_user_init(self, client, data):
             _orig_user_init(self, client, _compat_user_data(data))
         User.__init__ = _safe_user_init
         User._compat_patched = True
+        User._yj_safe_urls_patched = True
 
     class DirectUser(User):
         def __init__(self, client, data):
@@ -474,7 +502,7 @@ def compatibility_client():
                 reason = str(user_data.get('reason', ''))
                 error = UserUnavailable(msg or reason or 'UserUnavailable')
                 failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
-                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
+                if not failure and reason.strip().lower() == 'suspended':
                     failure = 'banned'
                 if failure:
                     error.account_failure = failure
@@ -491,7 +519,7 @@ def compatibility_client():
                 reason = str(user_data.get('reason', ''))
                 error = UserUnavailable(msg or reason or 'UserUnavailable')
                 failure = classify_x_account_failure(raw_json=user_data, text=msg or reason)
-                if not failure and (reason.lower() == 'suspended' or 'suspended' in msg.lower()):
+                if not failure and reason.strip().lower() == 'suspended':
                     failure = 'banned'
                 if failure:
                     error.account_failure = failure

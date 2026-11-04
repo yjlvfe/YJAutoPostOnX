@@ -8,7 +8,7 @@ const { escapeHtml, clean, richTable, preTable } = require('./tableUtils');
 function accountStatus(account) {
   const status = String(account.status || '').trim();
   if (status === 'محظور' || ['suspended', 'banned'].includes(status.toLowerCase())) return 'محظور';
-  if (status === 'كابتشا' || status.toLowerCase() === 'captcha') return 'كابتشا';
+  if (status === 'كابتشا' || status.startsWith('كابتشا') || status.toLowerCase() === 'captcha' || account.needsOwnerCaptcha === true) return 'كابتشا';
   return account.enabled === false ? 'غير مفعل' : 'مفعل';
 }
 
@@ -18,9 +18,9 @@ function formatAccountTable(state, { now = new Date(), refreshingIds, all = fals
     const status = String(a.status || '').trim();
     const isBanned = status === 'محظور' || ['suspended', 'banned'].includes(status.toLowerCase());
     if (isBanned) return false;
-    const isCaptcha = status === 'كابتشا' || status.toLowerCase() === 'captcha';
+    const isCaptcha = status === 'كابتشا' || status.startsWith('كابتشا') || status.toLowerCase() === 'captcha' || a.needsOwnerCaptcha === true;
     if (isCaptcha) return true;
-    const isInactive = status === 'غير مفعل' || status === 'خامل' || ['disabled', 'inactive'].includes(status.toLowerCase()) || a.enabled === false;
+    const isInactive = status === 'غير مفعل' || status === 'غير نشط' || status === 'خامل' || ['disabled', 'inactive'].includes(status.toLowerCase()) || a.enabled === false;
     if (isInactive) return false;
     return status === 'مفعل' || a.enabled !== false;
   });

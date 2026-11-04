@@ -11,9 +11,11 @@ const { normalizeAccountId } = require('./accounts');
 const exec = promisify(execFile);
 const BASE_PORT = 18801;
 const MAX_SLOTS = 5;
+const MAX_HOST_NORDVPN_CONTAINERS = 7;
 const CONTAINER_PREFIX = 'yj_autopost_vpn_';
 const DEFAULT_VPN_VERSION = '6.0.2';
-const VPN_IMAGE = process.env.VPN_IMAGE || `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}`;
+const PINNED_VPN_IMAGE = `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}`;
+const VPN_IMAGE = process.env.VPN_IMAGE || PINNED_VPN_IMAGE;
 const OWNER = 'yj-autopost';
 const CONTRACT = 'independent-v1';
 const TOKEN_TARGET = '/run/secrets/nordvpn_token';
@@ -30,6 +32,13 @@ function slotPort(slot) {
 }
 function containerName(slot) { slotPort(slot); return `${CONTAINER_PREFIX}${slot + 1}`; }
 
+function isCompatibleVpnImage(img) {
+  if (typeof img !== 'string') return false;
+  const trimmed = img.trim();
+  if (!trimmed || trimmed.endsWith(':latest')) return false;
+  return trimmed === PINNED_VPN_IMAGE;
+}
+
 async function validateTokenFile(file) {
   if (!file || !path.isAbsolute(file) || /[,\n\r]/.test(file)) {
     throw new Error('Set NORDVPN_TOKEN_FILE to an absolute, private token file path');
@@ -43,15 +52,41 @@ async function validateTokenFile(file) {
 }
 
 /** Dependency injection keeps tests away from the real Docker daemon and credentials. */
-function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tokenFileValidator = validateTokenFile, serverIp: initialServerIp = null } = {}) {
+function createDockerRuntime({
+  command = exec,
+  wait = sleep,
+  now = Date.now,
+  tokenFileValidator = validateTokenFile,
+  serverIp: initialServerIp = null,
+  networkInterfaces = () => os.networkInterfaces(),
+  allowContainerCreate: defaultAllowContainerCreate = false
+} = {}) {
   let cachedServerIp = (initialServerIp && isPublicIp(String(initialServerIp).trim()))
     ? String(initialServerIp).trim()
     : null;
 
-  async function docker(args, timeout = 15_000) {
-    try { return await command('docker', args, { timeout, maxBuffer: 1024 * 1024 }); }
-    catch { throw new Error(`VPN Docker ${args[0]} failed`); } // Never relay Docker inspect/env or command stderr.
+  async function execCommand(args, timeout = 15_000) {
+    try {
+      return await command('docker', args, { timeout, maxBuffer: 1024 * 1024 });
+    } catch (err) {
+      const combined = `${err?.message || ''} ${err?.stderr || ''} ${err?.stdout || ''}`;
+      if (/Too many connection attempts/i.test(combined)) {
+        throw Object.assign(
+          new Error(`VPN Docker ${args[0]} failed: Too many connection attempts`),
+          { code: 'VPN_PROVIDER_RATE_LIMIT', providerError: 'RATE_LIMIT' }
+        );
+      }
+      if (/Session Limit Reached|maximum number of devices|device limit/i.test(combined)) {
+        throw Object.assign(
+          new Error(`VPN Docker ${args[0]} failed: Session Limit Reached`),
+          { code: 'VPN_PROVIDER_SESSION_LIMIT', providerError: 'SESSION_LIMIT' }
+        );
+      }
+      throw new Error(`VPN Docker ${args[0]} failed`); // Never relay Docker inspect/env or raw command stderr.
+    }
   }
+  const docker = execCommand;
+
   async function containerStatus(slot) {
     const name = containerName(slot);
     try {
@@ -59,9 +94,7 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
       const [info] = JSON.parse(stdout);
       const labels = info.Config?.Labels || {};
       const img = info.Config?.Image || '';
-      const imageCompatible = img === VPN_IMAGE ||
-        img === `yj_autopost_vpn_image:${DEFAULT_VPN_VERSION}` ||
-        img === 'yj_autopost_vpn_image:latest';
+      const imageCompatible = isCompatibleVpnImage(img);
       return {
         exists: true, running: info.State?.Running === true, status: info.State?.Status,
         healthy: info.State?.Health?.Status === 'healthy', healthStatus: info.State?.Health?.Status || null,
@@ -114,12 +147,12 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
       return cachedServerIp;
     }
 
-    // 2. Check local network interfaces for a public IPv4 address
+    // 2. Check local network interfaces for a public IPv4 address (no outbound curl fallback)
     try {
-      const interfaces = os.networkInterfaces();
-      for (const iface of Object.values(interfaces)) {
+      const interfaces = networkInterfaces();
+      for (const iface of Object.values(interfaces || {})) {
         for (const net of iface || []) {
-          if (net.family === 'IPv4' && !net.internal && isPublicIp(net.address)) {
+          if ((net.family === 'IPv4' || net.family === 4) && !net.internal && isPublicIp(net.address)) {
             cachedServerIp = net.address;
             return cachedServerIp;
           }
@@ -127,18 +160,6 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
       }
     } catch {}
 
-    // 3. Fallback: query ipify WITHOUT --noproxy '*' and cache in memory to prevent repeated external requests
-    try {
-      const { stdout } = await command('curl', ['--ipv4', '--fail', '--max-time', '5',
-        '--silent', 'https://api.ipify.org'], { timeout: 7_000 });
-      const ip = stdout.trim();
-      if (isPublicIp(ip)) {
-        cachedServerIp = ip;
-        return cachedServerIp;
-      }
-    } catch {
-      return null;
-    }
     return null;
   }
   async function healthCheck(slot) {
@@ -155,14 +176,62 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     if (exitIp === serverIp) return { healthy: false, reason: 'ip_leak_detected' };
     return { healthy: true, exitIp, name: status.name, port };
   }
-  async function ensureContainer(slot, { tokenFile = process.env.NORDVPN_TOKEN_FILE, token, country = 'United_States', logger = () => {}, readyTimeoutMs = 180_000 } = {}) {
+  async function verifyPersistentVolumesExist(name) {
+    for (const volumeName of [`${name}_state`, `${name}_auth`]) {
+      try {
+        const { stdout } = await docker(['volume', 'inspect', volumeName]);
+        const parsed = JSON.parse(stdout || '[]');
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          throw new Error('Volume missing');
+        }
+      } catch {
+        throw Object.assign(
+          new Error(`Persistent NordVPN volume ${volumeName} does not exist; refusing container creation to protect 7-container device limit`),
+          { code: 'VPN_VOLUME_MISSING', volumeName }
+        );
+      }
+    }
+  }
+  async function verifyHostContainerCap(name) {
+    const { stdout } = await docker(['ps', '-a', '--format', '{{.Names}}\t{{.Image}}']);
+    const lines = String(stdout || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const nordContainers = lines.filter(line => /nordvpn|yj_autopost_vpn_/i.test(line));
+    if (nordContainers.length >= MAX_HOST_NORDVPN_CONTAINERS) {
+      throw Object.assign(
+        new Error(`Host-wide NordVPN container cap (${nordContainers.length}/${MAX_HOST_NORDVPN_CONTAINERS}) reached; refusing to create ${name}`),
+        { code: 'VPN_CONTAINER_CAP_EXCEEDED', count: nordContainers.length }
+      );
+    }
+  }
+  async function ensureContainer(slot, {
+    tokenFile = process.env.NORDVPN_TOKEN_FILE,
+    token,
+    country = 'United_States',
+    logger = () => {},
+    readyTimeoutMs = 180_000,
+    allowContainerCreate = defaultAllowContainerCreate
+  } = {}) {
     const name = containerName(slot), port = slotPort(slot);
     const status = await containerStatus(slot);
     if (status.exists && (!status.owned || !status.compatible)) {
       throw new Error(`VPN image migration required for ${name}; operator must replace it explicitly`);
     }
     if (!status.exists) {
+      if (allowContainerCreate !== true) {
+        throw Object.assign(
+          new Error(`VPN container ${name} is missing and automatic container creation is disabled (allowContainerCreate !== true)`),
+          { code: 'VPN_CONTAINER_CREATE_FORBIDDEN' }
+        );
+      }
       if (token) throw new Error('Inline VPN tokens are not supported; use NORDVPN_TOKEN_FILE');
+      if (!isCompatibleVpnImage(VPN_IMAGE)) {
+        throw Object.assign(
+          new Error(`VPN image ${VPN_IMAGE} is not compatible with pinned ${PINNED_VPN_IMAGE}`),
+          { code: 'VPN_IMAGE_INCOMPATIBLE' }
+        );
+      }
+      await verifyPersistentVolumesExist(name);
+      await verifyHostContainerCap(name);
       const file = await tokenFileValidator(tokenFile);
       if (!/^[A-Za-z][A-Za-z_ -]{0,63}$/.test(country)) throw new Error('Invalid VPN country');
       await docker(['run', '-d', '--name', name, '--restart', 'unless-stopped',
@@ -174,7 +243,7 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
         '--mount', `type=bind,src=${file},dst=${TOKEN_TARGET},readonly`,
         '--mount', `type=volume,src=${name}_state,dst=/var/lib/nordvpn`,
         '--mount', `type=volume,src=${name}_auth,dst=/root/.config/nordvpn`,
-        '-e', `NORDVPN_TOKEN_FILE=${TOKEN_TARGET}`, '-e', `VPN_COUNTRY=${country}`, VPN_IMAGE], 30_000);
+        '-e', `NORDVPN_TOKEN_FILE=${TOKEN_TARGET}`, '-e', `VPN_COUNTRY=${country}`, PINNED_VPN_IMAGE], 30_000);
     } else if (!status.running) {
       // Preserve the container identity, volumes and secret mount on cold recovery.
       await docker(['start', name], 30_000);
@@ -198,6 +267,9 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     if (!status.exists) return { removed: true, absent: true, name: status.name };
     // Even a known name is not proof of ownership. No automatic removal of legacy/unlabelled containers.
     if (!status.owned) throw new Error(`Refusing to remove unowned VPN container ${status.name}`);
+    if (status.running) {
+      await docker(['exec', status.name, 'nordvpn', 'disconnect'], 15_000).catch(() => {});
+    }
     await docker(['rm', '-f', status.name]); // No -v: identity/session volumes intentionally survive.
     return { removed: true, name: status.name };
   }
@@ -225,6 +297,7 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
     let lastError = null;
     let newExitIp = null;
     let newSubnet = null;
+    let providerRateLimited = false;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const city = preferredCities[attempt % preferredCities.length];
@@ -270,19 +343,26 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
         };
       } catch (err) {
         lastError = err.message || 'docker_exec_failed';
-        if (typeof lastError === 'string' && (lastError.includes('Too many connection attempts') || lastError.includes('Session Limit Reached'))) {
+        if (
+          err.code === 'VPN_PROVIDER_RATE_LIMIT' ||
+          err.code === 'VPN_PROVIDER_SESSION_LIMIT' ||
+          (typeof lastError === 'string' && (lastError.includes('Too many connection attempts') || lastError.includes('Session Limit Reached')))
+        ) {
+          providerRateLimited = true;
           logger(`Rate limit detected from VPN provider (${lastError}); halting rotation early`);
           break;
         }
         await wait(1000);
       }
     }
-    try {
-      const exitCheck = await getExitIp(port);
-      if (!exitCheck) {
-        await docker(['exec', name, 'nordvpn', 'connect', 'United_States'], 25_000).catch(() => {});
-      }
-    } catch {}
+    if (!providerRateLimited) {
+      try {
+        const exitCheck = await getExitIp(port);
+        if (!exitCheck) {
+          await docker(['exec', name, 'nordvpn', 'connect', 'United_States'], 25_000).catch(() => {});
+        }
+      } catch {}
+    }
 
     return {
       success: false,
@@ -294,20 +374,35 @@ function createDockerRuntime({ command = exec, wait = sleep, now = Date.now, tok
       subnet: newSubnet ? `${newSubnet}.0/24` : null
     };
   }
-  return { containerStatus, getExitIp, getServerIp, healthCheck, ensureContainer, destroyContainer,
-    rotateContainerIp, normalizeSubnet,
+  return {
+    execCommand,
+    containerStatus,
+    getExitIp,
+    getServerIp,
+    healthCheck,
+    ensureContainer,
+    destroyContainer,
+    rotateContainerIp,
+    normalizeSubnet,
+    isCompatibleVpnImage,
     testSocksProxy: async port => Boolean(await getExitIp(port)),
     setServerIp: ip => { cachedServerIp = (ip && isPublicIp(String(ip).trim())) ? String(ip).trim() : null; },
     getCachedServerIp: () => cachedServerIp,
-    clearCachedServerIp: () => { cachedServerIp = null; } };
+    clearCachedServerIp: () => { cachedServerIp = null; }
+  };
 }
 const runtime = createDockerRuntime();
 
 /** All operations through one manager serialize allocation/removal so a slot is not reused mid-release. */
 class VpnSlotManager {
-  constructor({ store, logger = () => {}, runtime: suppliedRuntime = runtime } = {}) {
+  constructor({ store, logger = () => {}, runtime: suppliedRuntime = runtime, allowContainerCreate = false } = {}) {
     if (!store) throw new Error('VpnSlotManager requires a store');
-    this.store = store; this.logger = logger; this.runtime = suppliedRuntime; this.pending = Promise.resolve(); this.readers = new Set();
+    this.store = store;
+    this.logger = logger;
+    this.runtime = suppliedRuntime;
+    this.allowContainerCreate = allowContainerCreate === true;
+    this.pending = Promise.resolve();
+    this.readers = new Set();
   }
   _exclusive(fn) { const work = this.pending.then(async () => { await Promise.all([...this.readers]); return fn(); }); this.pending = work.catch(() => {}); return work; }
   async acquireReadRoute(accountId, { signal } = {}) {
@@ -346,6 +441,7 @@ class VpnSlotManager {
     const id = normalizeAccountId(accountId);
     let slot;
     await this.store.update(state => {
+      slot = null;
       state.vpnSlots ||= {};
       const entries = Object.entries(state.vpnSlots);
       for (const [, value] of entries) slotPort(value);
@@ -360,13 +456,14 @@ class VpnSlotManager {
     return slot;
   }
   allocate(accountId) { return this._exclusive(() => this._allocate(accountId)); }
-  async _release(accountId) {
+  async _release(accountId, { destroyContainer: shouldDestroy = false } = {}) {
     const id = normalizeAccountId(accountId), slots = await this._slots();
     const slot = Object.hasOwn(slots, id) ? slots[id] : null;
     if (slot == null) return null;
     slotPort(slot);
-    // Shared stale mapping: remove only the mapping, never the other account's container.
-    if (!Object.entries(slots).some(([other, value]) => other !== id && value === slot)) {
+    // Static 5-slot containers are persistent infrastructure: never run `docker rm -f`
+    // during normal slot unbind or startup reconciliation unless explicitly requested.
+    if (shouldDestroy === true && !Object.entries(slots).some(([other, value]) => other !== id && value === slot)) {
       const result = await this.runtime.destroyContainer(slot);
       if (!result.removed) throw new Error('Failed to remove VPN container; reservation retained');
     }
@@ -377,7 +474,7 @@ class VpnSlotManager {
     this.logger(`Released VPN slot ${slot}`);
     return slot;
   }
-  release(accountId) { return this._exclusive(() => this._release(accountId)); }
+  release(accountId, options = {}) { return this._exclusive(() => this._release(accountId, options)); }
   /** Defaults to a read-only plan. Apply explicitly at startup/account-set replacement. */
   reconcile({ accountIds, dryRun = true } = {}) {
     return this._exclusive(async () => {
@@ -394,7 +491,7 @@ class VpnSlotManager {
         }
       }
       if (!dryRun && conflicts.length) throw new Error('Unsafe VPN mappings require operator repair');
-      if (!dryRun) for (const entry of stale) { await this._release(entry.accountId); released.push(entry); }
+      if (!dryRun) for (const entry of stale) { await this._release(entry.accountId, { destroyContainer: false }); released.push(entry); }
       return { dryRun, stale, conflicts, released };
     });
   }
@@ -409,7 +506,10 @@ class VpnSlotManager {
   ensure(accountId, options = {}) {
     return this._exclusive(async () => {
       const slot = await this._allocate(accountId);
-      const result = await this.runtime.ensureContainer(slot, { ...options, logger: this.logger });
+      const allowContainerCreate = options.allowContainerCreate !== undefined
+        ? options.allowContainerCreate === true
+        : this.allowContainerCreate === true;
+      const result = await this.runtime.ensureContainer(slot, { ...options, allowContainerCreate, logger: this.logger });
       return { ...result, slot };
     });
   }
@@ -457,6 +557,21 @@ class VpnSlotManager {
     return this.rotateAccount(accountIdOrSlot, options);
   }
 }
-module.exports = { VpnSlotManager, createDockerRuntime, validateTokenFile, ...runtime,
-  slotPort, containerName, BASE_PORT, MAX_SLOTS, CONTAINER_PREFIX, VPN_IMAGE,
-  DEFAULT_VPN_VERSION, NORDVPN_VERSION: DEFAULT_VPN_VERSION, EXIT_IP_SERVICES };
+module.exports = {
+  VpnSlotManager,
+  createDockerRuntime,
+  validateTokenFile,
+  isCompatibleVpnImage,
+  ...runtime,
+  slotPort,
+  containerName,
+  BASE_PORT,
+  MAX_SLOTS,
+  MAX_HOST_NORDVPN_CONTAINERS,
+  CONTAINER_PREFIX,
+  VPN_IMAGE,
+  PINNED_VPN_IMAGE,
+  DEFAULT_VPN_VERSION,
+  NORDVPN_VERSION: DEFAULT_VPN_VERSION,
+  EXIT_IP_SERVICES
+};
