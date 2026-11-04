@@ -319,9 +319,23 @@ async function run({
     bot.forensicLogger?.pruneBurnedSubnets().catch(error => {
       logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_prune_subnets_failed', operation: 'pruneBurnedSubnets', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
     });
+    bot.forensicLogger?.flushOutbox?.().catch(error => {
+      logStructured(logger, { level: 'warn', component: 'runner', event: 'forensic_outbox_flush_failed', operation: 'startup.flushOutbox', result: 'failed', errorCode: extractErrorCode(error), sanitizedError: sanitizeError(error) });
+    });
     const links = createLinkExports({ store: bot.store, dataDir, api, chatIds: effectiveChatIds, logger, clock });
-    const notify = async text => {
-      const results = await Promise.allSettled(effectiveChatIds.map(chat_id => Promise.resolve().then(() => api.sendMessage({ chat_id, text }))));
+    const notify = async (text, { targetChatIds } = {}) => {
+      const targetIds = (Array.isArray(targetChatIds) && targetChatIds.length > 0)
+        ? targetChatIds
+        : effectiveChatIds;
+      const results = await Promise.allSettled(targetIds.map(chat_id => Promise.resolve().then(async () => {
+        const res = await api.sendMessage({ chat_id, text });
+        return {
+          chat_id: String(chat_id),
+          ok: res?.ok === true || res?.result?.message_id != null || res?.message_id != null,
+          message_id: res?.result?.message_id ?? res?.message_id,
+          raw: res
+        };
+      })));
       for (let i = 0; i < results.length; i++) {
         const res = results[i];
         if (res.status === 'rejected') {
@@ -333,7 +347,7 @@ async function run({
             result: 'failed',
             errorCode: extractErrorCode(res.reason),
             sanitizedError: sanitizeError(res.reason),
-            details: { chatId: effectiveChatIds[i] }
+            details: { chatId: targetIds[i] }
           });
         } else {
           logStructured(logger, {
@@ -343,7 +357,7 @@ async function run({
             operation: 'sendMessage',
             result: 'delivered_to_telegram_api',
             details: {
-              chatId: effectiveChatIds[i],
+              chatId: targetIds[i],
               messageId: res.value?.message_id ?? null
             }
           });
@@ -554,7 +568,34 @@ async function run({
             if (isPermanent) {
               acc.enabled = false;
               acc.status = failure === 'captcha' ? 'كابتشا' : 'محظور';
+              if (failure === 'captcha') {
+                // A new incident must never inherit delivery receipts from the previous CAPTCHA.
+                // Repeated reports of the same unresolved challenge retain the same incident ID.
+                const isNewIncident = !acc.needsOwnerCaptcha || !acc.captchaIncidentId;
+                acc.needsOwnerCaptcha = true;
+                if (isNewIncident) {
+                  acc.captchaDetectedAt = Date.now();
+                  acc.captchaIncidentId = crypto.randomUUID();
+                  acc.captchaDeliveredChats = [];
+                  acc.captchaDeliveredIncidentId = acc.captchaIncidentId;
+                  delete acc.lastNotifiedCaptchaIncidentId;
+                  delete acc.lastCaptchaAlertAt;
+                }
+                acc.captchaCode = xErrorCode || 326;
+                acc.captchaReason = rejectionReason || reason || 'security_challenge_detected';
+                account.needsOwnerCaptcha = acc.needsOwnerCaptcha;
+                account.captchaDetectedAt = acc.captchaDetectedAt;
+                account.captchaCode = acc.captchaCode;
+                account.captchaReason = acc.captchaReason;
+                account.captchaIncidentId = acc.captchaIncidentId;
+                account.captchaDeliveredChats = [...(acc.captchaDeliveredChats || [])];
+                account.captchaDeliveredIncidentId = acc.captchaDeliveredIncidentId;
+                account.lastNotifiedCaptchaIncidentId = acc.lastNotifiedCaptchaIncidentId;
+              }
               acc.checkGeneration = crypto.randomUUID();
+              account.checkGeneration = acc.checkGeneration;
+              account.enabled = false;
+              account.status = acc.status;
               accountResult.isolated = true;
               accountResult.status = acc.status;
               if (currentSubnet) {
@@ -562,6 +603,20 @@ async function run({
                 const exists = s.burnedSubnets.some(e => (typeof e === 'string' ? e : e.subnet) === currentSubnet);
                 if (!exists) s.burnedSubnets.push({ subnet: currentSubnet, burnedAt: Date.now() });
               }
+            } else if (failure === 'auth_session_unverified') {
+              acc.enabled = false;
+              acc.unverifiedReason = reason || 'auth_session_unverified';
+              // Unverified authentication is not evidence that a pending CAPTCHA was solved.
+              // Keep the owner-only gate intact, including its generation and incident ID.
+              if (acc.needsOwnerCaptcha) {
+                account.needsOwnerCaptcha = true;
+                account.captchaIncidentId = acc.captchaIncidentId;
+              } else {
+                acc.status = 'غير محقق (جلسة غير مؤكدة)';
+                acc.checkGeneration = crypto.randomUUID();
+              }
+              accountResult.isolated = true;
+              accountResult.status = acc.status;
             } else if (isKnownParserError || isContentReject) {
               // A parser error or a GraphQL content rejection is not an
               // account failure. Still quarantine the post after dispatch.
@@ -615,7 +670,7 @@ async function run({
         const otherActive = (sNow.accounts || []).filter(a =>
           a.id !== accountId &&
           a.enabled !== false &&
-          !['محظور', 'كابتشا', 'معزول (3 إخفاقات)'].includes(a.status) &&
+          !['محظور', 'كابتشا', 'كابتشا (مطلوب حل يدوي)', 'غير محقق (جلسة غير مؤكدة)', 'معزول (3 إخفاقات)'].includes(a.status) &&
           (a.failures || 0) < 3 &&
           (run.accountIds || []).includes(a.id) &&
           accountCapacity(sNow, a, clock()).remaining > 0 &&
@@ -628,7 +683,9 @@ async function run({
           cooling.delete(accountId);
         } else if (accountResult.isolated) {
           cooling.delete(accountId);
-          vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+          if (failure !== 'captcha' && failure !== 'banned') {
+            vpnSlots?.rotate(accountId).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'vpn_rotate_failed', accountId, operation: 'handleAccountFailure.isolated.rotate', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
+          }
         } else if (isRateLimit) {
           const delayMs = Math.min(900000, Math.max(60000, (retryAfterSeconds || 60) * 1000));
           const entry = {
@@ -693,13 +750,46 @@ async function run({
         }).catch(err => logStructured(logger, { level: 'error', component: 'runner', event: 'forensic_record_failed', accountId, operation: 'handleAccountFailure.record', result: 'failed', errorCode: extractErrorCode(err), sanitizedError: sanitizeError(err) }));
 
         if (accountResult.isolated) {
-          if (otherActive.length > 0) {
-            await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}) ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
-            return { halt: false, skipDelay: true, isolated: true, failures: accountResult.failures };
+          if (accountResult.status === 'كابتشا' || failure === 'captcha' || account.needsOwnerCaptcha) {
+            // Unify live runner failure isolation through verified durable alerting
+            const alertFn = ui?.sendIsolationAlert?.bind(ui);
+            if (typeof alertFn === 'function') {
+              await alertFn({
+                account,
+                reason: 'captcha',
+                otherActiveCount: otherActive.length
+              }).catch(err => {
+                logStructured(logger, {
+                  level: 'error',
+                  component: 'runner',
+                  event: 'captcha_isolation_alert_failed',
+                  accountId,
+                  operation: 'handleAccountFailure.sendIsolationAlert',
+                  result: 'failed',
+                  errorCode: extractErrorCode(err),
+                  sanitizedError: sanitizeError(err)
+                });
+              });
+            } else {
+              const alertMsg = `تم عزل الحساب @${account.username || account.label} تلقائياً (السبب: كابتشا (مطلوب حل يدوي)) (حل التحقق من X بنفسك عبر الموقع/التطبيق الرسمي ثم اضغط تم الحل)${otherActive.length > 0 ? ` ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).` : '. لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.'}`;
+              await notify(alertMsg).catch(err => {
+                logStructured(logger, {
+                  level: 'error',
+                  component: 'runner',
+                  event: 'captcha_fallback_alert_failed',
+                  accountId,
+                  sanitizedError: sanitizeError(err)
+                });
+              });
+            }
           } else {
-            await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}). لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`);
-            return { halt: true, skipDelay: true, isolated: true, failures: accountResult.failures };
+            if (otherActive.length > 0) {
+              await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}) ومواصلة الدورة عبر بقية الحسابات (${otherActive.length}).`);
+            } else {
+              await notify(`تم عزل الحساب @${account.username || account.label} تلقائياً (${accountResult.status}). لا توجد حسابات مؤهلة متبقية؛ توقفت الدورة.`);
+            }
           }
+          return { halt: otherActive.length === 0, skipDelay: true, isolated: true, failures: accountResult.failures };
         }
 
         if (failure === 'ambiguous') {
@@ -1319,6 +1409,7 @@ async function run({
       return task;
     };
     const restored = await ui.restore();
+    await bot.forensicLogger?.flushOutbox?.().catch(() => {});
     await reconcileLinks({ startup: true }); // Interrupted work is a report boundary before any resume.
     if (restored?.resume) {
       const restoredState = await bot.store.load();

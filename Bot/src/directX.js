@@ -88,6 +88,7 @@ class DirectXAdapter {
       child = spawn(this.pythonExecutable, ['-I', '-u', path.resolve(__dirname, '../python/direct_x_bridge.py')], {
         stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8' },
       });
+      lease.bindChild?.(child.pid);
       lease.pid = child.pid;
     } catch (spawnError) {
       lease.release();
@@ -141,6 +142,59 @@ class DirectXAdapter {
     } catch {
       await this.close({ session });
       throw Object.assign(new Error('Direct X session could not be verified'), { code: signal?.aborted ? 'DIRECT_X_STOPPED' : 'DIRECT_X_IDENTITY_READ_UNAVAILABLE' });
+    }
+  }
+
+  async verifyAccount({ account, proxy, signal } = {}) {
+    const selected = account;
+    if (!selected || typeof selected !== 'object' || !selected.id) {
+      throw Object.assign(new Error('Account required for verification'), { code: 'DIRECT_X_ACCOUNT_REQUIRED' });
+    }
+    const effectiveProxy = proxy || selected.proxy;
+    validateProxy(effectiveProxy);
+
+    let session = null;
+    try {
+      session = await this.open({ account: { ...selected, verifyNetwork: true }, proxy: effectiveProxy, signal });
+      const identity = session?.identity;
+      const isAuthenticated = session?.state === 'authenticated' && identity?.authenticated === true;
+      const expectedUsername = handle(selected.username || selected.handle);
+      const actualUsername = handle(identity?.username);
+      const usernameMatch = !expectedUsername || (actualUsername && actualUsername === expectedUsername);
+      const expectedUserId = selected.userId ? String(selected.userId) : null;
+      const actualUserId = identity?.userId ? String(identity.userId) : null;
+      const userIdMatch = !expectedUserId || (actualUserId && actualUserId === expectedUserId);
+      const flagsClear = !identity?.challenge && !identity?.locked && !identity?.captcha &&
+                         !identity?.suspended && !identity?.banned && !identity?.accountFailure;
+
+      const verified = Boolean(isAuthenticated && usernameMatch && userIdMatch && flagsClear);
+      return {
+        verified,
+        authenticated: Boolean(isAuthenticated),
+        username: actualUsername || null,
+        userId: actualUserId || null,
+        challenge: Boolean(identity?.challenge),
+        locked: Boolean(identity?.locked),
+        captcha: Boolean(identity?.captcha || identity?.accountFailure === 'captcha'),
+        suspended: Boolean(identity?.suspended || identity?.banned || identity?.accountFailure === 'banned'),
+        accountFailure: identity?.accountFailure || null,
+        reason: verified ? null : (identity?.accountFailure || identity?.reason || (!usernameMatch || !userIdMatch ? 'identity_mismatch' : 'verification_failed'))
+      };
+    } catch (err) {
+      return {
+        verified: false,
+        authenticated: false,
+        challenge: false,
+        locked: false,
+        captcha: err.code === 'DIRECT_X_CAPTCHA' || err.accountFailure === 'captcha',
+        suspended: err.code === 'DIRECT_X_BANNED' || err.accountFailure === 'banned',
+        accountFailure: err.code || err.accountFailure || 'verification_failed',
+        reason: err.message
+      };
+    } finally {
+      if (session) {
+        await this.close({ session }).catch(() => {});
+      }
     }
   }
 

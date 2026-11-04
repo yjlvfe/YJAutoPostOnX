@@ -186,6 +186,10 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
         id: SETTLEMENT_TARGET.id,
         state: 'ambiguous',
         reason: 'unresolved_in_finally',
+        payload: {
+          text: SETTLEMENT_TARGET.fullText,
+          account: SETTLEMENT_TARGET.accountId
+        },
         attempt: {
           token: 'token-53d0-test',
           phase: 'dispatching',
@@ -238,7 +242,7 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
       assert.strictEqual(stateApplied.posting.quota['2026-11-03'][SETTLEMENT_TARGET.accountId], 10, 'Nov 3 quota must NOT be double-counted (remains 10)');
 
       // Verify audit log
-      const auditEvt = (stateApplied.forensicLogs || []).find(e => e.eventType === 'm13_settle_53d0f458_snowflake_published' || e.eventType === 'm12_settle_53d0f458_snowflake_published');
+      const auditEvt = (stateApplied.forensicLogs || []).find(e => e.eventType?.includes('settle_53d0f458_snowflake_published'));
       assert.ok(auditEvt, 'Settlement audit event must exist in forensicLogs');
       assert.ok(auditEvt.id, 'Audit event must have unique id');
       assert.ok(auditEvt.epoch, 'Audit event must have numeric epoch');
@@ -266,7 +270,7 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
           state: 'processing',
           payload: { text: SETTLEMENT_TARGET.fullText }
         }],
-        posting: { quota: { '2026-11-01': { [SETTLEMENT_TARGET.accountId]: 5 } } }
+        posting: { quota: { '2026-11-01': { [SETTLEMENT_TARGET.accountId]: 9 } } }
       });
       await store.load();
       await store.close();
@@ -288,10 +292,10 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
       const res1 = await settleItem53d0({ dbPath, logFilePath: logPath, isApply: true });
       assert.strictEqual(res1.settled, true);
 
-      // Verify quota is 6
+      // Verify quota is 10
       const store3 = new SqliteStore(dbPath);
       const state3 = await store3.load();
-      assert.strictEqual(state3.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 6);
+      assert.strictEqual(state3.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 10);
       await store3.close();
 
       // Re-running apply on already published item should be an idempotent no-op without re-incrementing quota
@@ -300,7 +304,7 @@ describe('M12: SQLite Production Safety Guard & Isolation Verification', () => {
 
       const store4 = new SqliteStore(dbPath);
       const state4 = await store4.load();
-      assert.strictEqual(state4.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 6, 'Quota must remain 6 (no double increment)');
+      assert.strictEqual(state4.posting.quota['2026-11-01'][SETTLEMENT_TARGET.accountId], 10, 'Quota must remain 10 (no double increment)');
       await store4.close();
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });

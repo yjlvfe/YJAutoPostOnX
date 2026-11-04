@@ -20,6 +20,7 @@ from direct_x_compat import _compat_user_data, classify_x_account_failure, class
 KNOWN_ACCOUNT_FAILURES = {
     'banned', 'captcha', 'cookie_expired', 'auth_rejected',
     'rate_limit', 'network_proxy_error', 'ambiguous', 'unknown',
+    'auth_session_unverified',
     'auth',  # legacy alias
 }
 
@@ -546,9 +547,12 @@ class DirectSession:
         if remote_state in ('locked', 'bounce', 'challenge', 'compromised', 'verification_required'):
             error = ValueError('auth_account_captcha')
             setattr(error, 'account_failure', 'captcha')
+            setattr(error, 'error_code', 326)
             raise error
         if remote_state != 'normal':
-            raise ValueError('auth_account_state_unverified')
+            error = ValueError('auth_account_state_unverified')
+            setattr(error, 'account_failure', 'auth_session_unverified')
+            raise error
         from urllib.parse import unquote
         twid = unquote(getattr(self.client, 'get_cookies', lambda: {})().get('twid', ''))
         candidate = twid[2:] if twid.startswith('u=') and numeric_id(twid[2:]) else None

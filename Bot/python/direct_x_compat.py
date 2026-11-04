@@ -208,6 +208,9 @@ def classify_x_account_failure(raw_json=None, errors=None, text='', http_status=
     if any(w in combined for w in _AMBIGUOUS_KEYWORDS):
         return 'ambiguous'
 
+    if 'auth_session_unverified' in combined or 'session_unverified' in combined or 'state_unverified' in combined:
+        return 'auth_session_unverified'
+
     if 'unknown' in combined or 'unspecified' in combined:
         return 'unknown'
 

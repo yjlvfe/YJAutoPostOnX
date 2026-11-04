@@ -1,0 +1,111 @@
+{
+  "manifest_type": "YJAutoPostOnX_M14_PR27_Final_VPS_Acceptance_Delivery_Manifest",
+  "timestamp_utc": "2026-11-03T20:03:30.555461+00:00",
+  "delivered_archive": {
+    "filename": "Round14_M14_PR27_Final_VPS_Acceptance_Evidence.zip",
+    "size_bytes": 225017,
+    "sha256": "e16cc43e65b408a2e26dd2e67b7ce239fb0ed51d2c1b37c1e71789745726da43"
+  },
+  "git_provenance": {
+    "pr_number": 27,
+    "pr_url": "https://github.com/yjlvfe/YJAutoPostOnX/pull/27",
+    "branch": "fix/m14-human-captcha-real-session-guard-and-recovery",
+    "candidate_head_sha": "d60cdf212d04f93a5e91bd639cf5642a3540c8b1",
+    "acceptance_head_sha": "fcdaad38cf803c95855b0d91fb3c346d3d5e2efe"
+  },
+  "github_ci_runs": {
+    "audit_completion": {
+      "run_id": 41707718029,
+      "url": "https://github.com/yjlvfe/YJAutoPostOnX/actions/runs/41707718029",
+      "status": "success",
+      "jobs": [
+        "baseline-tests",
+        "workflow-tests",
+        "electron-tests",
+        "package-appimage"
+      ]
+    },
+    "release_verify": {
+      "run_id": 41707722699,
+      "url": "https://github.com/yjlvfe/YJAutoPostOnX/actions/runs/41707722699",
+      "status": "success",
+      "jobs": [
+        "npm ci / test / test:electron / audit / build / package smoke"
+      ]
+    }
+  },
+  "telegram_delivery_receipts": [
+    {
+      "recipient": "owner",
+      "chat_id": "528864559",
+      "message_id": 1638,
+      "status": "delivered",
+      "telegram_api_ok": true
+    },
+    {
+      "recipient": "brother",
+      "chat_id": "5535435580",
+      "message_id": 1639,
+      "status": "delivered",
+      "telegram_api_ok": true
+    }
+  ],
+  "raw_telegram_responses": {
+    "528864559": {
+      "ok": true,
+      "result": {
+        "message_id": 1638,
+        "from": {
+          "id": 9010112420,
+          "is_bot": true,
+          "first_name": "Twitter Post",
+          "username": "YJAutoPostaiBot"
+        },
+        "chat": {
+          "id": 528864559,
+          "first_name": "\ud835\udce8\ud835\udcf8\ud835\udcfe\ud835\udcfc\ud835\udcee\ud835\udcef \ud835\udcd0\ud835\udcf5-\ud835\udcf4\ud835\udcea\ud835\udcf1\ud835\udcfd\ud835\udcea\ud835\udcf7\ud835\udd02",
+          "last_name": "\ud83d\udea8\u0644\u0646 \u0627\u0628\u062f\u0627 \u0627\u0644\u062a\u062d\u062f\u062b \u0645\u0639\u0643 \u0645\u0628\u0627\u0634\u0631\u0647",
+          "username": "YJLVFE",
+          "type": "private"
+        },
+        "date": 1793736209,
+        "document": {
+          "file_name": "Round14_M14_PR27_Final_VPS_Acceptance_Evidence.zip",
+          "mime_type": "application/zip",
+          "file_id": "BQACAgQAAxkDAAIGZmrqPhHH_DFxF34Uhu8mvM5OXpYYAAIjHwAC5StRUyqwFX-7iOsuPQQ",
+          "file_unique_id": "AgADIx8AAuUrUVM",
+          "file_size": 225017
+        },
+        "caption": "\ud83d\udee1\ufe0f *YJAutoPostOnX \u2014 M14 / PR #27 Final VPS Acceptance Evidence Package*\n\u2022 PR: #27 (Branch: fix/m14-human-captcha-real-session-guard-and-recovery)\n\u2022 Head: fcdaad3 | Candidate Head: d60cdf2\n\u2022 Status: ALL Final Acceptance Gates PASSED (Pre-Merge Accepted)\n\u2022 Mutex: SQLite transactional log mutex with PID starttime fencing\n\u2022 Alerting: Per-incident scoping, verified Bot API receipts & dual-admin retry\n\u2022 Tests: 207/207 Python PASS (0.76s) | 453/453 Node.js PASS (61.4s) | 100%\n\u2022 GitHub CI: 5/5 Checks PASS (Audit 41707718029 / Release 41707722699)\n\u2022 Safety: 0 Live POST | Cycle Stopped | 3 Accounts Disabled | 30 Items Quarantined"
+      }
+    },
+    "5535435580": {
+      "ok": true,
+      "result": {
+        "message_id": 1639,
+        "from": {
+          "id": 9010112420,
+          "is_bot": true,
+          "first_name": "Twitter Post",
+          "username": "YJAutoPostaiBot"
+        },
+        "chat": {
+          "id": 5535435580,
+          "first_name": "\u6697\u3044 ~ \ud83d\udda4",
+          "last_name": "~ Dark",
+          "username": "Ss_Dark_sS",
+          "type": "private"
+        },
+        "date": 1793736210,
+        "document": {
+          "file_name": "Round14_M14_PR27_Final_VPS_Acceptance_Evidence.zip",
+          "mime_type": "application/zip",
+          "file_id": "BQACAgQAAxkDAAIGZ2rqPhJR1Y4koyoinUqEorfGSc2MAAJvIgACaF5QU009Wk-OQ7fEPQQ",
+          "file_unique_id": "AgADbyIAAmheUFM",
+          "file_size": 225017
+        },
+        "caption": "\ud83d\udee1\ufe0f *YJAutoPostOnX \u2014 M14 / PR #27 Final VPS Acceptance Evidence Package*\n\u2022 PR: #27 (Branch: fix/m14-human-captcha-real-session-guard-and-recovery)\n\u2022 Head: fcdaad3 | Candidate Head: d60cdf2\n\u2022 Status: ALL Final Acceptance Gates PASSED (Pre-Merge Accepted)\n\u2022 Mutex: SQLite transactional log mutex with PID starttime fencing\n\u2022 Alerting: Per-incident scoping, verified Bot API receipts & dual-admin retry\n\u2022 Tests: 207/207 Python PASS (0.76s) | 453/453 Node.js PASS (61.4s) | 100%\n\u2022 GitHub CI: 5/5 Checks PASS (Audit 41707718029 / Release 41707722699)\n\u2022 Safety: 0 Live POST | Cycle Stopped | 3 Accounts Disabled | 30 Items Quarantined"
+      }
+    }
+  }
+}

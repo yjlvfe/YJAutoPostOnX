@@ -1,6 +1,9 @@
 'use strict';
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {
   MAX_PROJECT_SESSIONS,
   acquireSession,
@@ -10,8 +13,24 @@ const {
 } = require('../src/sessionGuard');
 
 describe('Session Cap Guard & 5-Session Strict Ceiling', () => {
+  let tempDir;
+  let testDbPath;
+
+  before(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'm13-sg-ceiling-'));
+    testDbPath = path.join(tempDir, 'leases.sqlite');
+    process.env.SESSION_GUARD_DB_PATH = testDbPath;
+  });
+
+  after(() => {
+    delete process.env.SESSION_GUARD_DB_PATH;
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   beforeEach(() => {
-    resetSessionsForTest();
+    resetSessionsForTest(testDbPath);
   });
 
   it('1. permits up to exactly 5 concurrent sessions', () => {

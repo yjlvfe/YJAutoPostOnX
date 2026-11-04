@@ -217,14 +217,23 @@ describe('Milestone M4 & M5: Lifecycle, Telegram CSV, Recovery & Governance Suit
     });
 
     test('1.5 Docker VPN health: SOCKS5 exit IPs match expected public IPs', async () => {
-      const checkPort = (port) => new Promise((resolve) => {
-        const curl = spawn('curl', ['-sS', '-m', '10', '--socks5', `127.0.0.1:${port}`, 'https://api.ipify.org']);
+      const singleCheck = (port, url) => new Promise((resolve) => {
+        const curl = spawn('curl', ['-sS', '-m', '10', '--socks5', `127.0.0.1:${port}`, url]);
         let data = '';
         curl.stdout.on('data', chunk => { data += chunk; });
         curl.on('close', code => {
           resolve({ code, ip: data.trim() });
         });
       });
+
+      const checkPort = async (port) => {
+        let res = await singleCheck(port, 'https://api.ipify.org');
+        if (res.code !== 0) {
+          // Fallback to icanhazip on transient external provider error
+          res = await singleCheck(port, 'https://icanhazip.com');
+        }
+        return res;
+      };
 
       const [res1, res2] = await Promise.all([checkPort(18801), checkPort(18802)]);
       assert.strictEqual(res1.code, 0, 'Port 18801 must respond cleanly');
