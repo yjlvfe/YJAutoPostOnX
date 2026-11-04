@@ -5,7 +5,9 @@
   "description": "Isolated offline foundation for the YJ Auto Post X Telegram bot",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node test/run_all.js",
+    "test:node": "node --test test/node/*.test.js test/e2e/*.e2e.test.js",
+    "test:python": "PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s test/python -p 'test_*.py' -v"
   },
   "engines": {
     "node": ">=22"
