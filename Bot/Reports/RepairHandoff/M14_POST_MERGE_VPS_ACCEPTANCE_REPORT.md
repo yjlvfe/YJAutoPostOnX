@@ -9,6 +9,8 @@
 > 4. **Approvals & Merges:** PR #28 and PR #29 stay OPEN pending independent owner review. Zero live X POST, zero quota mutation (`53d0`), zero account changes. Codex review and owner signoff remain PENDING across all 53 original P1–P6 tasks.
 
 
+> **Independent follow-up (2026-11-04):** The second evidence ZIP (`Round14_M14_Python_Reconciliation_Evidence.zip`; 145,298 bytes; SHA-256 `69047369c3e03db6ef225f3c4104a22c6754db000a3bf1f7c867f423f826e440`) contains a clean **207/207 Python run of main** (0.760s) and **69/69 targeted M14 Node PASS**, plus the full Node suite (**444 PASS, 7 FAIL, 2 SKIPPED**). It does **not** contain the claimed complete 208-test PR #29 Python output or the five repeat-run logs. Its `pre_fix_reproduced_failure_log.txt` aborts with `NameError: name 'json' is not defined`, so that reproduction log does not show the asserted returned object. Source review and GitHub CI independently support the Python fix, but source acceptance and raw evidence certification are distinct. An additional direct PR #29 correction closes a second unbounded `429` substring path in `fetch_err_str` and adds a regression test; obtain fresh logs for that HEAD. Do not claim the full VPS Node suite is green without accounting for the 7 live-VPN failures. Approvals remain PENDING; no X POST/requeue/settlement.
+
 **Deployed Base Commit:** `21c44df33b8118f91b48e38753fa1006a50c328c` (Merge PR #27 into `main`)  
 **Deployment Mechanism:** Fast-forward `main` to `origin/main` + controlled systemd restart of `yj-telegram-bot.service`  
 **Operational Status:** OPERATIONAL (NON-POSTING MODE) | `cycleState: stopped` | 0 LIVE POSTS  
@@ -28,7 +30,7 @@
 | **Item 53d0 Safety** | No production quota settlement | Item `53d0` preserved without `--apply`; historical counters untouched. | **PASS** ✓ |
 | **Session Ceiling** | Maximum 5 simultaneous sessions | Active leases in `session_leases.sqlite` = 0; host ceiling enforced. | **PASS** ✓ |
 | **Docker VPN Isolation** | 5 project slots; host cap <= 7 | Slots 0 & 1 active (`healthy`); slots 2-4 idle with persistent volumes intact; 0 extra containers. | **PASS** ✓ |
-| **Offline Test Harness** | Python and targeted Node acceptance | Python (PR #29 branch): **208/208 PASS**; targeted M14 Node: **69/69 PASS**; full Node: 444 PASS, 7 fail (on idle VPN slots 2-4). | **PASS** ✓<br>(Isolated) |
+| **Offline Test Harness** | Python branch + targeted M14 verification | **Python PR #29:** 208/208 reported (full raw evidence pending); **M14 Node:** 69/69 verified; **full VPS Node:** 444 pass / 7 fail / 2 skipped (live-VPN assumptions). | **PARTIAL / EVIDENCE PENDING** |
 | **Rollback Preparedness** | Standalone pre-deploy backup | Stored at `/root/.backup_yj_autopost_m14_postmerge_20261104` with SHA-256 validation. | **PASS** ✓ |
 
 ---
