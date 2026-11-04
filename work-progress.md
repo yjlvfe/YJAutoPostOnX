@@ -10,7 +10,7 @@ Complete the user's ordered surgical audit of YJAutoPostOnX before any new archi
 * Saved and checked a second Git bundle, tracked-source archive and online SQLite backups for current source and runtime state under `source-drift-20261104`; restored and compared three changed files and checked database integrity.
 * Read all 72 current historical Markdown report bodies; indexed 24 non-Markdown records and streamed all 21 archives successfully including ZIP CRC checks. Recorded all 53 historical IDs and sources with claims unverified. Raw archived evidence and full claim validation remain incomplete. Began source audit lanes for Telegram/runtime, VPN/session, X transport, persistence and CI/AppImage; cross-flow coverage remains incomplete.
 * Isolated diagnostics reproduced an evidence-reconciliation failure, two X confirmation/incident-propagation edge cases, CAPTCHA activation and CSV replacement failures, a stale dispatch admission flag after an SQLite revision retry, and a worktree-relative production DB guard gap. Real-world occurrence and full production reachability remain unverified.
-* Rechecked main CI and X source after PR #28/#29 merges; main release CI passed for AppImage only, not Bot. Generated a provisional static dependency index; historical narrative review and full flow coverage remain open.
+* Rechecked main CI and X source after PR #28/#29 merges; main release CI passed for AppImage only, not Bot. Generated a provisional static dependency index and classified FINDING-001–033 individually with scoped current-source evidence; historical test proof and full flow coverage remain open.
 
 # Currently Working On
 
