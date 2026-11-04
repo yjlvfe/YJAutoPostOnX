@@ -1,3 +1,14 @@
+## Independent Post-Merge Evidence Exception — 2026-11-04 (PR #28, signoff HOLD)
+
+- The user-supplied post-merge evidence ZIP `Round14_M14_PostMerge_VPS_Acceptance_Evidence.zip` has **99,071 bytes** and SHA-256 `c989b450ffafdc4b28b303b24f6dfeff49c64686be7e628e31779ef00f862571` (matches delivery claim).
+- **Raw Python log contradicts the acceptance narrative**: `Ran 207 tests in 0.774s`, `FAILED (failures=1)`, with `test_challenger_r3_m2_gen2.TestAdversarialTimelineRecovery.test_create_tweet_author_mismatch_timeline_not_found_returns_author_unverified` expecting `ambiguous=True` but receiving false. **No owner/Codex signoff; do not declare 207/207 PASS.**
+- Raw targeted M14 Node run: **69/69 PASS**. The complete full Node 453-test log is not present in this particular ZIP; historical CI success is separate evidence.
+- `docker_ps_full.txt` shows 2 project VPN and 2 external NordVPN containers running; references to 7 total running NordVPN require reconciliation with all/idle inventory.
+- The deployed service was reported active, publishing cycle stopped, target three accounts disabled, 30 items ambiguous, and 0 active lease sessions. These reflect the supplied snapshot, not a new independent live VPS connection.
+- **Gate:** reproduce the one Python failure on isolated nonproduction fixtures, correct any code/test defect without weakening ambiguous-result quarantine, provide complete clean raw rerun and fixed manifest. Keep PR #28 open; no X live POST, production quota settlement, or user account enablement without separate approval. Preserve all 33 FINDING + 20 ADD task identities and PENDING signoffs.
+
+---
+
 # YJAutoPostOnX — Progress History
 
 ## Baseline Status (2026-11-01T07:34:30Z)
