@@ -1,5 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 app.disableHardwareAcceleration();
+app.commandLine?.appendSwitch?.('in-process-gpu');
+app.commandLine?.appendSwitch?.('disable-gpu');
 const path = require('path');
 const fs = require('fs').promises;
 const os = require('os');
@@ -107,6 +109,14 @@ app.whenReady().then(async () => {
   // Durable-store housekeeping. Started after the window so it never delays the
   // first paint; the first sweep is a further minute out.
   scheduleMaintenance();
+
+  const shutdownOnSignal = () => {
+    if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null; }
+    try { void durableQueue.closeStore(); } catch { /* best-effort */ }
+    app.quit();
+  };
+  process.once('SIGTERM', shutdownOnSignal);
+  process.once('SIGINT', shutdownOnSignal);
 });
 
 app.on('window-all-closed', () => {

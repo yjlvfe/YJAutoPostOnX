@@ -17,6 +17,35 @@ env:
   IYH_KEY: ""
 
 jobs:
+  bot-tests:
+    name: Bot unit & integration tests (Node + Python)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: Bot
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node (matches Bot/package.json engines)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Bot Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-direct-x.txt
+
+      - name: Run Bot unified test suite (Node + Python + E2E)
+        run: npm test
+
   verify:
     name: npm ci / test / test:electron / audit / build / package smoke
     runs-on: ubuntu-24.04
@@ -60,6 +89,6 @@ jobs:
           path: |
             Appimage/dist/builder-*.yml
             Appimage/dist/builder-effective-config.yaml
-            /tmp/xposter-verify-home-*/boot.log
-          if-no-files-found: ignore
+            Appimage/dist/boot.log
+          if-no-files-found: warn
           retention-days: 14
