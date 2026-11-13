@@ -1,0 +1,9 @@
+# Runtime data contains private sessions, pending content and owner state.
+data/
+.env.local
+.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.agent_work/
+.pytest_cache/

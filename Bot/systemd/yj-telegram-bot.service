@@ -1,0 +1,40 @@
+# Reviewed deployment unit; offline verification never installs or restarts it.
+[Unit]
+Description=YJ Auto Post on X - Telegram Bot
+After=network-online.target docker.service postgresql.service
+Wants=network-online.target docker.service postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Projects/YJAutoPostOnX/Bot
+Environment=BOT_APP_DIR=/root/Projects/YJAutoPostOnX/Bot
+Environment=BOT_DATA_DIR=/root/Projects/YJAutoPostOnX/Bot/data
+Environment=NODE_ENV=production
+Environment=STORAGE_BACKEND=postgres
+# env.js owns private .env.local parsing; do not change dotenv semantics here.
+Environment=PGHOST=127.0.0.1
+Environment=PGPORT=5432
+Environment=PGUSER=yj_bot_app
+Environment=PGDATABASE=yj_autopost
+Environment=PG_PASSWORD_FILE=/root/Projects/YJAutoPostOnX/Bot/data/secrets/pg_password
+Environment=DIRECT_X_PYTHON=/root/Projects/YJAutoPostOnX/Bot/.venv-direct-x/bin/python
+Environment=NORDVPN_TOKEN_FILE=/root/Projects/YJAutoPostOnX/Bot/data/secrets/nordvpn_token
+ExecStart=/root/Projects/YJAutoPostOnX/Bot/systemd/telegram-bot-launcher.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yj-telegram-bot
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/root/Projects/YJAutoPostOnX/Bot/data
+ReadWritePaths=/root/Projects/YJAutoPostOnX/Bot/logs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

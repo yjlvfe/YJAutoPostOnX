@@ -1,0 +1,21 @@
+{
+  "name": "yj-auto-post-x-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated offline foundation for the YJ Auto Post X Telegram bot",
+  "type": "commonjs",
+  "scripts": {
+    "test": "npm run test:offline",
+    "test:offline": "npm run test:node && npm run test:python",
+    "test:node": "node test/tooling/testRunner.js offline",
+    "test:python": "\"${DIRECT_X_PYTHON:-.venv-direct-x/bin/python}\" -I -B test/tooling/offline_python.py",
+    "test:integration:pg": "node test/tooling/testRunner.js pg",
+    "test:all": "npm test && npm run test:integration:pg"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
+}

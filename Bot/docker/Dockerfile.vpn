@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+FROM ubuntu:24.04
+ARG DEBIAN_FRONTEND=noninteractive
+# Pinned NordVPN package version for reproducible releases (FINDING-031).
+ARG NORDVPN_VERSION="6.0.2"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg iproute2 iptables nftables procps util-linux tini microsocks \
+    && curl -fsSL https://repo.nordvpn.com/gpg/nordvpn_public.asc \
+      | gpg --dearmor -o /usr/share/keyrings/nordvpn.gpg \
+    && gpg --show-keys --with-colons /usr/share/keyrings/nordvpn.gpg \
+      | grep -q '^fpr:::::::::BC5480EFEC5C081CE5BCFBE26B219E535C964CA1:' \
+    && printf '%s\n' 'deb [signed-by=/usr/share/keyrings/nordvpn.gpg] https://repo.nordvpn.com/deb/nordvpn/debian stable main' \
+      > /etc/apt/sources.list.d/nordvpn.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "nordvpn${NORDVPN_VERSION:+=$NORDVPN_VERSION}" \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin --uid 10001 socks \
+    && mkdir -p /run/nordvpn /var/lib/nordvpn /root/.config/nordvpn \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 entrypoint.sh healthcheck.sh sticky-health.sh check-pin.sh /usr/local/bin/
+COPY --chmod=0755 healthcheck.sh /usr/local/bin/probe-health.sh
+ENV NORDVPN_TOKEN_FILE=/run/secrets/nordvpn_token VPN_COUNTRY=United_States
+EXPOSE 1080/tcp
+VOLUME ["/var/lib/nordvpn", "/root/.config/nordvpn"]
+HEALTHCHECK --interval=20s --timeout=35s --start-period=180s --retries=3 \
+  CMD ["/usr/local/bin/healthcheck.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
